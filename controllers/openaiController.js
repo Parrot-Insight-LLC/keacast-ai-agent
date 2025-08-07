@@ -9,8 +9,8 @@ const {
 const MEMORY_TTL = 3600; // 1 hour
 const MAX_MEMORY = 20; // limit memory context size
 
-function buildSessionKey(prefix, req) {
-  return `${prefix}:${req.body.sessionId || req.user?.id || 'anonymous'}`;
+function buildSessionKey(req) {
+  return `session:${req.body.sessionId || req.user?.id || 'anonymous'}`;
 }
 
 // ----------------------------
@@ -18,16 +18,30 @@ function buildSessionKey(prefix, req) {
 // ----------------------------
 exports.chat = async (req, res) => {
     try {
+      console.log('Chat endpoint called with body:', JSON.stringify(req.body, null, 2));
+      
       const { message, systemPrompt } = req.body;
-      if (!message) return res.status(400).json({ error: 'Message is required' });
+      if (!message) {
+        console.log('Chat endpoint: Missing message in request body');
+        return res.status(400).json({ error: 'Message is required' });
+      }
   
-      const sessionKey = buildSessionKey('chat', req);
+      const sessionKey = buildSessionKey(req);
       const token = req.headers.authorization?.split(' ')[1];
       const userId = req.user?.id;
-  
+      
+      console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
+
       // Load prior conversation memory
-      let history = await redis.get(sessionKey);
-      history = history ? JSON.parse(history) : [];
+      let history = [];
+      try {
+        const historyData = await redis.get(sessionKey);
+        history = historyData ? JSON.parse(historyData) : [];
+        console.log('Chat endpoint: Loaded history length:', history.length);
+      } catch (redisError) {
+        console.warn('Chat endpoint: Redis history load failed:', redisError.message);
+        history = [];
+      }
   
       // 🔌 Optional Tool Context (for better reasoning)
       let userContext = {};
@@ -43,8 +57,9 @@ exports.chat = async (req, res) => {
           categories: categories || [],
           shoppingList: shoppingList || []
         };
+        console.log('Chat endpoint: Loaded user context with', Object.keys(userContext).length, 'contexts');
       } catch (err) {
-        console.warn('Tool context failed to load:', err.message);
+        console.warn('Chat endpoint: Tool context failed to load:', err.message);
       }
   
       // 🧠 Compose the prompt with memory and context
@@ -57,8 +72,11 @@ exports.chat = async (req, res) => {
         { role: 'user', content: message }
       ];
   
+      console.log('Chat endpoint: Calling OpenAI with', formattedMessages.length, 'messages');
+      
       // 🎯 Call OpenAI
       const aiResponse = await queryAzureOpenAI(formattedMessages);
+      console.log('Chat endpoint: Received OpenAI response, length:', aiResponse?.length || 0);
   
       const updatedHistory = [
         ...history,
@@ -66,7 +84,12 @@ exports.chat = async (req, res) => {
         { role: 'assistant', content: aiResponse }
       ].slice(-MAX_MEMORY);
   
-      await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
+      try {
+        await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
+        console.log('Chat endpoint: Saved updated history to Redis');
+      } catch (redisError) {
+        console.warn('Chat endpoint: Failed to save history to Redis:', redisError.message);
+      }
   
       res.json({
         response: aiResponse,
@@ -75,7 +98,20 @@ exports.chat = async (req, res) => {
       });
   
     } catch (error) {
-      console.error(error.response?.data || error.message);
+      console.error('Chat endpoint error:', error);
+      console.error('Error stack:', error.stack);
+      
+      // More specific error messages for debugging
+      if (error.code === 'ECONNREFUSED') {
+        return res.status(503).json({ error: 'Service temporarily unavailable - Redis connection failed' });
+      }
+      if (error.response?.status === 401) {
+        return res.status(401).json({ error: 'Azure OpenAI authentication failed' });
+      }
+      if (error.response?.status === 429) {
+        return res.status(429).json({ error: 'Rate limit exceeded' });
+      }
+      
       res.status(500).json({ error: 'Error communicating with Azure OpenAI' });
     }
   };
@@ -85,11 +121,27 @@ exports.chat = async (req, res) => {
 // ----------------------------
 exports.analyzeTransactions = async (req, res) => {
   try {
+    console.log('Analyze transactions endpoint called');
+    
     const { transactions } = req.body;
-    const sessionKey = buildSessionKey('summary', req);
+    if (!transactions || !Array.isArray(transactions)) {
+      console.log('Analyze transactions: Missing or invalid transactions array');
+      return res.status(400).json({ error: 'Transactions array is required' });
+    }
+    
+    console.log('Analyze transactions: Processing', transactions.length, 'transactions');
+    
+    const sessionKey = buildSessionKey(req);
 
-    let history = await redis.get(sessionKey);
-    history = history ? JSON.parse(history) : [];
+    let history = [];
+    try {
+      const historyData = await redis.get(sessionKey);
+      history = historyData ? JSON.parse(historyData) : [];
+      console.log('Analyze transactions: Loaded history length:', history.length);
+    } catch (redisError) {
+      console.warn('Analyze transactions: Redis history load failed:', redisError.message);
+      history = [];
+    }
 
     const formattedMessages = [
       {
@@ -108,7 +160,9 @@ exports.analyzeTransactions = async (req, res) => {
       { role: 'user', content: `Here are the latest transactions:\n${JSON.stringify(transactions)}` }
     ];
 
+    console.log('Analyze transactions: Calling OpenAI with', formattedMessages.length, 'messages');
     const aiResponse = await queryAzureOpenAI(formattedMessages);
+    console.log('Analyze transactions: Received OpenAI response, length:', aiResponse?.length || 0);
 
     const updatedHistory = [
       ...history,
@@ -116,24 +170,77 @@ exports.analyzeTransactions = async (req, res) => {
       { role: 'assistant', content: aiResponse }
     ].slice(-MAX_MEMORY);
 
-    await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
+    try {
+      await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
+      console.log('Analyze transactions: Saved updated history to Redis');
+    } catch (redisError) {
+      console.warn('Analyze transactions: Failed to save history to Redis:', redisError.message);
+    }
 
     res.json({ insights: aiResponse });
 
   } catch (error) {
-    console.error(error.response?.data || error.message);
+    console.error('Analyze transactions error:', error);
+    console.error('Error stack:', error.stack);
+    
+    // More specific error messages for debugging
+    if (error.code === 'ECONNREFUSED') {
+      return res.status(503).json({ error: 'Service temporarily unavailable - Redis connection failed' });
+    }
+    if (error.response?.status === 401) {
+      return res.status(401).json({ error: 'Azure OpenAI authentication failed' });
+    }
+    if (error.response?.status === 429) {
+      return res.status(429).json({ error: 'Rate limit exceeded' });
+    }
+    
     res.status(500).json({ error: 'Error communicating with Azure OpenAI' });
   }
 };
 
 exports.redisTest = async (req, res) => {
     try {
+      console.log('Redis test endpoint called');
       await redis.set('test-key', 'Hello from Keacast Redis!', 'EX', 60);
       const value = await redis.get('test-key');
-      res.json({ success: true, value });
+      console.log('Redis test: Successfully set and retrieved test value');
+      res.json({ 
+        success: true, 
+        value,
+        note: 'Redis connection working. Chat and summarize endpoints now share unified conversation history.'
+      });
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Redis connection failed' });
+      console.error('Redis test error:', error);
+      res.status(500).json({ error: 'Redis connection failed', details: error.message });
     }
   };
+
+// ----------------------------
+// 🗑️ Clear conversation history
+// ----------------------------
+exports.clearHistory = async (req, res) => {
+  try {
+    console.log('Clear history endpoint called');
+    
+    const sessionKey = buildSessionKey(req);
+    console.log('Clear history: Session key:', sessionKey);
+    
+    try {
+      await redis.del(sessionKey);
+      console.log('Clear history: Successfully cleared session history');
+      res.json({ 
+        success: true, 
+        message: 'Conversation history cleared successfully',
+        sessionKey: sessionKey
+      });
+    } catch (redisError) {
+      console.warn('Clear history: Redis delete failed:', redisError.message);
+      res.status(500).json({ error: 'Failed to clear history', details: redisError.message });
+    }
+    
+  } catch (error) {
+    console.error('Clear history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
   
