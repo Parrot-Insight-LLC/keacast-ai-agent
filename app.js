@@ -2,11 +2,26 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const requestId = require('./middleware/requestId');
+const logging = require('./middleware/logging');
+const securityHeaders = require('./middleware/securityHeaders');
+// Pick ONE: simple (dev) or redis (prod)
+const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit.redis'); 
+// const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit.simple');
 
 const openaiRoutes = require('./routes/openaiRoutes');
 const authRoutes = require('./routes/authRoutes');
 
 const app = express();
+
+app.set('trust proxy', 1);
+
+// Middleware
+app.use(requestId);
+app.use(logging);
+app.use(securityHeaders);
+app.use(globalLimiter);
+app.use(sensitiveLimiter);
 
 // Enhanced CORS configuration for production
 const corsOptions = {
@@ -37,6 +52,9 @@ app.get('/health', (req, res) => {
 });
 
 // Routes
+// Apply stricter limit on LLM-intensive endpoints
+app.use('/api/agent/chat', sensitiveLimiter);
+app.use('/api/agent/summarize', sensitiveLimiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/agent', openaiRoutes);
 
@@ -66,14 +84,13 @@ app.get('/', (req, res) => {
   });
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ 
-    error: 'Endpoint not found',
-    path: req.originalUrl,
-    method: req.method
-  });
-});
+
+// 404 helper
+app.use((req, res) => res.status(404).json({ error: 'Not found', requestId: req.id }));
+
+// Error handler LAST
+const errorHandler = require('./middleware/errorHandler');
+app.use(errorHandler);
 
 // Global error handler
 app.use((err, req, res, next) => {

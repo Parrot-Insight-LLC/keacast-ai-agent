@@ -11,7 +11,13 @@
     "test:history": "node test-unified-history.js",
     "deploy:check": "node -e \"console.log('Environment check:'); console.log('NODE_ENV:', process.env.NODE_ENV); console.log('PORT:', process.env.PORT); console.log('AZURE_OPENAI_ENDPOINT:', process.env.AZURE_OPENAI_ENDPOINT ? 'SET' : 'NOT SET'); console.log('REDIS_HOST:', process.env.REDIS_HOST ? 'SET' : 'NOT SET');\""
   },
-  "keywords": ["ai", "openai", "azure", "financial", "assistant"],
+  "keywords": [
+    "ai",
+    "openai",
+    "azure",
+    "financial",
+    "assistant"
+  ],
   "author": "",
   "license": "ISC",
   "engines": {
@@ -23,9 +29,15 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^4.18.2",
+    "express-rate-limit": "^8.0.1",
+    "helmet": "^8.1.0",
     "ioredis": "^5.7.0",
     "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.1"
+    "morgan": "^1.10.1",
+    "pino": "^9.8.0",
+    "pino-http": "^10.5.0",
+    "rate-limiter-flexible": "^7.2.0",
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
