@@ -3,12 +3,16 @@
 
 const axios = require('axios');
 
-const BASE_URL = process.env.KEACAST_API_BASE_URL || 'https://cashflow-backend-production.herokuapp.com/';
-const AUTH_HEADER = (token) => ({
-  headers: {
-    Authorization: `Bearer ${token}`
-  }
-});
+// Normalize base URL to avoid double slashes when composing paths
+const RAW_BASE_URL = process.env.KEACAST_API_BASE_URL || 'https://cashflow-backend-production.herokuapp.com';
+const BASE_URL = RAW_BASE_URL.replace(/\/+$/, '');
+
+// Only attach Authorization header when token is provided
+const AUTH_HEADER = (token) => (
+  token
+    ? { headers: { Authorization: `Bearer ${token}` } }
+    : { headers: {} }
+);
 
 // --------------------------------------
 // Tool Functions

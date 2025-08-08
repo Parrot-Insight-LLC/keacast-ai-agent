@@ -11,7 +11,7 @@ const app = express();
 // Enhanced CORS configuration for production
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production' 
-    ? process.env.ALLOWED_ORIGINS?.split(',') || ['https://yourdomain.com']
+    ? process.env.ALLOWED_ORIGINS?.split(',') || ['keacast-ai-e9cndfc4ethmgphf.eastus2-01.azurewebsites.net']
     : true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],

@@ -13,6 +13,43 @@ function buildSessionKey(req) {
   return `session:${req.body.sessionId || req.user?.id || 'anonymous'}`;
 }
 
+function truncateText(text, maxChars) {
+  if (text === undefined || text === null) return '';
+  const str = String(text).trim();
+  if (str.length <= maxChars) return str;
+  return str.slice(0, Math.max(0, maxChars - 1)) + '…';
+}
+
+function extractAuthFromRequest(req) {
+  const bearerToken = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.split(' ')[1]
+    : undefined;
+  const headerToken = req.headers['x-auth-token'];
+  const bodyToken = req.body?.token;
+  const token = bearerToken || headerToken || bodyToken;
+
+  const headerUserId = req.headers['x-user-id'];
+  const bodyUserId = req.body?.userId;
+  const jwtUserId = req.user?.id;
+  const userId = bodyUserId || headerUserId || jwtUserId;
+
+  return { token, userId };
+}
+
+function extractContextFromBody(req) {
+  const accounts = Array.isArray(req.body?.accounts) ? req.body.accounts : undefined;
+  const categories = Array.isArray(req.body?.categories) ? req.body.categories : undefined;
+  const shoppingList = Array.isArray(req.body?.shoppingList) ? req.body.shoppingList : undefined;
+  if (accounts || categories || shoppingList) {
+    return {
+      accounts: accounts || [],
+      categories: categories || [],
+      shoppingList: shoppingList || []
+    };
+  }
+  return undefined;
+}
+
 // ----------------------------
 // 🧠 Chat with memory
 // ----------------------------
@@ -27,8 +64,7 @@ exports.chat = async (req, res) => {
       }
   
       const sessionKey = buildSessionKey(req);
-      const token = req.headers.authorization?.split(' ')[1];
-      const userId = req.user?.id;
+      const { token, userId } = extractAuthFromRequest(req);
       
       console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
 
@@ -44,22 +80,31 @@ exports.chat = async (req, res) => {
       }
   
       // 🔌 Optional Tool Context (for better reasoning)
-      let userContext = {};
-      try {
-        const [accounts, categories, shoppingList] = await Promise.all([
-          getUserAccounts({ userId, token }),
-          getUserCategories({ userId, token }),
-          getShoppingList({ userId, token })
-        ]);
-  
-        userContext = {
-          accounts: accounts || [],
-          categories: categories || [],
-          shoppingList: shoppingList || []
-        };
-        console.log('Chat endpoint: Loaded user context with', Object.keys(userContext).length, 'contexts');
-      } catch (err) {
-        console.warn('Chat endpoint: Tool context failed to load:', err.message);
+      // Prefer explicit context sent in the request body when provided
+      let userContext = extractContextFromBody(req) || {};
+
+      // Fetch from APIs only if we have credentials and no explicit context provided
+      if (!userContext || Object.keys(userContext).length === 0) {
+        if (userId && token) {
+          try {
+            const [accounts, categories, shoppingList] = await Promise.all([
+              getUserAccounts({ userId, token }),
+              getUserCategories({ userId, token }),
+              getShoppingList({ userId, token })
+            ]);
+
+            userContext = {
+              accounts: accounts || [],
+              categories: categories || [],
+              shoppingList: shoppingList || []
+            };
+            console.log('Chat endpoint: Loaded user context with', Object.keys(userContext).length, 'contexts');
+          } catch (err) {
+            console.warn('Chat endpoint: Tool context failed to load:', err.message);
+          }
+        } else {
+          console.log('Chat endpoint: Skipping tool context (missing userId or token)');
+        }
       }
   
       // 🧠 Compose the prompt with memory and context
@@ -143,18 +188,44 @@ exports.analyzeTransactions = async (req, res) => {
       history = [];
     }
 
+    const { token, userId } = extractAuthFromRequest(req);
+    let userContext = extractContextFromBody(req) || {};
+    if (!userContext || Object.keys(userContext).length === 0) {
+      if (userId && token) {
+        try {
+          const [accounts, categories, shoppingList] = await Promise.all([
+            getUserAccounts({ userId, token }),
+            getUserCategories({ userId, token }),
+            getShoppingList({ userId, token })
+          ]);
+          userContext = {
+            accounts: accounts || [],
+            categories: categories || [],
+            shoppingList: shoppingList || []
+          };
+        } catch (err) {
+          console.warn('Analyze transactions: Tool context failed to load:', err.message);
+        }
+      } else {
+        console.log('Analyze transactions: Skipping tool context (missing userId or token)');
+      }
+    }
+
     const formattedMessages = [
       {
         role: 'system',
-        content: `You are a financial assistant that helps users understand their financial habits. When given a list of transactions, summarize key insights, including:
+        content: `You are a life planning assistant that helps users understand their cash flow habits. When given a list of transactions, summarize key insights into a short summary of no more than 240 characters, including:
         - Total income and spending
-        - Top spending categories
-        - Spending vs. income balance
-        - Notable recurring expenses
-        - High-value or unusual transactions
-        - Behavioral patterns
-        - Actionable suggestions
-        Include relevant follow-up questions to guide users toward improving financial wellness.`
+        - Forecasted income and spending
+
+        - Forecasted disposable income for the next 30 days
+        - High-value or unusual transactions (if any)
+        - Behavioral patterns (if any)
+        - Actionable suggestions (if any)
+
+        The summary should be concise and to the point, and should be no more than 240 characters.
+
+        Include relevant follow-up questions to guide users toward improving financial wellness.\n\nHere is current context (may be empty):\nAccounts: ${JSON.stringify(userContext.accounts || [])}\nCategories: ${JSON.stringify(userContext.categories || [])}\nShopping List: ${JSON.stringify(userContext.shoppingList || [])}`
       },
       ...history,
       { role: 'user', content: `Here are the latest transactions:\n${JSON.stringify(transactions)}` }
@@ -177,7 +248,9 @@ exports.analyzeTransactions = async (req, res) => {
       console.warn('Analyze transactions: Failed to save history to Redis:', redisError.message);
     }
 
-    res.json({ insights: aiResponse });
+    // Enforce response length limit of 300 characters
+    const limitedInsights = truncateText(aiResponse, 300);
+    res.json({ insights: limitedInsights });
 
   } catch (error) {
     console.error('Analyze transactions error:', error);
