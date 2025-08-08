@@ -30,7 +30,7 @@ async function queryAzureOpenAI(messages) {
   const body = {
     messages,
     temperature: 0.7,
-    max_tokens: 500
+    max_tokens: 800
   };
 
   // Only add tools if functionSchemas is not empty
