@@ -462,9 +462,34 @@ Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
 
     console.log('Analyze transactions: Calling OpenAI (tools enabled) with', messages.length, 'messages');
 
-    // We allow tool loop here as well in case the model wants extra data
+    // Use the new executeToolCalls function for tool execution
     const ctx = { userId, authHeader };
-    const result = await runToolCallsLoop(messages, ctx);
+    let result;
+    try {
+      // Try to get a response with tools first
+      const responseWithTools = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'auto' });
+      const choice = responseWithTools?.choices?.[0];
+      const msg = choice?.message;
+      
+      // If the model wants to call tools, execute them
+      if (msg?.tool_calls && msg.tool_calls.length > 0) {
+        console.log('Model requested tool calls, executing...');
+        result = await executeToolCalls(messages, msg.tool_calls, ctx);
+      } else {
+        // No tool calls needed, use the response directly
+        result = { content: msg?.content || '', raw: responseWithTools };
+      }
+    } catch (error) {
+      console.log('Tool-based response failed, trying direct response...');
+      try {
+        const directResponse = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'none' });
+        const choice = directResponse?.choices?.[0];
+        result = { content: choice?.message?.content || '', raw: directResponse };
+      } catch (directError) {
+        console.log('All attempts failed, returning error message');
+        result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null };
+      }
+    }
 
     const finalText = result.content || '';
     const updatedHistory = [
