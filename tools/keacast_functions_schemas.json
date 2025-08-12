@@ -1,0 +1,60 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "getUserAccounts",
+      "description": "Fetch all bank accounts for a user.",
+      "parameters": {
+        "type": "object",
+        "properties": { "userId": { "type": "string" } },
+        "required": ["userId"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "getUserTransactions",
+      "description": "Retrieve transactions for a user account in a date window.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "userId": { "type": "string" },
+          "accountId": { "type": "string" },
+          "startDate": { "type": "string" },
+          "endDate": { "type": "string" }
+        },
+        "required": ["userId", "accountId"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "getRecurringForecasts",
+      "description": "Get recurring/forecast transactions for an account.",
+      "parameters": {
+        "type": "object",
+        "properties": { "accountId": { "type": "string" } },
+        "required": ["accountId"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "getUpcomingTransactions",
+      "description": "Get upcoming transactions for an account over a date range.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "accountId": { "type": "string" },
+          "startDate": { "type": "string" },
+          "endDate": { "type": "string" },
+          "forecastType": { "type": "string" }
+        },
+        "required": ["accountId", "startDate", "endDate"]
+      }
+    }
+  }
+]

@@ -92,8 +92,13 @@ app.use((req, res) => res.status(404).json({ error: 'Not found', requestId: req.
 const errorHandler = require('./middleware/errorHandler');
 app.use(errorHandler);
 
-// Global error handler
+// Global error handler - only handle unhandled errors
 app.use((err, req, res, next) => {
+  // If response has already been sent, don't override it
+  if (res.headersSent) {
+    return next(err);
+  }
+  
   console.error('Global error handler:', err);
   
   // Don't leak error details in production

@@ -1,60 +1,45 @@
+// services/openaiService.js
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
 
-let functionSchemas = [];
-try {
-  const schemaPath = path.join(__dirname, '../tools/kecast_functions_schemas.json');
-  console.log('Loading schema from:', schemaPath);
-  
-  if (fs.existsSync(schemaPath)) {
-    const schemaContent = fs.readFileSync(schemaPath, 'utf8');
-    functionSchemas = JSON.parse(schemaContent);
-    console.log(`Loaded ${functionSchemas.length} function schemas`);
-  } else {
-    console.warn('Schema file not found:', schemaPath);
+const functionSchemas = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '../tools/keacast_functions_schemas.json'), 'utf8')
+);
+
+// Debug: Log the loaded schema
+console.log('Loaded function schemas:', JSON.stringify(functionSchemas, null, 2));
+
+const BASE_URL = `${process.env.AZURE_OPENAI_ENDPOINT.replace(/\/$/, '')}/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version=${process.env.AZURE_OPENAI_API_VERSION}`;
+
+async function callAOAI(body) {
+  try {
+    console.log('Azure OpenAI request URL:', BASE_URL);
+    console.log('Azure OpenAI request body:', JSON.stringify(body, null, 2));
+    
+    const res = await axios.post(BASE_URL, body, {
+      headers: {
+        'api-key': process.env.AZURE_OPENAI_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    console.log('Azure OpenAI response status:', res.status);
+    return res.data;
+  } catch (error) {
+    console.error('Azure OpenAI API call failed:');
+    console.error('Status:', error.response?.status);
+    console.error('Response data:', error.response?.data);
+    console.error('Error message:', error.message);
+    throw error;
   }
-} catch (error) {
-  console.warn('Tool context failed to load:', error.message);
-  functionSchemas = [];
 }
 
-async function queryAzureOpenAI(messages) {
-  const url = `${process.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version=${process.env.AZURE_OPENAI_API_VERSION}`;
-
-  const headers = {
-    'api-key': process.env.AZURE_OPENAI_API_KEY,
-    'Content-Type': 'application/json',
-  };
-
-  const body = {
-    messages,
-    temperature: 0.7,
-    max_tokens: 800
-  };
-
-  // Only add tools if functionSchemas is not empty
-  if (functionSchemas && functionSchemas.length > 0) {
-    body.tools = functionSchemas.map(schema => ({
-      type: "function",
-      function: schema
-    }));
-    console.log(`Added ${body.tools.length} tools to request`);
-  } else {
-    console.log('No tools added to request');
-  }
-
-  console.log('Sending request to Azure OpenAI with body:', JSON.stringify(body, null, 2));
-  const response = await axios.post(url, body, { headers });
-  
-  // Check if response has content
-  const message = response.data.choices[0].message;
-  if (!message || !message.content) {
-    console.warn('No content in response:', response.data);
-    return 'I apologize, but I received an empty response. Please try again.';
-  }
-  
-  return message.content;
+async function queryAzureOpenAI(messages, { tools = functionSchemas, tool_choice = 'auto', temperature = 0.3, max_tokens = 1000 } = {}) {
+  const body = { messages, temperature, tools, tool_choice, max_tokens };
+  const data = await callAOAI(body);
+  // Return the full data so controller can inspect tool calls
+  return data;
 }
 
-module.exports = { queryAzureOpenAI };
+module.exports = { queryAzureOpenAI, functionSchemas };
