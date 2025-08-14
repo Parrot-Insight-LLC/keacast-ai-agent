@@ -259,7 +259,15 @@ exports.chat = async (req, res) => {
         try {
           const ctx = { userId, authHeader };
           const [accounts, categories] = await Promise.all([
-            functionMap.getUserAccounts({ userId }, ctx),
+            // functionMap.getUserAccounts({ userId }, ctx),
+            functionMap.getUserAccountData({ userId, token,   body: {
+                "upcomingEnd": "2025-08-28",
+                "currentDate": "2025-08-14",
+                "forecastType": "F",
+                "recentStart": "2025-05-14",
+                "recentEnd": "2025-08-15"
+              } 
+            }, ctx),
             functionMap.getUpcomingTransactions // example of adding more later
               ? Promise.resolve([]) // keep placeholder for future preload if desired
               : Promise.resolve([])

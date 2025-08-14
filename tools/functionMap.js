@@ -62,6 +62,12 @@ const functionMap = {
     }
   },
 
+  async getUserAccountData(args, ctx) {
+    const { userId, token, body } = args;
+    const result = await getUserAccountData(userId, token, body);
+    return result;
+  },
+
   async getUserTransactions(args, ctx) {
     const { userId, accountId, startDate, endDate } = args;
     const page = args.page || 1;

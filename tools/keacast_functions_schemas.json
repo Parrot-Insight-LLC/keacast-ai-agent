@@ -17,6 +17,22 @@
   },
   {
     "type": "function",
+    "function": { 
+      "name": "getUserAccountData",
+      "description": "Fetch account data for a user",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "userId": { "type": "string" },
+          "token": { "type": "string" },
+          "body": { "type": "object" }
+        },
+        "required": ["userId", "token", "body"]
+      }
+    }
+  },
+  {
+    "type": "function",
     "function": {
       "name": "getUserTransactions",
       "description": "Retrieve transactions for a user account in a date window with pagination support to prevent memory issues.",
