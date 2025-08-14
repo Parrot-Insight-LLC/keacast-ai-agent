@@ -53,12 +53,6 @@ async function getShoppingList({ userId, token }) {
   return response.data;
 }
 
-async function getUserAccountData({ userId, token, body }) {
-  const url = `${BASE_URL}/account/getall/${userId}`;
-  const response = await axios.post(url, body, AUTH_HEADER(token));
-  return response.data;
-}
-
 // --------------------------------------
 // Function Map for Tool Execution
 // --------------------------------------
@@ -68,8 +62,7 @@ const functionMap = {
   getRecurringForecasts,
   getUpcomingTransactions,
   getUserCategories,
-  getShoppingList,
-  getUserAccountData
+  getShoppingList
 };
 
 module.exports = {
@@ -79,6 +72,5 @@ module.exports = {
   getUpcomingTransactions,
   getUserCategories,
   getShoppingList,
-  getUserAccountData,
   functionMap // 👈 Exported for OpenAI tool handler integration
 };
