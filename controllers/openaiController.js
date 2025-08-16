@@ -175,14 +175,23 @@ function createContextSummary(userContext) {
       breakdown: userContext.breakdown ? userContext.breakdown.length : 0
     },
     // Include a sample of recent transactions for context
-    transactions: userContext.transactions ? 
-      userContext.transactions.slice(0, 5).map(t => ({
+    transactions: userContext.cfTransactions ? 
+      userContext.transactions.slice(0, 100).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
         date: t.date,
         category: t.category
-      })) : []
+      })) : [],
+      upcomingTransactions: userContext.upcomingTransactions ? 
+      userContext.upcomingTransactions.slice(0, 50).map(t => ({
+        id: t.id,
+        amount: t.amount,
+        description: t.description,
+        date: t.date,
+        category: t.category
+      })) : [],
+      breakdown: userContext.breakdown
   };
 
   return summary;
@@ -337,7 +346,7 @@ exports.chat = async (req, res) => {
 
                      // Merge transactions from both sources (request body and selected accounts)
            const bodyTransactions = userContext.transactions || [];
-           const accountTransactions = selectedAccounts[0]?.transactions || [];
+           const accountTransactions = selectedAccounts[0]?.cfTransactionstransactions || [];
            const allTransactions = [...bodyTransactions, ...accountTransactions];
            
            console.log('Chat endpoint: Merged transactions - Body:', bodyTransactions.length, 'Account:', accountTransactions.length, 'Total:', allTransactions.length);
