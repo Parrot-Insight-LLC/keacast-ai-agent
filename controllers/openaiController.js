@@ -379,7 +379,8 @@ Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
     res.json({
       response: finalText,
       memoryUsed: updatedHistory.length,
-      contextLoaded: !!Object.keys(userContext || {}).length
+      contextLoaded: !!Object.keys(userContext || {}).length,
+      userContext: userContext
     });
 
   } catch (error) {
