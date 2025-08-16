@@ -162,13 +162,19 @@ function createContextSummary(userContext) {
         id: acc.id,
         name: acc.name,
         type: acc.type,
-        balance: acc.balance
+        balance: acc.balance,
+        available: acc.available,
+        current: acc.current,
+        limit: acc.limit,
+        name: acc.name,
+        type: acc.type,
+        forecasted: acc.forecasted,
       })).slice(0, 3) // Limit to first 3 accounts
     } : { count: 0 },
     dataCounts: {
       categories: userContext.categories ? userContext.categories.length : 0,
       shoppingList: userContext.shoppingList ? userContext.shoppingList.length : 0,
-      transactions: userContext.transactions ? userContext.transactions.length : 0,
+      transactions: userContext.cfTransactions ? userContext.cfTransactions.length : 0,
       upcomingTransactions: userContext.upcomingTransactions ? userContext.upcomingTransactions.length : 0,
       plaidTransactions: userContext.plaidTransactions ? userContext.plaidTransactions.length : 0,
       recentTransactions: userContext.recentTransactions ? userContext.recentTransactions.length : 0,
@@ -176,7 +182,7 @@ function createContextSummary(userContext) {
     },
     // Include a sample of recent transactions for context
     transactions: userContext.cfTransactions ? 
-      userContext.transactions.slice(0, 100).map(t => ({
+      userContext.cfTransactions.slice(0, 100).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
@@ -346,7 +352,7 @@ exports.chat = async (req, res) => {
 
                      // Merge transactions from both sources (request body and selected accounts)
            const bodyTransactions = userContext.transactions || [];
-           const accountTransactions = selectedAccounts[0]?.cfTransactionstransactions || [];
+           const accountTransactions = selectedAccounts[0]?.cfTransactions || [];
            const allTransactions = [...bodyTransactions, ...accountTransactions];
            
            console.log('Chat endpoint: Merged transactions - Body:', bodyTransactions.length, 'Account:', accountTransactions.length, 'Total:', allTransactions.length);
@@ -357,7 +363,7 @@ exports.chat = async (req, res) => {
              accounts: [], // keep for backward compatibility
              categories: selectedAccounts[0]?.categories || userContext.categories || [], // fill if you expose a categories tool in functionMap
              shoppingList: selectedAccounts[0]?.shoppingList || userContext.shoppingList || [], // fill if you expose a shoppingList tool in functionMap
-             transactions: allTransactions,
+             cfTransactions: allTransactions,
              upcomingTransactions: selectedAccounts[0]?.upcomingTransactions || [],
              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
              recentTransactions: selectedAccounts[0]?.recentTransactions || [],
