@@ -115,7 +115,7 @@ function extractAuthFromRequest(req) {
   const token = bearerToken || headerToken || bodyToken;
 
   const headerUserId = req.headers['x-user-id'];
-  const bodyUserId = req.body?.userId;
+  const bodyUserId = req.body?.sessionId;
   const jwtUserId = req.user?.id;
   const userId = bodyUserId || headerUserId || jwtUserId;
 
