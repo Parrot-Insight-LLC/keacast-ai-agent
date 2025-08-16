@@ -393,6 +393,8 @@ exports.chat = async (req, res) => {
     // Create a more intelligent context summary
     const contextSummary = createContextSummary(userContext);
 
+    const actualContext = `Here is my current transactions: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}, here is my current categories: ${JSON.stringify(contextSummary.categories, null, 2)}, here is my current upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
+
     const baseSystem = systemPrompt || `You are Kea, a smart and trustworthy financial assistant built into the Keacast platform. Your job is to help users understand, manage, and improve their financial well-being. You will not mention budget or budgeting. Always respond clearly, accurately, and professionally. Explain financial concepts simply and clearly, summarize income, spending, and forecasting patterns, identify financial risks, habits, and areas of improvement, offer practical, personalized advice for saving, spending, and planning, ask follow-up questions to gain deeper insight into the user's financial goals. Avoid giving legal or investment advice—focus on education and forecasting support. If the user's message is unclear, ask clarifying questions. Prioritize clarity, context, and trustworthiness in every response.`;
 
     // Build message array with memory and clean up long messages
@@ -405,7 +407,7 @@ exports.chat = async (req, res) => {
     if (userContext && Object.keys(userContext).length > 0) {
       const contextMessage = {
         role: 'user',
-        content: `Here is my current financial context:\n\n${JSON.stringify(contextSummary, null, 2)}`
+        content: `${JSON.stringify(actualContext, null, 2)}`
       };
       messages.push(contextMessage);
       console.log('Chat endpoint: Added context message with size:', JSON.stringify(contextMessage).length, 'bytes');
