@@ -477,6 +477,7 @@ exports.chat = async (req, res) => {
     const finalText = result.content || 'Sorry, no response generated.';
     const updatedHistory = [
       ...sanitizeMessageArray(history),
+      { role: 'user', content: actualContext },
       { role: 'user', content: message },
       { role: 'assistant', content: finalText }
     ].slice(-MAX_MEMORY);
