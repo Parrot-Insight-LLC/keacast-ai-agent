@@ -129,11 +129,14 @@ function extractContextFromBody(req) {
   const accounts = Array.isArray(req.body?.accounts) ? req.body.accounts : undefined;
   const categories = Array.isArray(req.body?.categories) ? req.body.categories : undefined;
   const shoppingList = Array.isArray(req.body?.shoppingList) ? req.body.shoppingList : undefined;
-  if (accounts || categories || shoppingList) {
+  const transactions = Array.isArray(req.body?.transactions) ? req.body.transactions : undefined;
+  
+  if (accounts || categories || shoppingList || transactions) {
     return {
       accounts: accounts || [],
       categories: categories || [],
-      shoppingList: shoppingList || []
+      shoppingList: shoppingList || [],
+      transactions: transactions || []
     };
   }
   return undefined;
@@ -170,7 +173,16 @@ function createContextSummary(userContext) {
       plaidTransactions: userContext.plaidTransactions ? userContext.plaidTransactions.length : 0,
       recentTransactions: userContext.recentTransactions ? userContext.recentTransactions.length : 0,
       breakdown: userContext.breakdown ? userContext.breakdown.length : 0
-    }
+    },
+    // Include a sample of recent transactions for context
+    recentTransactionSample: userContext.transactions ? 
+      userContext.transactions.slice(0, 5).map(t => ({
+        id: t.id,
+        amount: t.amount,
+        description: t.description,
+        date: t.date,
+        category: t.category
+      })) : []
   };
 
   return summary;
@@ -295,8 +307,8 @@ exports.chat = async (req, res) => {
     // Prefer explicit context sent in body
     let userContext = extractContextFromBody(req) || {};
 
-    // If no explicit context, we can preload some via tools (direct calls through functionMap)
-    if (!userContext || Object.keys(userContext).length === 0) {
+    // If no explicit context or we need to preload additional data, we can preload some via tools (direct calls through functionMap)
+    if (!userContext || Object.keys(userContext).length === 0 || !userContext.selectedAccounts) {
       if (userId && token) {
         try {
           const ctx = { userId, authHeader };
@@ -323,18 +335,25 @@ exports.chat = async (req, res) => {
           }, ctx);
           console.log('Selected accounts retrieved:', selectedAccounts);
 
-          userContext = {
-            userData: userData || {},
-            selectedAccounts: selectedAccounts || [],
-            accounts: [], // keep for backward compatibility
-            categories: selectedAccounts[0].categories, // fill if you expose a categories tool in functionMap
-            shoppingList: selectedAccounts[0].shoppingList, // fill if you expose a shoppingList tool in functionMap
-            transactions: selectedAccounts[0].transactions,
-            upcomingTransactions: selectedAccounts[0].upcomingTransactions,
-            plaidTransactions: selectedAccounts[0].plaidTransactions,
-            recentTransactions: selectedAccounts[0].recentTransactions,
-            breakdown: selectedAccounts[0].breakdown,
-          };
+                     // Merge transactions from both sources (request body and selected accounts)
+           const bodyTransactions = userContext.transactions || [];
+           const accountTransactions = selectedAccounts[0]?.transactions || [];
+           const allTransactions = [...bodyTransactions, ...accountTransactions];
+           
+           console.log('Chat endpoint: Merged transactions - Body:', bodyTransactions.length, 'Account:', accountTransactions.length, 'Total:', allTransactions.length);
+           
+           userContext = {
+             userData: userData || {},
+             selectedAccounts: selectedAccounts || [],
+             accounts: [], // keep for backward compatibility
+             categories: selectedAccounts[0]?.categories || userContext.categories || [], // fill if you expose a categories tool in functionMap
+             shoppingList: selectedAccounts[0]?.shoppingList || userContext.shoppingList || [], // fill if you expose a shoppingList tool in functionMap
+             transactions: allTransactions,
+             upcomingTransactions: selectedAccounts[0]?.upcomingTransactions || [],
+             plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
+             recentTransactions: selectedAccounts[0]?.recentTransactions || [],
+             breakdown: selectedAccounts[0]?.breakdown || [],
+           };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
           dataMessage = 'Chat endpoint: Preloaded user context via functionMap.';
         } catch (err) {
@@ -368,6 +387,7 @@ Current Context Summary: ${JSON.stringify(contextSummary, null, 2)}`;
       };
       messages.push(contextMessage);
       console.log('Chat endpoint: Added context message with size:', JSON.stringify(contextMessage).length, 'bytes');
+      console.log('Chat endpoint: Context includes transactions:', userContext.transactions ? userContext.transactions.length : 0, 'transactions');
     }
 
     // Add the actual user message
