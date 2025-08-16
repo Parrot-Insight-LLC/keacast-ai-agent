@@ -175,7 +175,7 @@ function createContextSummary(userContext) {
       breakdown: userContext.breakdown ? userContext.breakdown.length : 0
     },
     // Include a sample of recent transactions for context
-    recentTransactionSample: userContext.transactions ? 
+    transactions: userContext.transactions ? 
       userContext.transactions.slice(0, 5).map(t => ({
         id: t.id,
         amount: t.amount,
