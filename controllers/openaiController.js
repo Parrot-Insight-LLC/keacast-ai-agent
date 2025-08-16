@@ -415,7 +415,7 @@ exports.chat = async (req, res) => {
     if (userContext && Object.keys(userContext).length > 0) {
       const contextMessage = {
         role: 'user',
-        content: `${JSON.stringify(actualContext, null, 2)}`
+        content: actualContext
       };
       messages.push(contextMessage);
       console.log('Chat endpoint: Added context message with size:', JSON.stringify(contextMessage).length, 'bytes');
