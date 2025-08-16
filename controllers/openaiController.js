@@ -251,6 +251,7 @@ exports.chat = async (req, res) => {
       history = [];
     }
 
+    let dataMessage;
     // Prefer explicit context sent in body
     let userContext = extractContextFromBody(req) || {};
 
@@ -285,11 +286,14 @@ exports.chat = async (req, res) => {
             shoppingList: [] // fill if you expose a shoppingList tool in functionMap
           };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
+          dataMessage = 'Chat endpoint: Preloaded user context via functionMap.';
         } catch (err) {
           console.warn('Chat endpoint: Preload via functionMap failed:', err?.message);
+          dataMessage = 'Chat endpoint: Preload via functionMap failed';
         }
       } else {
         console.log('Chat endpoint: Skipping preload (missing userId or token)');
+        dataMessage = 'Chat endpoint: Skipping preload (missing userId or token)';
       }
     }
 
@@ -382,9 +386,7 @@ Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       userContext: userContext,
-      token: token,
-      userId: userId,
-      accountid: accountid
+      dataMessage: dataMessage
     });
 
   } catch (error) {
