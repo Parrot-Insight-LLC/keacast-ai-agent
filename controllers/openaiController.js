@@ -382,6 +382,9 @@ Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       userContext: userContext,
+      token: token,
+      userId: userId,
+      accountid: accountid
     });
 
   } catch (error) {
