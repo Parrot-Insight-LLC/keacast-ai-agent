@@ -287,8 +287,13 @@ exports.chat = async (req, res) => {
             userData: userData || {},
             selectedAccounts: selectedAccounts || [],
             accounts: [], // keep for backward compatibility
-            categories: [], // fill if you expose a categories tool in functionMap
-            shoppingList: [] // fill if you expose a shoppingList tool in functionMap
+            categories: selectedAccounts[0].categories, // fill if you expose a categories tool in functionMap
+            shoppingList: selectedAccounts[0].shoppingList, // fill if you expose a shoppingList tool in functionMap
+            transactions: selectedAccounts[0].transactions,
+            upcomingTransactions: selectedAccounts[0].upcomingTransactions,
+            plaidTransactions: selectedAccounts[0].plaidTransactions,
+            recentTransactions: selectedAccounts[0].recentTransactions,
+            breakdown: selectedAccounts[0].breakdown,
           };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
           dataMessage = 'Chat endpoint: Preloaded user context via functionMap.';
