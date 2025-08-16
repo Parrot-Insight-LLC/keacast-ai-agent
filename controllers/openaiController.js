@@ -493,7 +493,7 @@ exports.chat = async (req, res) => {
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
-      contextSummary: JSON.stringify(contextSummary, null, 2)
+      contextSummary: actualContext
     });
 
   } catch (error) {
