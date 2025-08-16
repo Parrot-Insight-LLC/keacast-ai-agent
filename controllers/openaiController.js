@@ -260,9 +260,16 @@ exports.chat = async (req, res) => {
       if (userId && token) {
         try {
           const ctx = { userId, authHeader };
-          const [userData, selectedAccounts] = await Promise.all([
-            functionMap.getUserData({ userId, token }, ctx),
-            functionMap.getSelectedKeacastAccounts({ userId, token, body: {
+          
+          // First get user data
+          const userData = await functionMap.getUserData({ userId, token }, ctx);
+          console.log('User data retrieved:', userData);
+          
+          // Then use user data to get selected accounts
+          const selectedAccounts = await functionMap.getSelectedKeacastAccounts({ 
+            userId, 
+            token, 
+            body: {
               "currentDate": "2025-08-16",
               "forecastType": "F",
               "recentStart": "2025-05-16",
@@ -272,10 +279,8 @@ exports.chat = async (req, res) => {
               selectedAccounts: [accountid],
               upcomingEnd: "2025-08-30",
               user: userData
-            } }, ctx)
-          ]);
-          
-          console.log('User data retrieved:', userData);
+            } 
+          }, ctx);
           console.log('Selected accounts retrieved:', selectedAccounts);
 
           userContext = {
