@@ -183,30 +183,38 @@ function createContextSummary(userContext) {
     // Include a sample of recent transactions for context
     categories: userContext.categories,
     transactions: userContext.cfTransactions ? 
-      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 500).map(t => ({
+      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 100).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
         date: t.date,
         category: t.category
       })) : [],
-      upcomingTransactions: userContext.upcomingTransactions ? 
-      userContext.upcomingTransactions.slice(0, 50).map(t => ({
+    recentTransactions: userContext.recentTransactions ? 
+      userContext.recentTransactions.slice(0, 50).map(t => ({
+        id: t.id,
+        amount: t.amount,
+        description: t.description,
+        date: t.date,
+        category: t.category
+      })) : [],
+    upcomingTransactions: userContext.upcomingTransactions ? 
+    userContext.upcomingTransactions.slice(0, 50).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
         date: t.start,
         category: t.category
       })) : [],
-      plaidTransactions: userContext.plaidTransactions ? 
-      userContext.plaidTransactions.slice(0, 200).map(t => ({
+    plaidTransactions: userContext.plaidTransactions ? 
+    userContext.plaidTransactions.slice(0, 100).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
         date: t.date,
         category: t.category
       })) : [],
-      breakdown: userContext.breakdown
+    breakdown: userContext.breakdown
   };
 
   return summary;
