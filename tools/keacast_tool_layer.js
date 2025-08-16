@@ -53,6 +53,18 @@ async function getShoppingList({ userId, token }) {
   return response.data;
 }
 
+async function getUserData({ userId, token }) {
+  const url = `${BASE_URL}/user/${userId}`;
+  const response = await axios.get(url, AUTH_HEADER(token));
+  return response.data;
+}
+
+async function getSelectedKeacastAccounts({ userId, token, body }) {
+  const url = `${BASE_URL}/account/getselectedkeacastaccountsnew/${userId}`;
+  const response = await axios.post(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
 // --------------------------------------
 // Function Map for Tool Execution
 // --------------------------------------
@@ -62,7 +74,9 @@ const functionMap = {
   getRecurringForecasts,
   getUpcomingTransactions,
   getUserCategories,
-  getShoppingList
+  getShoppingList,
+  getUserData,
+  getSelectedKeacastAccounts
 };
 
 module.exports = {
@@ -72,5 +86,7 @@ module.exports = {
   getUpcomingTransactions,
   getUserCategories,
   getShoppingList,
+  getUserData,
+  getSelectedKeacastAccounts,
   functionMap // 👈 Exported for OpenAI tool handler integration
 };

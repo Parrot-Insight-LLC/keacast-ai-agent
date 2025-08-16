@@ -258,17 +258,28 @@ exports.chat = async (req, res) => {
       if (userId && token) {
         try {
           const ctx = { userId, authHeader };
-          const [accounts, categories] = await Promise.all([
-            functionMap.getUserAccounts({ userId }, ctx),
-            functionMap.getUpcomingTransactions // example of adding more later
-              ? Promise.resolve([]) // keep placeholder for future preload if desired
-              : Promise.resolve([])
+          const [userData, selectedAccounts] = await Promise.all([
+            functionMap.getUserData({ userId, token }, ctx),
+            functionMap.getSelectedKeacastAccounts({ userId, token, body: {
+              "currentDate": "2025-08-16",
+              "forecastType": "F",
+              "recentStart": "2025-05-16",
+              "recentEnd": "2025-08-17",
+              "page": "layout",
+              "position": 0,
+              selectedAccounts: selectedAccounts[0].accountid,
+              upcomingEnd: "2025-08-30",
+              user: userData
+            } }, ctx)
           ]);
-          // categories via functionMap if you define it; otherwise keep your other tool or omit
-          // For now, we leave categories empty unless you wire it in functionMap.
+          
+          console.log('User data retrieved:', userData);
+          console.log('Selected accounts retrieved:', selectedAccounts);
 
           userContext = {
-            accounts: accounts || [],
+            userData: userData || {},
+            selectedAccounts: selectedAccounts || [],
+            accounts: [], // keep for backward compatibility
             categories: [], // fill if you expose a categories tool in functionMap
             shoppingList: [] // fill if you expose a shoppingList tool in functionMap
           };
@@ -284,6 +295,10 @@ exports.chat = async (req, res) => {
     const baseSystem = systemPrompt || `You are Kea, a smart and trustworthy financial assistant built into the Keacast platform. Your job is to help users understand, manage, and improve their financial well-being. You will not mention budget or budgeting. Always respond clearly, accurately, and professionally. Explain financial concepts simply and clearly, summarize income, spending, and forecasting patterns, identify financial risks, habits, and areas of improvement, offer practical, personalized advice for saving, spending, and planning, ask follow-up questions to gain deeper insight into the user's financial goals. Avoid giving legal or investment advice—focus on education and forecasting support. If the user's message is unclear, ask clarifying questions. Prioritize clarity, context, and trustworthiness in every response.
 
 Here is current context:
+
+User Data: ${JSON.stringify(userContext.userData || {})}
+
+Selected Accounts: ${JSON.stringify(userContext.selectedAccounts || [])}
 
 Accounts: ${JSON.stringify(userContext.accounts || [])}
 
