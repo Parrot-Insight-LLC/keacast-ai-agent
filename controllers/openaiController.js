@@ -236,6 +236,7 @@ exports.chat = async (req, res) => {
     }
 
     const sessionKey = buildSessionKey(req);
+    const accountid = req.body.accountid;
     const { token, userId, authHeader } = extractAuthFromRequest(req);
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
 
@@ -267,7 +268,7 @@ exports.chat = async (req, res) => {
               "recentEnd": "2025-08-17",
               "page": "layout",
               "position": 0,
-              selectedAccounts: [selectedAccounts[0].accountid],
+              selectedAccounts: [accountid],
               upcomingEnd: "2025-08-30",
               user: userData
             } }, ctx)
