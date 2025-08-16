@@ -5,7 +5,8 @@ const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.
 
 const MEMORY_TTL = 3600; // 1 hour
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
-const MAX_MESSAGE_LENGTH = 500; // limit individual message length
+const MAX_MESSAGE_LENGTH = 8000; // increased limit for individual message length
+const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
 
 function buildSessionKey(req) {
   return `session:${req.body.sessionId || req.user?.id || 'anonymous'}`;
@@ -23,7 +24,9 @@ function truncateMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
   
   const truncated = { ...message };
   if (truncated.content && typeof truncated.content === 'string') {
-    truncated.content = truncateText(truncated.content, maxLength);
+    // Use different limits for system messages vs other messages
+    const limit = truncated.role === 'system' ? SYSTEM_PROMPT_MAX_LENGTH : maxLength;
+    truncated.content = truncateText(truncated.content, limit);
   }
   
   return truncated;
@@ -136,6 +139,43 @@ function extractContextFromBody(req) {
   return undefined;
 }
 
+function createContextSummary(userContext) {
+  if (!userContext || Object.keys(userContext).length === 0) {
+    return { hasData: false };
+  }
+
+  const summary = {
+    hasData: true,
+    userData: userContext.userData ? {
+      hasUserData: true,
+      // Include key user fields if they exist
+      ...(userContext.userData.name && { name: userContext.userData.name }),
+      ...(userContext.userData.email && { email: userContext.userData.email })
+    } : { hasUserData: false },
+    selectedAccounts: userContext.selectedAccounts ? {
+      count: userContext.selectedAccounts.length,
+      // Include key account details
+      accounts: userContext.selectedAccounts.map(acc => ({
+        id: acc.id,
+        name: acc.name,
+        type: acc.type,
+        balance: acc.balance
+      })).slice(0, 3) // Limit to first 3 accounts
+    } : { count: 0 },
+    dataCounts: {
+      categories: userContext.categories ? userContext.categories.length : 0,
+      shoppingList: userContext.shoppingList ? userContext.shoppingList.length : 0,
+      transactions: userContext.transactions ? userContext.transactions.length : 0,
+      upcomingTransactions: userContext.upcomingTransactions ? userContext.upcomingTransactions.length : 0,
+      plaidTransactions: userContext.plaidTransactions ? userContext.plaidTransactions.length : 0,
+      recentTransactions: userContext.recentTransactions ? userContext.recentTransactions.length : 0,
+      breakdown: userContext.breakdown ? userContext.breakdown.length : 0
+    }
+  };
+
+  return summary;
+}
+
 /**
  * Execute tool calls and get final response:
  * - executes requested tools via functionMap[name](args, ctx)
@@ -161,8 +201,8 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       
       // Truncate tool responses to prevent massive message growth
       let toolContent = JSON.stringify(result ?? {});
-      if (toolContent.length > 2000) { // Limit tool responses to 2KB
-        toolContent = toolContent.substring(0, 2000) + '..."_truncated":true}';
+      if (toolContent.length > 8000) { // Increased limit to 8KB for tool responses
+        toolContent = toolContent.substring(0, 8000) + '..."_truncated":true}';
         console.log('Tool response truncated from', JSON.stringify(result ?? {}).length, 'to', toolContent.length, 'bytes');
       }
       
@@ -307,36 +347,31 @@ exports.chat = async (req, res) => {
       }
     }
 
+    // Create a more intelligent context summary
+    const contextSummary = createContextSummary(userContext);
+
     const baseSystem = systemPrompt || `You are Kea, a smart and trustworthy financial assistant built into the Keacast platform. Your job is to help users understand, manage, and improve their financial well-being. You will not mention budget or budgeting. Always respond clearly, accurately, and professionally. Explain financial concepts simply and clearly, summarize income, spending, and forecasting patterns, identify financial risks, habits, and areas of improvement, offer practical, personalized advice for saving, spending, and planning, ask follow-up questions to gain deeper insight into the user's financial goals. Avoid giving legal or investment advice—focus on education and forecasting support. If the user's message is unclear, ask clarifying questions. Prioritize clarity, context, and trustworthiness in every response.
 
-Here is current context:
-
-User Data: ${JSON.stringify(userContext.userData || {})}
-
-Selected Accounts: ${JSON.stringify(userContext.selectedAccounts || [])}
-
-Accounts: ${JSON.stringify(userContext.accounts || [])}
-
-Categories: ${JSON.stringify(userContext.categories || [])}
-
-Shopping List: ${JSON.stringify(userContext.shoppingList || [])};
-
-Transactions: ${JSON.stringify(userContext.transactions || [])}
-
-Upcoming Transactions: ${JSON.stringify(userContext.upcomingTransactions || [])}
-
-Plaid Transactions: ${JSON.stringify(userContext.plaidTransactions || [])}
-
-Recent Transactions: ${JSON.stringify(userContext.recentTransactions || [])}
-
-Breakdown: ${JSON.stringify(userContext.breakdown || [])}`;
+Current Context Summary: ${JSON.stringify(contextSummary, null, 2)}`;
 
     // Build message array with memory and clean up long messages
     const messages = [
       { role: 'system', content: baseSystem },
-      ...sanitizeMessageArray(history.map(truncateMessage)),
-      { role: 'user', content: message }
+      ...sanitizeMessageArray(history.map(truncateMessage))
     ];
+
+    // Add detailed context as a separate message if we have significant data
+    if (userContext && Object.keys(userContext).length > 0) {
+      const contextMessage = {
+        role: 'user',
+        content: `Here is my current financial context:\n\n${JSON.stringify(userContext, null, 2)}`
+      };
+      messages.push(contextMessage);
+      console.log('Chat endpoint: Added context message with size:', JSON.stringify(contextMessage).length, 'bytes');
+    }
+
+    // Add the actual user message
+    messages.push({ role: 'user', content: message });
 
     console.log('Chat endpoint: Calling OpenAI (tools enabled) with', messages.length, 'messages');
 
@@ -344,7 +379,7 @@ Breakdown: ${JSON.stringify(userContext.breakdown || [])}`;
     const requestSize = JSON.stringify(messages).length;
     console.log('Chat endpoint: Request size:', requestSize, 'bytes');
     
-    if (requestSize > 300000) { // Reduce to 300KB limit
+    if (requestSize > 500000) { // Increased to 500KB limit to allow more context
       console.warn('Chat endpoint: Request too large, clearing old history');
       // Clear old history to reduce size
       history = history.slice(-3); // Keep only last 3 messages
