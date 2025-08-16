@@ -390,7 +390,6 @@ Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
-      userContext: userContext,
       dataMessage: dataMessage
     });
 
