@@ -319,7 +319,17 @@ Accounts: ${JSON.stringify(userContext.accounts || [])}
 
 Categories: ${JSON.stringify(userContext.categories || [])}
 
-Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
+Shopping List: ${JSON.stringify(userContext.shoppingList || [])};
+
+Transactions: ${JSON.stringify(userContext.transactions || [])}
+
+Upcoming Transactions: ${JSON.stringify(userContext.upcomingTransactions || [])}
+
+Plaid Transactions: ${JSON.stringify(userContext.plaidTransactions || [])}
+
+Recent Transactions: ${JSON.stringify(userContext.recentTransactions || [])}
+
+Breakdown: ${JSON.stringify(userContext.breakdown || [])}`;
 
     // Build message array with memory and clean up long messages
     const messages = [
