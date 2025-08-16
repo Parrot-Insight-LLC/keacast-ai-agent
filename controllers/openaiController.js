@@ -460,7 +460,10 @@ Current Context Summary: ${JSON.stringify(contextSummary, null, 2)}`;
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
-      dataMessage: dataMessage
+      dataMessage: dataMessage,
+      baseSystem: typeof baseSystem === 'string' && baseSystem.length > 4000
+        ? baseSystem.slice(0, 4000)
+        : baseSystem
     });
 
   } catch (error) {
