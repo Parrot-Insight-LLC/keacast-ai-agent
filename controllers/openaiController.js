@@ -289,7 +289,7 @@ exports.chat = async (req, res) => {
           dataMessage = 'Chat endpoint: Preloaded user context via functionMap.';
         } catch (err) {
           console.warn('Chat endpoint: Preload via functionMap failed:', err?.message);
-          dataMessage = 'Chat endpoint: Preload via functionMap failed';
+          dataMessage = err?.message;
         }
       } else {
         console.log('Chat endpoint: Skipping preload (missing userId or token)');
