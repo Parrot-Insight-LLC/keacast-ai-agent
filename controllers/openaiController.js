@@ -181,8 +181,9 @@ function createContextSummary(userContext) {
       breakdown: userContext.breakdown ? userContext.breakdown.length : 0
     },
     // Include a sample of recent transactions for context
+    categories: userContext.categories,
     transactions: userContext.cfTransactions ? 
-      userContext.cfTransactions.slice(0, 100).map(t => ({
+      userContext.cfTransactions.slice(0, 500).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
@@ -191,6 +192,14 @@ function createContextSummary(userContext) {
       })) : [],
       upcomingTransactions: userContext.upcomingTransactions ? 
       userContext.upcomingTransactions.slice(0, 50).map(t => ({
+        id: t.id,
+        amount: t.amount,
+        description: t.description,
+        date: t.start,
+        category: t.category
+      })) : [],
+      plaidTransactions: userContext.plaidTransactions ? 
+      userContext.plaidTransactions.slice(0, 200).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
@@ -364,9 +373,9 @@ exports.chat = async (req, res) => {
              categories: selectedAccounts[0]?.categories || userContext.categories || [], // fill if you expose a categories tool in functionMap
              shoppingList: selectedAccounts[0]?.shoppingList || userContext.shoppingList || [], // fill if you expose a shoppingList tool in functionMap
              cfTransactions: allTransactions,
-             upcomingTransactions: selectedAccounts[0]?.upcomingTransactions || [],
+             upcomingTransactions: selectedAccounts[0]?.upcoming || [],
              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
-             recentTransactions: selectedAccounts[0]?.recentTransactions || [],
+             recentTransactions: selectedAccounts[0]?.recents || [],
              breakdown: selectedAccounts[0]?.breakdown || [],
            };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
@@ -474,7 +483,7 @@ exports.chat = async (req, res) => {
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
-      contextSummary: contextSummary
+      contextSummary: JSON.stringify(contextSummary, null, 2)
     });
 
   } catch (error) {
