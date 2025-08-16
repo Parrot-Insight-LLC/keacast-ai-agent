@@ -267,7 +267,7 @@ exports.chat = async (req, res) => {
               "recentEnd": "2025-08-17",
               "page": "layout",
               "position": 0,
-              selectedAccounts: selectedAccounts[0].accountid,
+              selectedAccounts: [selectedAccounts[0].accountid],
               upcomingEnd: "2025-08-30",
               user: userData
             } }, ctx)
@@ -380,7 +380,8 @@ Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
-      userContext: userContext
+      userContext: userContext,
+      userData: userData,
     });
 
   } catch (error) {
