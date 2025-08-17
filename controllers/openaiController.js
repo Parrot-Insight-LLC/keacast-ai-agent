@@ -207,7 +207,7 @@ function createContextSummary(userContext) {
         category: t.category
       })) : [],
     plaidTransactions: userContext.plaidTransactions ? 
-    userContext.plaidTransactions.slice(0, 250).map(t => ({
+    userContext.plaidTransactions.slice(0, 500).map(t => ({
         transaction_id: t.transaction_id,
         amount: t.amount,
         description: t.description,
@@ -402,11 +402,11 @@ exports.chat = async (req, res) => {
     const contextSummary = createContextSummary(userContext);
 
     const plaidContext = `Here is my current transactions: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
-    // const upcomingContext = `Here is my current upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
+    const upcomingContext = `Here is my current upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.cfTransactions, null, 2)}`;
     // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
-    const contextArray = [plaidContext];
+    const contextArray = [plaidContext, upcomingContext];
 
     const baseSystem = systemPrompt || `You are Kea, a smart and trustworthy financial assistant built into the Keacast platform. Your job is to help users understand, manage, and improve their financial well-being. You will not mention budget or budgeting. Always respond clearly, accurately, and professionally. Explain financial concepts simply and clearly, summarize income, spending, and forecasting patterns, identify financial risks, habits, and areas of improvement, offer practical, personalized advice for saving, spending, and planning, ask follow-up questions to gain deeper insight into the user's financial goals. Avoid giving legal or investment advice—focus on education and forecasting support. If the user's message is unclear, ask clarifying questions. Prioritize clarity, context, and trustworthiness in every response.`;
 
