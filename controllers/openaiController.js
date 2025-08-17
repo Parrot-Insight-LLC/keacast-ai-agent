@@ -374,14 +374,24 @@ exports.chat = async (req, res) => {
             userId, 
             token, 
             body: {
-              "currentDate": currentDate,
+              // "currentDate": currentDate,
+              // "forecastType": "F",
+              // "recentStart": recentStart,
+              // "recentEnd": recentEnd,
+              // "page": "layout",
+              // "position": 0,
+              // selectedAccounts: [accountid],
+              // upcomingEnd: upcomingEnd,
+              // user: userData
+
+              "currentDate": "2025-08-16",
               "forecastType": "F",
-              "recentStart": recentStart,
-              "recentEnd": recentEnd,
+              "recentStart": "2025-05-16",
+              "recentEnd": "2025-08-17",
               "page": "layout",
               "position": 0,
               selectedAccounts: [accountid],
-              upcomingEnd: upcomingEnd,
+              upcomingEnd: "2025-08-30",
               user: userData
             } 
           }, ctx);
@@ -520,8 +530,7 @@ exports.chat = async (req, res) => {
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
-      dataMessage: dataMessage,
-      date: moment().format('YYYY-MM-DD HH:mm:ss')
+      dataMessage: dataMessage
     });
 
   } catch (error) {
