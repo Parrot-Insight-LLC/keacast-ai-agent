@@ -183,7 +183,7 @@ function createContextSummary(userContext) {
     // Include a sample of recent transactions for context
     categories: userContext.categories,
     transactions: userContext.cfTransactions ? 
-      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 100).map(t => ({
+      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 250).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
@@ -191,7 +191,7 @@ function createContextSummary(userContext) {
         category: t.category
       })) : [],
     recentTransactions: userContext.recentTransactions ? 
-      userContext.recentTransactions.slice(0, 50).map(t => ({
+      userContext.recentTransactions.slice(0, 250).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
@@ -199,7 +199,7 @@ function createContextSummary(userContext) {
         category: t.category
       })) : [],
     upcomingTransactions: userContext.upcomingTransactions ? 
-    userContext.upcomingTransactions.slice(0, 50).map(t => ({
+    userContext.upcomingTransactions.slice(0, 250).map(t => ({
         id: t.id,
         amount: t.amount,
         description: t.description,
@@ -207,11 +207,11 @@ function createContextSummary(userContext) {
         category: t.category
       })) : [],
     plaidTransactions: userContext.plaidTransactions ? 
-    userContext.plaidTransactions.slice(0, 100).map(t => ({
-        id: t.id,
+    userContext.plaidTransactions.slice(0, 250).map(t => ({
+        transaction_id: t.transaction_id,
         amount: t.amount,
         description: t.description,
-        date: t.date,
+        date: t.date_added,
         category: t.category
       })) : [],
     breakdown: userContext.breakdown
@@ -485,7 +485,6 @@ exports.chat = async (req, res) => {
     const finalText = result.content || 'Sorry, no response generated.';
     const updatedHistory = [
       ...sanitizeMessageArray(history),
-      { role: 'user', content: actualContext },
       { role: 'user', content: message },
       { role: 'assistant', content: finalText }
     ].slice(-MAX_MEMORY);
@@ -502,7 +501,6 @@ exports.chat = async (req, res) => {
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
-      contextSummary: actualContext
     });
 
   } catch (error) {
