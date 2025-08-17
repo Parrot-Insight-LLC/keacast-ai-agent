@@ -227,89 +227,6 @@ function createContextSummary(userContext) {
 }
 
 /**
- * Format response based on content type and structure
- */
-function formatResponse(text, contextSummary) {
-  if (!text || typeof text !== 'string') {
-    return { formattedText: text, responseType: 'text' };
-  }
-
-  const trimmedText = text.trim();
-  
-  // Check for list patterns
-  if (trimmedText.includes('\n- ') || trimmedText.includes('\n• ') || trimmedText.includes('\n* ') || 
-      trimmedText.match(/^\d+\.\s/m) || trimmedText.includes('1.') && trimmedText.includes('2.')) {
-    return {
-      formattedText: trimmedText,
-      responseType: 'list',
-      listItems: extractListItems(trimmedText)
-    };
-  }
-
-  // Check for transaction data patterns
-  if (trimmedText.toLowerCase().includes('transaction') || 
-      trimmedText.includes('$') || 
-      trimmedText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/) ||
-      trimmedText.includes('amount') || trimmedText.includes('date') || trimmedText.includes('category')) {
-    return {
-      formattedText: trimmedText,
-      responseType: 'transaction_data',
-      hasAmounts: trimmedText.includes('$'),
-      hasDates: trimmedText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/) !== null
-    };
-  }
-
-  // Check for summary/analysis patterns
-  if (trimmedText.toLowerCase().includes('summary') || 
-      trimmedText.toLowerCase().includes('analysis') ||
-      trimmedText.toLowerCase().includes('overview') ||
-      trimmedText.toLowerCase().includes('total')) {
-    return {
-      formattedText: trimmedText,
-      responseType: 'summary',
-      isFinancialSummary: trimmedText.toLowerCase().includes('spending') || trimmedText.toLowerCase().includes('income')
-    };
-  }
-
-  // Check for question/advice patterns
-  if (trimmedText.includes('?') || 
-      trimmedText.toLowerCase().includes('consider') ||
-      trimmedText.toLowerCase().includes('suggest') ||
-      trimmedText.toLowerCase().includes('recommend')) {
-    return {
-      formattedText: trimmedText,
-      responseType: 'advice',
-      isQuestion: trimmedText.includes('?'),
-      isRecommendation: trimmedText.toLowerCase().includes('recommend') || trimmedText.toLowerCase().includes('suggest')
-    };
-  }
-
-  // Default to text
-  return {
-    formattedText: trimmedText,
-    responseType: 'text',
-    wordCount: trimmedText.split(/\s+/).length
-  };
-}
-
-/**
- * Extract list items from formatted text
- */
-function extractListItems(text) {
-  const lines = text.split('\n');
-  const items = [];
-  
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.match(/^[-•*]\s/) || trimmed.match(/^\d+\.\s/)) {
-      items.push(trimmed.replace(/^[-•*]\s/, '').replace(/^\d+\.\s/, ''));
-    }
-  }
-  
-  return items;
-}
-
-/**
  * Execute tool calls and get final response:
  * - executes requested tools via functionMap[name](args, ctx)
  * - returns the final answer without corrupting the original message array
@@ -572,10 +489,6 @@ exports.chat = async (req, res) => {
     }
 
     const finalText = result.content || 'Sorry, no response generated.';
-    
-    // Format the response based on content type
-    const formattedResponse = formatResponse(finalText, contextSummary);
-    
     const updatedHistory = [
       ...sanitizeMessageArray(history),
       { role: 'user', content: message },
@@ -591,11 +504,9 @@ exports.chat = async (req, res) => {
 
     res.json({
       response: finalText,
-      formattedResponse: formattedResponse,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
-      contextSummary: contextSummary
     });
 
   } catch (error) {
