@@ -183,14 +183,16 @@ function createContextSummary(userContext) {
     // Include a sample of recent transactions for context
     categories: userContext.categories,
     transactions: userContext.cfTransactions ? 
-      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 500).map(t => ({
-        id: t.id,
+      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 1000).map(t => ({
+        id: t.transactionid,
         name: t.title,
         display_name: t.display_name,
         amount: t.amount,
         description: t.description,
         date: t.date,
-        category: t.category
+        category: t.category,
+        frequency: t.frequency2,
+        status: t.status
       })) : [],
     recentTransactions: userContext.recentTransactions ? 
       userContext.recentTransactions.slice(0, 250).map(t => ({
@@ -202,23 +204,28 @@ function createContextSummary(userContext) {
       })) : [],
     upcomingTransactions: userContext.upcomingTransactions ? 
     userContext.upcomingTransactions.slice(0, 250).map(t => ({
-        id: t.id,
+        id: t.transactionid,
         name: t.title,
         display_name: t.display_name,
         amount: t.amount,
         description: t.description,
-        date: t.start,
-        category: t.category
+        date: t.date,
+        category: t.category,
+        frequency: t.frequency2,
+        status: t.status,
+        daysUntil: t.daysUntil,
       })) : [],
     plaidTransactions: userContext.plaidTransactions ? 
     userContext.plaidTransactions.slice(0, 1000).map(t => ({
         transaction_id: t.transaction_id,
-        amount: t.amount,
+        merchant_name: t.merchant_name,
+        amount: t.adjusted_amount,
         name: t.name,
         display_name: t.display_name,
         description: t.description,
         date: t.date_added,
-        category: t.category
+        category: t.adjusted_category,
+        status: t.status
       })) : [],
     breakdown: userContext.breakdown
   };
