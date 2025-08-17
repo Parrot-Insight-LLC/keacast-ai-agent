@@ -183,8 +183,10 @@ function createContextSummary(userContext) {
     // Include a sample of recent transactions for context
     categories: userContext.categories,
     transactions: userContext.cfTransactions ? 
-      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 250).map(t => ({
+      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 500).map(t => ({
         id: t.id,
+        name: t.title,
+        display_name: t.display_name,
         amount: t.amount,
         description: t.description,
         date: t.date,
@@ -201,6 +203,8 @@ function createContextSummary(userContext) {
     upcomingTransactions: userContext.upcomingTransactions ? 
     userContext.upcomingTransactions.slice(0, 250).map(t => ({
         id: t.id,
+        name: t.title,
+        display_name: t.display_name,
         amount: t.amount,
         description: t.description,
         date: t.start,
@@ -210,6 +214,8 @@ function createContextSummary(userContext) {
     userContext.plaidTransactions.slice(0, 500).map(t => ({
         transaction_id: t.transaction_id,
         amount: t.amount,
+        name: t.name,
+        display_name: t.display_name,
         description: t.description,
         date: t.date_added,
         category: t.category
@@ -218,6 +224,89 @@ function createContextSummary(userContext) {
   };
 
   return summary;
+}
+
+/**
+ * Format response based on content type and structure
+ */
+function formatResponse(text, contextSummary) {
+  if (!text || typeof text !== 'string') {
+    return { formattedText: text, responseType: 'text' };
+  }
+
+  const trimmedText = text.trim();
+  
+  // Check for list patterns
+  if (trimmedText.includes('\n- ') || trimmedText.includes('\n• ') || trimmedText.includes('\n* ') || 
+      trimmedText.match(/^\d+\.\s/m) || trimmedText.includes('1.') && trimmedText.includes('2.')) {
+    return {
+      formattedText: trimmedText,
+      responseType: 'list',
+      listItems: extractListItems(trimmedText)
+    };
+  }
+
+  // Check for transaction data patterns
+  if (trimmedText.toLowerCase().includes('transaction') || 
+      trimmedText.includes('$') || 
+      trimmedText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/) ||
+      trimmedText.includes('amount') || trimmedText.includes('date') || trimmedText.includes('category')) {
+    return {
+      formattedText: trimmedText,
+      responseType: 'transaction_data',
+      hasAmounts: trimmedText.includes('$'),
+      hasDates: trimmedText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/) !== null
+    };
+  }
+
+  // Check for summary/analysis patterns
+  if (trimmedText.toLowerCase().includes('summary') || 
+      trimmedText.toLowerCase().includes('analysis') ||
+      trimmedText.toLowerCase().includes('overview') ||
+      trimmedText.toLowerCase().includes('total')) {
+    return {
+      formattedText: trimmedText,
+      responseType: 'summary',
+      isFinancialSummary: trimmedText.toLowerCase().includes('spending') || trimmedText.toLowerCase().includes('income')
+    };
+  }
+
+  // Check for question/advice patterns
+  if (trimmedText.includes('?') || 
+      trimmedText.toLowerCase().includes('consider') ||
+      trimmedText.toLowerCase().includes('suggest') ||
+      trimmedText.toLowerCase().includes('recommend')) {
+    return {
+      formattedText: trimmedText,
+      responseType: 'advice',
+      isQuestion: trimmedText.includes('?'),
+      isRecommendation: trimmedText.toLowerCase().includes('recommend') || trimmedText.toLowerCase().includes('suggest')
+    };
+  }
+
+  // Default to text
+  return {
+    formattedText: trimmedText,
+    responseType: 'text',
+    wordCount: trimmedText.split(/\s+/).length
+  };
+}
+
+/**
+ * Extract list items from formatted text
+ */
+function extractListItems(text) {
+  const lines = text.split('\n');
+  const items = [];
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.match(/^[-•*]\s/) || trimmed.match(/^\d+\.\s/)) {
+      items.push(trimmed.replace(/^[-•*]\s/, '').replace(/^\d+\.\s/, ''));
+    }
+  }
+  
+  return items;
 }
 
 /**
@@ -403,10 +492,10 @@ exports.chat = async (req, res) => {
 
     const plaidContext = `Here is my current transactions: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
     const upcomingContext = `Here is my current upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
-    // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.cfTransactions, null, 2)}`;
+    const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.cfTransactions, null, 2)}`;
     // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
-    const contextArray = [plaidContext, upcomingContext];
+    const contextArray = [plaidContext, upcomingContext, forecastedContext];
 
     const baseSystem = systemPrompt || `You are Kea, a smart and trustworthy financial assistant built into the Keacast platform. Your job is to help users understand, manage, and improve their financial well-being. You will not mention budget or budgeting. Always respond clearly, accurately, and professionally. Explain financial concepts simply and clearly, summarize income, spending, and forecasting patterns, identify financial risks, habits, and areas of improvement, offer practical, personalized advice for saving, spending, and planning, ask follow-up questions to gain deeper insight into the user's financial goals. Avoid giving legal or investment advice—focus on education and forecasting support. If the user's message is unclear, ask clarifying questions. Prioritize clarity, context, and trustworthiness in every response.`;
 
@@ -483,6 +572,10 @@ exports.chat = async (req, res) => {
     }
 
     const finalText = result.content || 'Sorry, no response generated.';
+    
+    // Format the response based on content type
+    const formattedResponse = formatResponse(finalText, contextSummary);
+    
     const updatedHistory = [
       ...sanitizeMessageArray(history),
       { role: 'user', content: message },
@@ -498,9 +591,11 @@ exports.chat = async (req, res) => {
 
     res.json({
       response: finalText,
+      formattedResponse: formattedResponse,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
+      contextSummary: contextSummary
     });
 
   } catch (error) {
