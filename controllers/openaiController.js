@@ -374,24 +374,14 @@ exports.chat = async (req, res) => {
             userId, 
             token, 
             body: {
-              // "currentDate": currentDate,
-              // "forecastType": "F",
-              // "recentStart": recentStart,
-              // "recentEnd": recentEnd,
-              // "page": "layout",
-              // "position": 0,
-              // selectedAccounts: [accountid],
-              // upcomingEnd: upcomingEnd,
-              // user: userData
-
-              "currentDate": "2025-08-16",
+              "currentDate": currentDate,
               "forecastType": "F",
-              "recentStart": "2025-05-16",
-              "recentEnd": "2025-08-17",
+              "recentStart": recentStart,
+              "recentEnd": recentEnd,
               "page": "layout",
               "position": 0,
               selectedAccounts: [accountid],
-              upcomingEnd: "2025-08-30",
+              upcomingEnd: upcomingEnd,
               user: userData
             } 
           }, ctx);
