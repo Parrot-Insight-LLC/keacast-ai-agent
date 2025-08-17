@@ -521,6 +521,7 @@ exports.chat = async (req, res) => {
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
+      date: moment().format('YYYY-MM-DD HH:mm:ss')
     });
 
   } catch (error) {
