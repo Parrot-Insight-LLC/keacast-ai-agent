@@ -402,11 +402,11 @@ exports.chat = async (req, res) => {
     const contextSummary = createContextSummary(userContext);
 
     const plaidContext = `Here is my current transactions: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
-    const upcomingContext = `Here is my current upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
-    const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.cfTransactions, null, 2)}`;
-    const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
-    const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
-    const contextArray = [plaidContext, upcomingContext, forecastedContext, recentContext, breakdownContext];
+    // const upcomingContext = `Here is my current upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
+    // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.cfTransactions, null, 2)}`;
+    // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
+    // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
+    const contextArray = [plaidContext];
 
     const baseSystem = systemPrompt || `You are Kea, a smart and trustworthy financial assistant built into the Keacast platform. Your job is to help users understand, manage, and improve their financial well-being. You will not mention budget or budgeting. Always respond clearly, accurately, and professionally. Explain financial concepts simply and clearly, summarize income, spending, and forecasting patterns, identify financial risks, habits, and areas of improvement, offer practical, personalized advice for saving, spending, and planning, ask follow-up questions to gain deeper insight into the user's financial goals. Avoid giving legal or investment advice—focus on education and forecasting support. If the user's message is unclear, ask clarifying questions. Prioritize clarity, context, and trustworthiness in every response.`;
 
@@ -442,7 +442,7 @@ exports.chat = async (req, res) => {
     if (requestSize > 500000) { // Increased to 500KB limit to allow more context
       console.warn('Chat endpoint: Request too large, clearing old history');
       // Clear old history to reduce size
-      history = history.slice(-15); // Keep only last 3 messages
+      history = history.slice(-15); // Keep only last 15 messages
       messages.splice(1, messages.length - 2); // Keep only system and current user message
       messages.splice(1, 0, ...history.map(truncateMessage));
       
@@ -735,8 +735,8 @@ exports.checkHistorySize = async (req, res) => {
       messageCount,
       totalSizeBytes: totalSize,
       totalSizeKB: Math.round(totalSize / 1024 * 100) / 100,
-      isLarge: totalSize > 300000,
-      recommendation: totalSize > 300000 ? 'Consider clearing history to prevent rate limiting' : 'Size is acceptable'
+      isLarge: totalSize > 500000,
+      recommendation: totalSize > 500000 ? 'Consider clearing history to prevent rate limiting' : 'Size is acceptable'
     });
   } catch (error) {
     console.error('Check history size error:', error);
