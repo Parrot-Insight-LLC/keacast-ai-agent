@@ -2,7 +2,7 @@
 const redis = require('../services/redisService');
 const { queryAzureOpenAI, functionSchemas } = require('../services/openaiService'); // must support tools
 const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.js
-
+const moment = require('moment');
 const MEMORY_TTL = 3600; // 1 hour
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
 const MAX_MESSAGE_LENGTH = 8000; // increased limit for individual message length
@@ -355,24 +355,24 @@ exports.chat = async (req, res) => {
           const userData = await functionMap.getUserData({ userId, token }, ctx);
           console.log('User data retrieved:', userData);
 
-          // const upcomingEnd = moment().add(14, 'days').format('YYYY-MM-DD');
-          // const currentDate = moment(moment().format('YYYY-MM-DD') + 'T00:00:00').format('YYYY-MM-DD');
-          // const recentStart = moment().subtract(3, 'months').format('YYYY-MM-DD');
-          // const recentEnd = moment().add(1, 'days').format('YYYY-MM-DD');
+          const upcomingEnd = moment().add(14, 'days').format('YYYY-MM-DD');
+          const currentDate = moment(moment().format('YYYY-MM-DD') + 'T00:00:00').format('YYYY-MM-DD');
+          const recentStart = moment().subtract(3, 'months').format('YYYY-MM-DD');
+          const recentEnd = moment().add(1, 'days').format('YYYY-MM-DD');
           
           // Then use user data to get selected accounts
           const selectedAccounts = await functionMap.getSelectedKeacastAccounts({ 
             userId, 
             token, 
             body: {
-              "currentDate": "2025-08-16",
+              "currentDate": currentDate,
               "forecastType": "F",
-              "recentStart": "2025-05-16",
-              "recentEnd": "2025-08-17",
+              "recentStart": recentStart,
+              "recentEnd": recentEnd,
               "page": "layout",
               "position": 0,
               selectedAccounts: [accountid],
-              upcomingEnd: "2025-08-30",
+              upcomingEnd: upcomingEnd,
               user: userData
             } 
           }, ctx);
