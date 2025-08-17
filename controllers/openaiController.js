@@ -412,8 +412,8 @@ exports.chat = async (req, res) => {
     // Create a more intelligent context summary
     const contextSummary = createContextSummary(userContext);
 
-    const plaidContext = `Here is my current transactions: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
-    const upcomingContext = `Here is my current upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
+    const plaidContext = `Here is my transaction history: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
+    const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
     const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
     // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
