@@ -211,7 +211,7 @@ function createContextSummary(userContext) {
         category: t.category
       })) : [],
     plaidTransactions: userContext.plaidTransactions ? 
-    userContext.plaidTransactions.slice(0, 1000).map(t => ({
+    userContext.plaidTransactions.slice(0, 500).map(t => ({
         transaction_id: t.transaction_id,
         amount: t.amount,
         name: t.name,
