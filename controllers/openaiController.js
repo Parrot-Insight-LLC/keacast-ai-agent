@@ -5,7 +5,7 @@ const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.
 const moment = require('moment');
 const MEMORY_TTL = 3600; // 1 hour
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
-const MAX_MESSAGE_LENGTH = 8000; // increased limit for individual message length
+const MAX_MESSAGE_LENGTH = 13000; // increased limit for individual message length
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
 
 function buildSessionKey(req) {
@@ -259,8 +259,8 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       
       // Truncate tool responses to prevent massive message growth
       let toolContent = JSON.stringify(result ?? {});
-      if (toolContent.length > 8000) { // Increased limit to 8KB for tool responses
-        toolContent = toolContent.substring(0, 8000) + '..."_truncated":true}';
+      if (toolContent.length > 13000) { // Increased limit to 13KB for tool responses
+        toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
         console.log('Tool response truncated from', JSON.stringify(result ?? {}).length, 'to', toolContent.length, 'bytes');
       }
       
@@ -583,13 +583,13 @@ exports.analyzeTransactions = async (req, res) => {
     // (Optional) Preload via functionMap if missing
     if (!userContext || Object.keys(userContext).length === 0) {
       if (userId && token) {
-        try {
-          const ctx = { userId, authHeader };
-          const accounts = await functionMap.getUserAccounts({ userId }, ctx);
-          userContext = { accounts: accounts || [], categories: [], shoppingList: [] };
-        } catch (err) {
-          console.warn('Analyze transactions: Preload via functionMap failed:', err?.message);
-        }
+        // try {
+        //   const ctx = { userId, authHeader };
+        //   const accounts = await functionMap.getUserAccounts({ userId }, ctx);
+        //   userContext = { accounts: accounts || [], categories: [], shoppingList: [] };
+        // } catch (err) {
+        //   console.warn('Analyze transactions: Preload via functionMap failed:', err?.message);
+        // }
       }
     }
 
