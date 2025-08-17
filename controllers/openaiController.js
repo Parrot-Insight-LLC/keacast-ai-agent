@@ -1,10 +1,8 @@
 // controllers/openaiController.js
-
-const moment = require('moment');
 const redis = require('../services/redisService');
 const { queryAzureOpenAI, functionSchemas } = require('../services/openaiService'); // must support tools
 const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.js
-
+const moment = require('moment');
 const MEMORY_TTL = 3600; // 1 hour
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
 const MAX_MESSAGE_LENGTH = 8000; // increased limit for individual message length
@@ -185,16 +183,14 @@ function createContextSummary(userContext) {
     // Include a sample of recent transactions for context
     categories: userContext.categories,
     transactions: userContext.cfTransactions ? 
-      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 1000).map(t => ({
-        id: t.transactionid,
+      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 500).map(t => ({
+        id: t.id,
         name: t.title,
         display_name: t.display_name,
         amount: t.amount,
         description: t.description,
         date: t.date,
-        category: t.category,
-        frequency: t.frequency2,
-        status: t.status
+        category: t.category
       })) : [],
     recentTransactions: userContext.recentTransactions ? 
       userContext.recentTransactions.slice(0, 250).map(t => ({
@@ -206,28 +202,23 @@ function createContextSummary(userContext) {
       })) : [],
     upcomingTransactions: userContext.upcomingTransactions ? 
     userContext.upcomingTransactions.slice(0, 250).map(t => ({
-        id: t.transactionid,
+        id: t.id,
         name: t.title,
         display_name: t.display_name,
         amount: t.amount,
         description: t.description,
-        date: t.date,
-        category: t.category,
-        frequency: t.frequency2,
-        status: t.status,
-        daysUntil: t.daysUntil,
+        date: t.start,
+        category: t.category
       })) : [],
     plaidTransactions: userContext.plaidTransactions ? 
-    userContext.plaidTransactions.slice(0, 1000).map(t => ({
+    userContext.plaidTransactions.slice(0, 500).map(t => ({
         transaction_id: t.transaction_id,
-        merchant_name: t.merchant_name,
-        amount: t.adjusted_amount,
+        amount: t.amount,
         name: t.name,
         display_name: t.display_name,
         description: t.description,
         date: t.date_added,
-        category: t.adjusted_category,
-        status: t.status
+        category: t.category
       })) : [],
     breakdown: userContext.breakdown
   };
@@ -521,7 +512,6 @@ exports.chat = async (req, res) => {
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
-      contextSummary: contextArray[0]
     });
 
   } catch (error) {
