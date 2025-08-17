@@ -520,7 +520,8 @@ exports.chat = async (req, res) => {
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
-      dataMessage: dataMessage
+      dataMessage: dataMessage,
+      contextSummary: contextArray[0]
     });
 
   } catch (error) {
