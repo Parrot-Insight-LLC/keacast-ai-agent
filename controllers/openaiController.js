@@ -647,7 +647,7 @@ Include relevant follow-up questions to guide users toward improving financial w
       }
     }
 
-    const finalText = result.content || '';
+    const finalText = result.content || null;
     const rawText = result.raw;
     const updatedHistory = [
       ...sanitizeMessageArray(history),
@@ -664,7 +664,7 @@ Include relevant follow-up questions to guide users toward improving financial w
 
     // Enforce response length limit of 300 characters (API contract)
     const limitedInsights = truncateText(finalText, 300);
-    res.json({ insights: limitedInsights, raw: rawText });
+    res.json({ insights: finalText, raw: rawText });
 
   } catch (error) {
     console.error('Analyze transactions error:', error);
