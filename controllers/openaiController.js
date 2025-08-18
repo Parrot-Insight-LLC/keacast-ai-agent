@@ -647,7 +647,7 @@ Include relevant follow-up questions to guide users toward improving financial w
       }
     }
 
-    const finalText = result.content || null;
+    const finalText = result.content || '';
     const rawText = result.raw;
     const updatedHistory = [
       ...sanitizeMessageArray(history),
