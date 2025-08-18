@@ -648,6 +648,7 @@ Include relevant follow-up questions to guide users toward improving financial w
     }
 
     const finalText = result.content || '';
+    const rawText = result.raw;
     const updatedHistory = [
       ...sanitizeMessageArray(history),
       { role: 'user', content: `Here are the latest transactions:\n${JSON.stringify(transactions)}` },
@@ -663,7 +664,7 @@ Include relevant follow-up questions to guide users toward improving financial w
 
     // Enforce response length limit of 300 characters (API contract)
     const limitedInsights = truncateText(finalText, 300);
-    res.json({ insights: limitedInsights });
+    res.json({ insights: limitedInsights, raw: rawText });
 
   } catch (error) {
     console.error('Analyze transactions error:', error);
