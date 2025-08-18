@@ -606,13 +606,8 @@ exports.analyzeTransactions = async (req, res) => {
 - Behavioral patterns (if any)
 - Actionable suggestions (if any)
 
-The summary should be concise and to the point, easily digestible.
-Include relevant follow-up questions to guide users toward improving financial wellness through the Keacast platform and forecasting.
-
-Here is current context (may be empty):
-Accounts: ${JSON.stringify(userContext.accounts || [])}
-Categories: ${JSON.stringify(userContext.categories || [])}
-Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
+The summary should be concise and to the point, easily digestible but the full text should be readable. Do not include any other text or formatting like ... or anything else.
+Include relevant follow-up questions to guide users toward improving financial wellness through the Keacast platform and forecasting.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
