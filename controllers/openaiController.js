@@ -475,6 +475,7 @@ exports.chat = async (req, res) => {
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
+    let error;
     try {
       console.log('Attempting to get response with tools...');
       const responseWithTools = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'auto' });
@@ -499,6 +500,7 @@ exports.chat = async (req, res) => {
       } catch (directError) {
         console.log('All attempts failed, returning error message');
         result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null };
+        error = directError;
       }
     }
 
@@ -520,7 +522,9 @@ exports.chat = async (req, res) => {
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: !!Object.keys(userContext || {}).length,
-        dataMessage: dataMessage
+      dataMessage: dataMessage,
+      requestSize: requestSize,
+      error: error
     });
 
   } catch (error) {
