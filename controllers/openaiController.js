@@ -605,7 +605,7 @@ exports.analyzeTransactions = async (req, res) => {
 - Behavioral patterns (if any)
 - Actionable suggestions (if any)
 
-The summary should be concise and to the point, easily digestible but the full text should be readable. Do not include any other text or formatting like ... or anything else.
+The summary should be concise and to the point, easily digestible but the full text should be readable. The summary should be no more than 450 characters. Do not include any other text or formatting like ... or anything else.
 Include relevant follow-up questions to guide users toward improving financial wellness through the Keacast platform and forecasting.`;
 
     const messages = [
