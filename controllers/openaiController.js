@@ -481,14 +481,15 @@ exports.chat = async (req, res) => {
       const choice = responseWithTools?.choices?.[0];
       const msg = choice?.message;
       
-      // If the model wants to call tools, execute them
-      if (msg?.tool_calls && msg.tool_calls.length > 0) {
-        console.log('Model requested tool calls, executing...');
-        result = await executeToolCalls(messages, msg.tool_calls, ctx);
-      } else {
-        // No tool calls needed, use the response directly
-        result = { content: msg?.content || '', raw: responseWithTools };
-      }
+      // // If the model wants to call tools, execute them
+      // if (msg?.tool_calls && msg.tool_calls.length > 0) {
+      //   console.log('Model requested tool calls, executing...');
+      //   result = await executeToolCalls(messages, msg.tool_calls, ctx);
+      // } else {
+      //   // No tool calls needed, use the response directly
+      //   result = { content: msg?.content || '', raw: responseWithTools };
+      // }
+      result = { content: msg?.content || '', raw: responseWithTools };
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
@@ -627,13 +628,14 @@ Shopping List: ${JSON.stringify(userContext.shoppingList || [])}`;
       const msg = choice?.message;
       
       // If the model wants to call tools, execute them
-      if (msg?.tool_calls && msg.tool_calls.length > 0) {
-        console.log('Model requested tool calls, executing...');
-        result = await executeToolCalls(messages, msg.tool_calls, ctx);
-      } else {
-        // No tool calls needed, use the response directly
-        result = { content: msg?.content || '', raw: responseWithTools };
-      }
+      // if (msg?.tool_calls && msg.tool_calls.length > 0) {
+      //   console.log('Model requested tool calls, executing...');
+      //   result = await executeToolCalls(messages, msg.tool_calls, ctx);
+      // } else {
+      //   // No tool calls needed, use the response directly
+      //   result = { content: msg?.content || '', raw: responseWithTools };
+      // }
+      result = { content: msg?.content || '', raw: responseWithTools };
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
