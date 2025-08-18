@@ -35,7 +35,7 @@ async function callAOAI(body) {
   }
 }
 
-async function queryAzureOpenAI(messages, { tools = functionSchemas, tool_choice = 'auto', temperature = 0.3, max_tokens = 1000 } = {}) {
+async function queryAzureOpenAI(messages, { tools = functionSchemas, tool_choice = 'auto', temperature = 0.3, max_tokens = 3000 } = {}) {
   const body = { messages, temperature, tools, tool_choice, max_tokens };
   const data = await callAOAI(body);
   // Return the full data so controller can inspect tool calls
