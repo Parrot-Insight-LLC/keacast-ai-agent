@@ -499,8 +499,7 @@ exports.chat = async (req, res) => {
         result = { content: choice?.message?.content || '', raw: directResponse };
       } catch (directError) {
         console.log('All attempts failed, returning error message');
-        result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null };
-        error = directError;
+        result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null, error: directError };
       }
     }
 
@@ -524,7 +523,7 @@ exports.chat = async (req, res) => {
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
       requestSize: requestSize,
-      error: error
+      error: result?.error
     });
 
   } catch (error) {
@@ -643,7 +642,7 @@ Include relevant follow-up questions to guide users toward improving financial w
         result = { content: choice?.message?.content || '', raw: directResponse };
       } catch (directError) {
         console.log('All attempts failed, returning error message');
-        result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null };
+        result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null, error: directError };
       }
     }
 
@@ -664,7 +663,7 @@ Include relevant follow-up questions to guide users toward improving financial w
 
     // Enforce response length limit of 300 characters (API contract)
     const limitedInsights = truncateText(finalText, 300);
-    res.json({ insights: finalText, raw: rawText });
+    res.json({ insights: finalText, raw: rawText, error: result?.error });
 
   } catch (error) {
     console.error('Analyze transactions error:', error);
