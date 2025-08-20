@@ -720,7 +720,7 @@ exports.analyzeTransactions = async (req, res) => {
 
     // Enforce response length limit of 300 characters (API contract)
     const limitedInsights = truncateText(finalText, 300);
-    res.json({ insights: finalText, raw: rawText, error: result?.error, userData: userData, transactions: transactions });
+    res.json({ insights: finalText, raw: rawText, error: result?.error });
 
   } catch (error) {
     console.error('Analyze transactions error:', error);
