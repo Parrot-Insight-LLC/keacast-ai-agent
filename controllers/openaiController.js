@@ -183,7 +183,7 @@ function createContextSummary(userContext) {
     // Include a sample of recent transactions for context
     categories: userContext.categories,
     transactions: userContext.cfTransactions ? 
-      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 500).map(t => ({
+      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 250).map(t => ({
         id: t.id,
         name: t.title,
         display_name: t.display_name,
@@ -218,7 +218,7 @@ function createContextSummary(userContext) {
         daysUntil: t.daysUntil
       })) : [],
     plaidTransactions: userContext.plaidTransactions ? 
-    userContext.plaidTransactions.slice(0, 500).map(t => ({
+    userContext.plaidTransactions.slice(0, 250).map(t => ({
         transaction_id: t.transaction_id,
         amount: t.adjusted_amount,
         name: t.name,
@@ -228,7 +228,9 @@ function createContextSummary(userContext) {
         category: t.adjusted_category,
         status: t.status
       })) : [],
-    breakdown: userContext.breakdown
+    breakdown: userContext.breakdown,
+    balances: userContext.balances,
+    available: userContext.available,
   };
 
   return summary;
@@ -404,6 +406,8 @@ exports.chat = async (req, res) => {
              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
              recentTransactions: selectedAccounts[0]?.recents || [],
              breakdown: selectedAccounts[0]?.breakdown || [],
+             balances: selectedAccounts[0]?.balances || [],
+             available: selectedAccounts[0]?.available || [],
            };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
           dataMessage = 'Chat endpoint: Preloaded user context via functionMap.';
@@ -420,14 +424,39 @@ exports.chat = async (req, res) => {
     // Create a more intelligent context summary
     const contextSummary = createContextSummary(userContext);
 
-    const plaidContext = `Here is my transaction history: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
-    const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
-    const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
+    // const plaidContext = `Here is my transaction history: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
+    // const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
+    // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
+    const completeContext = `
+        Use this context to answer the user's question.
+        Here is my account transaction split by historical, upcoming, and forecasted context:
+        ${JSON.stringify(contextSummary.transactions, null, 2)}
+        ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
+        ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
+        Here is my account balances:
+        ${JSON.stringify(contextSummary.balances, null, 2)}
+        Here is my account available balance:
+        ${JSON.stringify(contextSummary.available, null, 2)}
+    `
     // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
-    const contextArray = [plaidContext, upcomingContext, forecastedContext];
+    const contextArray = [completeContext];
 
-    const baseSystem = systemPrompt || `You are Kea, a smart and trustworthy financial assistant built into the Keacast platform. Your job is to help users understand, manage, and improve their financial well-being. You will not mention budget or budgeting. Always respond clearly, accurately, and professionally. Explain financial concepts simply and clearly, summarize income, spending, and forecasting patterns, identify financial risks, habits, and areas of improvement, offer practical, personalized advice for saving, spending, and planning, ask follow-up questions to gain deeper insight into the user's financial goals. Avoid giving legal or investment advice—focus on education and forecasting support. If the user's message is unclear, ask clarifying questions. Prioritize clarity, context, and trustworthiness in every response.`;
+    const baseSystem = `You are the Keacast Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting.
+
+    Core purpose:
+    - Forecast future cash flow and account balances day-by-day, week-by-week, or month-by-month, so users can anticipate upcoming financial scenarios.
+    - Track both cleared and uncleared transactions, helping users understand their true available balance—not just what appears on paper.
+    - Present intuitive visualizations—such as calendar-based forecasts and category-based breakdowns (e.g., waterfall charts)—to reveal spending patterns, upcoming obligations, and opportunities to optimize.
+    - Empower users to plan with confidence, avoid surprises like overdrafts, and make informed decisions rooted in real-time data.
+    - Provide clarity, structure, and peace of mind without requiring complicated spreadsheets or manual updates.
+
+    Tone & Style:
+    - Clear, empathetic, and supportive
+    - Professional yet approachable
+    - Insightful when explaining forecasting logic, actionable when guiding users
+
+    When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning. If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.`;
 
     // Build message array with memory and clean up long messages
     const messages = [
@@ -597,16 +626,19 @@ exports.analyzeTransactions = async (req, res) => {
       }
     }
 
-    const systemPrompt = `You are a life planning assistant that helps users understand their cash flow habits. When given a list of transactions, summarize key insights into a short summary, including:
-- Total income and spending
-- Forecasted income and spending
-- Forecasted disposable income for the next 30 days
-- High-value or unusual transactions (if any)
-- Behavioral patterns (if any)
-- Actionable suggestions (if any)
+    const systemPrompt = `You are the Keacast Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Your purpose is to help users gain clarity, confidence, and foresight into their cash flow habits. You combine real-time transactions with forecasting to help users plan ahead, avoid surprises, and make better financial decisions.
 
-The summary should be concise and to the point, easily digestible but the full text should be readable. The summary should be no more than 450 characters. Do not include any other text or formatting like ... or anything else.
-Include relevant follow-up questions to guide users toward improving financial wellness through the Keacast platform and forecasting.`;
+    When given a list of transactions, generate a concise, digestible summary (no more than 450 characters). The summary must include:
+    - Total income and total spending
+    - Forecasted income and spending
+    - Forecasted disposable income for the next 30 days
+    - Any high-value or unusual transactions
+    - Behavioral patterns or habits
+    - Actionable suggestions for improvement
+
+    Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast’s strengths: forecasting, reconciliation, and visualization.
+
+    At the end of the summary, include relevant follow-up questions that guide the user toward improving their financial wellness through Keacast’s forecasting features. Avoid unnecessary formatting, symbols, or filler (such as “...”).`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
