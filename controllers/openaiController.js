@@ -698,7 +698,9 @@ exports.analyzeTransactions = async (req, res) => {
     const rawText = result.raw;
     const updatedHistory = [
       ...sanitizeMessageArray(history),
-      { role: 'user', content: `Here are the latest transactions:\n${JSON.stringify(transactions)}` },
+      { role: 'user', content: `Here is my user's data:\n${JSON.stringify(userData)}\n 
+      
+      Here are the latest transactions:\n${JSON.stringify(transactions)}` },
       { role: 'assistant', content: finalText }
     ].slice(-MAX_MEMORY);
 
