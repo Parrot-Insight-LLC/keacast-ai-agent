@@ -1,7 +1,7 @@
 const rateLimit = require('express-rate-limit');
 
 const globalLimiter = rateLimit({
-  windowMs: 30 * 1000,        // 1 minute
+  windowMs: 15 * 1000,        // 1 minute
   max: 120,                   // 120 req/min per IP
   standardHeaders: true,
   legacyHeaders: false,
@@ -9,7 +9,7 @@ const globalLimiter = rateLimit({
 });
 
 const sensitiveLimiter = rateLimit({
-  windowMs: 30 * 1000,
+  windowMs: 15 * 1000,
   max: 30,                    // stricter for LLM endpoints
   standardHeaders: true,
   legacyHeaders: false

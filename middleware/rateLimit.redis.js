@@ -5,7 +5,7 @@ const limiter = new RateLimiterRedis({
   storeClient: redis,
   keyPrefix: 'rlflx',
   points: 120,          // points per duration
-  duration: 30,         // per 60s
+  duration: 15,         // per 60s
   inmemoryBlockOnConsumed: 0
 });
 
@@ -13,7 +13,7 @@ const strictLimiter = new RateLimiterRedis({
   storeClient: redis,
   keyPrefix: 'rlflx_strict',
   points: 30,           // stricter for /chat + /summarize
-  duration: 30
+  duration: 15
 });
 
 function wrapLimiter(instance) {
