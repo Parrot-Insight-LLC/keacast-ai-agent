@@ -604,10 +604,10 @@ exports.analyzeTransactions = async (req, res) => {
   try {
     console.log('Analyze transactions endpoint called');
     const { transactions } = req.body;
-    if (!transactions || !Array.isArray(transactions)) {
-      console.log('Analyze transactions: Missing or invalid transactions array');
-      return res.status(400).json({ error: 'Transactions array is required' });
-    }
+    // if (!transactions || !Array.isArray(transactions)) {
+    //   console.log('Analyze transactions: Missing or invalid transactions array');
+    //   return res.status(400).json({ error: 'Transactions array is required' });
+    // }
 
     console.log('Analyze transactions: Processing', transactions.length, 'transactions');
     const sessionKey = buildSessionKey(req);
