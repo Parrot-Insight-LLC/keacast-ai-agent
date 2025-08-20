@@ -456,7 +456,7 @@ exports.chat = async (req, res) => {
     - Professional yet approachable
     - Insightful when explaining forecasting logic, actionable when guiding users
 
-    When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning. If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.`;
+    When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning (no more than 550 characters). If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.`;
 
     // Build message array with memory and clean up long messages
     const messages = [
@@ -628,7 +628,7 @@ exports.analyzeTransactions = async (req, res) => {
 
     const systemPrompt = `You are the Keacast Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Your purpose is to help users gain clarity, confidence, and foresight into their cash flow habits. You combine real-time transactions with forecasting to help users plan ahead, avoid surprises, and make better financial decisions.
 
-    When given a list of transactions, generate a concise, digestible summary (no more than 450 characters). The summary must include:
+    When given a list of transactions, generate a concise, digestible summary (no more than 325 characters). The summary must include:
     - Total income and total spending
     - Forecasted income and spending
     - Forecasted disposable income for the next 30 days
