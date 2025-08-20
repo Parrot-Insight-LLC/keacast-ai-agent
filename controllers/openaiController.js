@@ -152,7 +152,8 @@ function createContextSummary(userContext) {
     userData: userContext.userData ? {
       hasUserData: true,
       // Include key user fields if they exist
-      ...(userContext.userData.name && { name: userContext.userData.name }),
+      ...(userContext.userData.first_name && { first_name: userContext.userData.first_name }),
+      ...(userContext.userData.last_name && { last_name: userContext.userData.last_name }),
       ...(userContext.userData.email && { email: userContext.userData.email })
     } : { hasUserData: false },
     selectedAccounts: userContext.selectedAccounts ? {
@@ -160,15 +161,16 @@ function createContextSummary(userContext) {
       // Include key account details
       accounts: userContext.selectedAccounts.map(acc => ({
         id: acc.id,
-        name: acc.name,
-        type: acc.type,
+        name: acc.accountname,
+        type: acc.account_type,
         balance: acc.balance,
         available: acc.available,
         current: acc.current,
-        limit: acc.limit,
-        name: acc.name,
-        type: acc.type,
+        credit_limit: acc.credit_limit,
         forecasted: acc.forecasted,
+        bank_account_name: acc.bankaccount_name,
+        institution_name: acc.institution_name,
+        institution_logo: acc.institution_logo,
       })).slice(0, 3) // Limit to first 3 accounts
     } : { count: 0 },
     dataCounts: {
@@ -429,14 +431,22 @@ exports.chat = async (req, res) => {
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
     const completeContext = `
         Use this context to answer the user's question.
-        Here is my account transaction split by historical, upcoming, and forecasted context:
+        Here are my account transactions split by historical, upcoming, and forecasted context:
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
         ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here is my account balances:
+        Here are my account balances:
         ${JSON.stringify(contextSummary.balances, null, 2)}
         Here is my account available balance:
         ${JSON.stringify(contextSummary.available, null, 2)}
+        Here is my user's first name:
+        ${JSON.stringify(contextSummary.userData.first_name, null, 2)}
+        Here is my user's last name:
+        ${JSON.stringify(contextSummary.userData.last_name, null, 2)}
+        Here is my user's email:
+        ${JSON.stringify(contextSummary.userData.email, null, 2)}
+        Here is my user's selected accounts with relevant account details like name, account type, balance, available, current, credit limit, forecasted, bank account name, and institution name:
+        ${JSON.stringify(contextSummary.selectedAccounts, null, 2)}
     `
     // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
@@ -456,7 +466,9 @@ exports.chat = async (req, res) => {
     - Professional yet approachable
     - Insightful when explaining forecasting logic, actionable when guiding users
 
-    When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning (no more than 550 characters). If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.`;
+    When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning (no more than 600 characters). If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.
+    
+    Review the app here: https://keacast.app/ for more context and information.`;
 
     // Build message array with memory and clean up long messages
     const messages = [
@@ -635,6 +647,8 @@ exports.analyzeTransactions = async (req, res) => {
     - Any high-value or unusual transactions
     - Behavioral patterns or habits
     - Actionable suggestions for improvement
+
+    if there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
     Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast’s strengths: forecasting, reconciliation, and visualization.
 
