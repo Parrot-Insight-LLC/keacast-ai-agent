@@ -659,7 +659,12 @@ exports.analyzeTransactions = async (req, res) => {
     const messages = [
       { role: 'system', content: systemPrompt },
       ...sanitizeMessageArray(history),
-      { role: 'user', content: `Here is my user's data:\n${JSON.stringify(userData)}\n 
+      { role: 'user', content: `Here is my user's first name:
+      ${JSON.stringify(userData.firstname, null, 2)}
+      Here is my user's last name:
+      ${JSON.stringify(userData.lastname, null, 2)}
+      Here is my user's email:
+      ${JSON.stringify(userData.email, null, 2)}
       
       Here are the latest transactions:\n${JSON.stringify(transactions)}` }
     ];
