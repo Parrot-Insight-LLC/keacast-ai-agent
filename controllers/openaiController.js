@@ -603,7 +603,7 @@ exports.chat = async (req, res) => {
 exports.analyzeTransactions = async (req, res) => {
   try {
     console.log('Analyze transactions endpoint called');
-    const { transactions, userData } = req.body;
+    const { transactions } = req.body;
     if (!transactions || !Array.isArray(transactions)) {
       console.log('Analyze transactions: Missing or invalid transactions array');
       return res.status(400).json({ error: 'Transactions array is required' });
@@ -657,7 +657,7 @@ exports.analyzeTransactions = async (req, res) => {
     const messages = [
       { role: 'system', content: systemPrompt },
       ...sanitizeMessageArray(history),
-      { role: 'user', content: `Here are the latest transactions:\n${JSON.stringify(transactions)}\n Here is my user's data:\n${JSON.stringify(userData)}` }
+      { role: 'user', content: `Here are the latest transactions:\n${JSON.stringify(transactions)}` }
     ];
 
     console.log('Analyze transactions: Calling OpenAI (tools enabled) with', messages.length, 'messages');
