@@ -15,9 +15,8 @@ const {
   getUpcomingByAccountAndRangePaginated,
   getUpcomingByAccountAndRangeCount,
   getTransactionSummary,
-  getBalances
 } = require('../services/transactions.service');
-const { getUserData, getSelectedKeacastAccounts } = require('./keacast_tool_layer');
+const { getUserData, getSelectedKeacastAccounts, getBalances } = require('./keacast_tool_layer');
 
 // Smart data loading strategy to prevent memory issues
 const SMART_LIMITS = {
