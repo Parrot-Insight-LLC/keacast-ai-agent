@@ -82,7 +82,8 @@ const functionMap = {
   getUserCategories,
   getShoppingList,
   getUserData,
-  getSelectedKeacastAccounts
+  getSelectedKeacastAccounts,
+  getBalances
 };
 
 module.exports = {
@@ -94,5 +95,6 @@ module.exports = {
   getShoppingList,
   getUserData,
   getSelectedKeacastAccounts,
+  getBalances,
   functionMap // 👈 Exported for OpenAI tool handler integration
 };

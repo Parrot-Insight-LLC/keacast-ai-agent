@@ -394,7 +394,7 @@ exports.chat = async (req, res) => {
               user: userData
             } 
           }, ctx);
-                     const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
+          const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
           console.log('Balances retrieved:', balances);
           console.log('Selected accounts retrieved:', selectedAccounts);
 
