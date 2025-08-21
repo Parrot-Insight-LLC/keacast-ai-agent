@@ -925,9 +925,36 @@ exports.getChatHistory = async (req, res) => {
       const history = JSON.parse(historyData);
       const sanitizedHistory = sanitizeMessageArray(history);
       
-      // Filter out system messages and add timestamps
+      // Filter out system messages and context messages, then add timestamps
       const conversationHistory = sanitizedHistory
-        .filter(msg => msg.role === 'user' || msg.role === 'assistant')
+        .filter(msg => {
+          // Only include user and assistant messages
+          if (msg.role !== 'user' && msg.role !== 'assistant') {
+            return false;
+          }
+          
+          // Filter out context messages
+          if (msg.role === 'user' && msg.content) {
+            const content = msg.content.trim();
+            
+            // Filter out chat context messages (start with "Use this context to answer the user's question.")
+            if (content.startsWith('Use this context to answer the user\'s question.')) {
+              return false;
+            }
+            
+            // Filter out transaction analysis context messages (start with "Here is my user's data:")
+            if (content.startsWith('Here is my user\'s data:')) {
+              return false;
+            }
+            
+            // Filter out messages that are primarily JSON data (likely context)
+            if (content.includes('"transactions":') && content.includes('"accounts":') && content.length > 1000) {
+              return false;
+            }
+          }
+          
+          return true;
+        })
         .map((msg, index) => {
           // Calculate estimated timestamp based on message position
           // Assuming messages are roughly 1 minute apart
@@ -957,6 +984,13 @@ exports.getChatHistory = async (req, res) => {
           sessionId: sessionKey.replace('session:', ''),
           hasSystemMessages: sanitizedHistory.some(msg => msg.role === 'system'),
           hasToolMessages: sanitizedHistory.some(msg => msg.role === 'tool'),
+          hasContextMessages: sanitizedHistory.some(msg => 
+            msg.role === 'user' && msg.content && (
+              msg.content.trim().startsWith('Use this context to answer the user\'s question.') ||
+              msg.content.trim().startsWith('Here is my user\'s data:') ||
+              (msg.content.includes('"transactions":') && msg.content.includes('"accounts":') && msg.content.length > 1000)
+            )
+          ),
           estimatedSessionDuration: conversationHistory.length > 0 ? 
             `${Math.round(conversationHistory.length * 1)} minutes` : '0 minutes',
           lastUpdated: new Date().toISOString()

@@ -53,6 +53,7 @@ curl -X GET /api/agent/chat-history \
 ### Chat History Endpoint
 - **GET** `/api/agent/chat-history`
 - Retrieves conversation history for a specific session with timestamps
+- **Note**: Excludes system messages and context messages (transaction data, account information, etc.)
 
 **Request Body:**
 ```json
@@ -91,6 +92,7 @@ curl -X GET /api/agent/chat-history \
     "sessionId": "user123",
     "hasSystemMessages": true,
     "hasToolMessages": false,
+    "hasContextMessages": true,
     "estimatedSessionDuration": "2 minutes",
     "lastUpdated": "2024-01-15T10:35:00.000Z"
   }
