@@ -394,8 +394,8 @@ exports.chat = async (req, res) => {
               user: userData
             } 
           }, ctx);
-          // const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
-          // const filteredBalances = balances ? balances.filter(balance => moment(balance.date).isBetween(moment().subtract(6, 'months'), moment().add(6, 'months'))) : [];
+          const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
+          const filteredBalances = balances ? balances.forecasted.filter(balance => moment(balance.date).isBetween(moment().subtract(6, 'months'), moment().add(6, 'months'))) : [];
           console.log('Selected accounts retrieved:', selectedAccounts);
 
                      // Merge transactions from both sources (request body and selected accounts)
@@ -416,7 +416,7 @@ exports.chat = async (req, res) => {
              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
              recentTransactions: selectedAccounts[0]?.recents || [],
              breakdown: selectedAccounts[0]?.breakdown || [],
-            //  balances: filteredBalances || selectedAccounts[0]?.balances || [],
+             balances: filteredBalances || selectedAccounts[0]?.balances || [],
              available: selectedAccounts[0]?.available || [],
            };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
