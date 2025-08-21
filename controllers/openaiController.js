@@ -438,7 +438,7 @@ exports.chat = async (req, res) => {
     // const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
     const completeContext = `
-        Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
+        Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available and if the user has future negative balances then warn them. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
         Here are my account transactions split by historical, upcoming, and forecasted context each transaction has a date, amount, category, name, and description:
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
@@ -468,6 +468,8 @@ exports.chat = async (req, res) => {
     - Present intuitive visualizations—such as calendar-based forecasts and category-based breakdowns (e.g., waterfall charts)—to reveal spending patterns, upcoming obligations, and opportunities to optimize.
     - Empower users to plan with confidence, avoid surprises like overdrafts, and make informed decisions rooted in real-time data.
     - Provide clarity, structure, and peace of mind without requiring complicated spreadsheets or manual updates.
+    - Provide proactive planning and suggestions to help the user save money, invest, pay off debt, plan for a vacation, retirement, etc.
+    - Act as a financial advisor and financial planner to help the user make informed decisions, provide advice, and guide them towards a financially secure future.
 
     Tone & Style:
     - Clear, empathetic, and supportive
