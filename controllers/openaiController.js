@@ -5,7 +5,7 @@ const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.
 const moment = require('moment');
 const MEMORY_TTL = 3600; // 1 hour
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
-const MAX_MESSAGE_LENGTH = 13000; // increased limit for individual message length
+const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
 
 function buildSessionKey(req) {
@@ -443,8 +443,6 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
         ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here are my account balances with the following details: amount, date, status:
-        ${JSON.stringify(contextSummary.balances, null, 2)}
         Here is my account available balance:
         ${JSON.stringify(contextSummary.available, null, 2)}
         Here is my user's first name:
@@ -455,6 +453,8 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
         Here is my user's selected accounts with relevant account details like name, account type, balance, available, current, credit limit, forecasted, bank account name, and institution name:
         ${JSON.stringify(contextSummary.selectedAccounts, null, 2)}
+        Here are my account balances (posted, pending and forecasted) with the following details: amount, date, status:
+        ${JSON.stringify(contextSummary.balances, null, 2)}
     `
     // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
@@ -507,7 +507,7 @@ exports.chat = async (req, res) => {
     const requestSize = JSON.stringify(messages).length;
     console.log('Chat endpoint: Request size:', requestSize, 'bytes');
     
-    if (requestSize > 500000) { // Increased to 500KB limit to allow more context
+    if (requestSize > 750000) { // Increased to 750KB limit to allow more context
       console.warn('Chat endpoint: Request too large, clearing old history');
       // Clear old history to reduce size
       history = history.slice(-50); // Keep only last 50 messages
