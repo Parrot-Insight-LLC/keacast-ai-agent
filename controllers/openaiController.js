@@ -152,8 +152,8 @@ function createContextSummary(userContext) {
     userData: userContext.userData ? {
       hasUserData: true,
       // Include key user fields if they exist
-      ...(userContext.userData.first_name && { first_name: userContext.userData.first_name }),
-      ...(userContext.userData.last_name && { last_name: userContext.userData.last_name }),
+      ...(userContext.userData.firstname && { first_name: userContext.userData.firstname }),
+      ...(userContext.userData.lastname && { last_name: userContext.userData.lastname }),
       ...(userContext.userData.email && { email: userContext.userData.email })
     } : { hasUserData: false },
     selectedAccounts: userContext.selectedAccounts ? {
