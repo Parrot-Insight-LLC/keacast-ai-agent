@@ -103,6 +103,21 @@ curl -X GET /api/agent/chat-history \
 - **DELETE** `/api/agent/clear-history`
 - Clears conversation history for a specific session
 
+**Request Options:**
+```bash
+# Option 1: Using query parameter
+curl -X DELETE /api/agent/clear-history?sessionId=user123
+
+# Option 2: Using header
+curl -X DELETE /api/agent/clear-history \
+  -H 'x-session-id: user123'
+
+# Option 3: Using request body (if supported by your client)
+curl -X DELETE /api/agent/clear-history \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId": "user123"}'
+```
+
 ### Health Check
 - **GET** `/health`
 - Returns API status and environment information

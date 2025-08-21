@@ -9,7 +9,13 @@ const MAX_MESSAGE_LENGTH = 13000; // increased limit for individual message leng
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
 
 function buildSessionKey(req) {
-  return `session:${req.body.sessionId || req.user?.id || 'anonymous'}`;
+  // Check multiple sources for sessionId in order of preference
+  const sessionId = req.body.sessionId || 
+                   req.query.sessionId || 
+                   req.headers['x-session-id'] ||
+                   req.user?.id || 
+                   'anonymous';
+  return `session:${sessionId}`;
 }
 
 function truncateText(text, maxChars) {
@@ -777,18 +783,40 @@ exports.redisTest = async (req, res) => {
 exports.clearHistory = async (req, res) => {
   try {
     console.log('Clear history endpoint called');
+    console.log('Clear history: Request body:', req.body);
+    console.log('Clear history: Request query:', req.query);
+    console.log('Clear history: Request headers:', req.headers);
+    
     const sessionKey = buildSessionKey(req);
     console.log('Clear history: Session key:', sessionKey);
 
+    // Check if the session exists before trying to delete it
+    const existingHistory = await redis.get(sessionKey);
+    console.log('Clear history: Existing history found:', !!existingHistory);
+
     try {
-      await redis.del(sessionKey);
-      console.log('Clear history: Successfully cleared session history');
-      res.json({
-        success: true,
-        message: 'Conversation history cleared successfully',
-        sessionKey: sessionKey,
-        note: 'This will help prevent rate limiting from large conversation history'
-      });
+      const deleteResult = await redis.del(sessionKey);
+      console.log('Clear history: Redis delete result:', deleteResult);
+      
+      if (deleteResult === 1) {
+        console.log('Clear history: Successfully cleared session history');
+        res.json({
+          success: true,
+          message: 'Conversation history cleared successfully',
+          sessionKey: sessionKey,
+          deleted: true,
+          note: 'This will help prevent rate limiting from large conversation history'
+        });
+      } else {
+        console.log('Clear history: No session found to delete');
+        res.json({
+          success: true,
+          message: 'No conversation history found to clear',
+          sessionKey: sessionKey,
+          deleted: false,
+          note: 'Session may have already been cleared or never existed'
+        });
+      }
     } catch (redisError) {
       console.warn('Clear history: Redis delete failed:', redisError.message);
       res.status(500).json({ error: 'Failed to clear history', details: redisError.message });
