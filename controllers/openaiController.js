@@ -394,7 +394,7 @@ exports.chat = async (req, res) => {
               user: userData
             } 
           }, ctx);
-          const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
+          // const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
           console.log('Balances retrieved:', balances);
           console.log('Selected accounts retrieved:', selectedAccounts);
 
@@ -416,7 +416,7 @@ exports.chat = async (req, res) => {
              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
              recentTransactions: selectedAccounts[0]?.recents || [],
              breakdown: selectedAccounts[0]?.breakdown || [],
-             balances: balances ? balances : selectedAccounts[0]?.balances || [],
+             balances: selectedAccounts[0]?.balances || [],
              available: selectedAccounts[0]?.available || [],
            };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
