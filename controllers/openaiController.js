@@ -395,7 +395,7 @@ exports.chat = async (req, res) => {
             } 
           }, ctx);
           // const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
-          console.log('Balances retrieved:', balances);
+          // console.log('Balances retrieved:', balances);
           console.log('Selected accounts retrieved:', selectedAccounts);
 
                      // Merge transactions from both sources (request body and selected accounts)
