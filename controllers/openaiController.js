@@ -688,7 +688,7 @@ exports.analyzeTransactions = async (req, res) => {
       //   // No tool calls needed, use the response directly
       //   result = { content: msg?.content || '', raw: responseWithTools };
       // }
-      result = { content: msg?.content || '', raw: responseWithTools };
+      result = { content: msg?.content || 'How can I help? Ask Keacast anything about your finances or to perform a task.', raw: responseWithTools };
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
