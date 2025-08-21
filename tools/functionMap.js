@@ -209,6 +209,12 @@ const functionMap = {
     const { userId, token, body } = args;
     const result = await getSelectedKeacastAccounts({ userId, token, body });
     return result;
+  },
+
+  async getBalances(args, ctx) {
+    const { accountId, userId, token, body } = args;
+    const result = await getBalances({ accountId, userId, token, body });
+    return result;
   }
 };
 

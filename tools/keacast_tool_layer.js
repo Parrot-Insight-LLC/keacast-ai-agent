@@ -65,6 +65,12 @@ async function getSelectedKeacastAccounts({ userId, token, body }) {
   return response.data;
 }
 
+async function getBalances({ accountId, userId, token, body }) {
+  const url = `${BASE_URL}/balances/getall/${accountId}/${moment().format('YYYY-MM-DD')}`;
+  const response = await axios.get(url, AUTH_HEADER(token));
+  return response.data;
+}
+
 // --------------------------------------
 // Function Map for Tool Execution
 // --------------------------------------

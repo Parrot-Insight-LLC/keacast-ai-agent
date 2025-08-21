@@ -388,6 +388,8 @@ exports.chat = async (req, res) => {
               user: userData
             } 
           }, ctx);
+          const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token });
+          console.log('Balances retrieved:', balances);
           console.log('Selected accounts retrieved:', selectedAccounts);
 
                      // Merge transactions from both sources (request body and selected accounts)
@@ -408,7 +410,7 @@ exports.chat = async (req, res) => {
              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
              recentTransactions: selectedAccounts[0]?.recents || [],
              breakdown: selectedAccounts[0]?.breakdown || [],
-             balances: selectedAccounts[0]?.balances || [],
+             balances: balances ? balances : selectedAccounts[0]?.balances || [],
              available: selectedAccounts[0]?.available || [],
            };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
