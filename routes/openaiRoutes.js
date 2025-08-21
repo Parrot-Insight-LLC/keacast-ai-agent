@@ -8,7 +8,7 @@ router.post('/chat', chat);
 router.post('/summarize', analyzeTransactions);
 
 // History management endpoints
-router.get('/chat-history', getChatHistory);
+router.post('/chat-history', getChatHistory);
 router.delete('/clear-history', clearHistory);
 router.get('/check-history-size', checkHistorySize);
 router.delete('/clear-session/:sessionId', clearSessionById);
