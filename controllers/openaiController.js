@@ -152,8 +152,8 @@ function createContextSummary(userContext) {
     userData: userContext.userData ? {
       hasUserData: true,
       // Include key user fields if they exist
-      ...(userContext.userData.firstname && { first_name: userContext.userData.firstname }),
-      ...(userContext.userData.lastname && { last_name: userContext.userData.lastname }),
+      ...(userContext.userData.firstname && { firstname: userContext.userData.firstname }),
+      ...(userContext.userData.lastname && { lastname: userContext.userData.lastname }),
       ...(userContext.userData.email && { email: userContext.userData.email })
     } : { hasUserData: false },
     selectedAccounts: userContext.selectedAccounts ? {
@@ -442,11 +442,11 @@ exports.chat = async (req, res) => {
         Here is my account available balance:
         ${JSON.stringify(contextSummary.available, null, 2)}
         Here is my user's first name:
-        ${JSON.stringify(contextSummary.userData.first_name, null, 2)}
+        ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
         Here is my user's last name:
-        ${JSON.stringify(contextSummary.userData.last_name, null, 2)}
+        ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
         Here is my user's email:
-        ${JSON.stringify(contextSummary.userData.email, null, 2)}
+        ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
         Here is my user's selected accounts with relevant account details like name, account type, balance, available, current, credit limit, forecasted, bank account name, and institution name:
         ${JSON.stringify(contextSummary.selectedAccounts, null, 2)}
     `
