@@ -435,7 +435,7 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
         ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here are my account balances with the following details: balance, date, status:
+        Here are my account balances with the following details: amount, date, status:
         ${JSON.stringify(contextSummary.balances, null, 2)}
         Here is my account available balance:
         ${JSON.stringify(contextSummary.available, null, 2)}
