@@ -197,7 +197,7 @@ function createContextSummary(userContext) {
         display_name: t.display_name,
         amount: t.amount,
         description: t.description,
-        date: t.start,
+        date: moment(t.start).format('MMM DD, YYYY'),
         category: t.category,
         status: t.status,
         merchant_name: t.merchant,
@@ -208,7 +208,7 @@ function createContextSummary(userContext) {
         id: t.id,
         amount: t.amount,
         description: t.description,
-        date: t.date,
+        date: moment(t.start).format('MMM DD, YYYY'),
         category: t.category
       })) : [],
     upcomingTransactions: userContext.upcomingTransactions ? 
@@ -218,7 +218,7 @@ function createContextSummary(userContext) {
         display_name: t.display_name,
         amount: t.amount,
         description: t.description,
-        date: t.start,
+        date: moment(t.start).format('MMM DD, YYYY'),
         category: t.category,
         status: t.status,
         merchant_name: t.merchant,
@@ -232,7 +232,7 @@ function createContextSummary(userContext) {
         name: t.name,
         display_name: t.display_name,
         description: t.description,
-        date: t.date,
+        date: moment(t.date).format('MMM DD, YYYY'),
         category: t.adjusted_category,
         status: t.status
       })) : [],
