@@ -431,11 +431,11 @@ exports.chat = async (req, res) => {
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
     const completeContext = `
         Use this context to answer the user's question.
-        Here are my account transactions split by historical, upcoming, and forecasted context:
+        Here are my account transactions split by historical, upcoming, and forecasted context each transaction has a date, amount, category, name, and description:
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
         ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here are my account balances:
+        Here are my account balances with the following details: balance, date, status:
         ${JSON.stringify(contextSummary.balances, null, 2)}
         Here is my account available balance:
         ${JSON.stringify(contextSummary.available, null, 2)}
@@ -707,7 +707,7 @@ exports.analyzeTransactions = async (req, res) => {
       ...sanitizeMessageArray(history),
       { role: 'user', content: `Here is my user's data:\n${JSON.stringify(userData)}\n 
       
-      Here are the latest transactions:\n${JSON.stringify(transactions)}` },
+      Here are the latest transactions each transactions has a unique id, date, amount, and description:\n${JSON.stringify(transactions)}` },
       { role: 'assistant', content: finalText }
     ].slice(-MAX_MEMORY);
 
