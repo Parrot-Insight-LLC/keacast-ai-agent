@@ -15,6 +15,7 @@ const {
   getUpcomingByAccountAndRangePaginated,
   getUpcomingByAccountAndRangeCount,
   getTransactionSummary,
+  getBalances
 } = require('../services/transactions.service');
 const { getUserData, getSelectedKeacastAccounts } = require('./keacast_tool_layer');
 
