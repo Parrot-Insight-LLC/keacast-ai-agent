@@ -502,7 +502,7 @@ exports.chat = async (req, res) => {
     if (requestSize > 500000) { // Increased to 500KB limit to allow more context
       console.warn('Chat endpoint: Request too large, clearing old history');
       // Clear old history to reduce size
-      history = history.slice(-15); // Keep only last 15 messages
+      history = history.slice(-20); // Keep only last 15 messages
       messages.splice(1, messages.length - 2); // Keep only system and current user message
       messages.splice(1, 0, ...history.map(truncateMessage));
       
@@ -899,6 +899,75 @@ exports.repairSession = async (req, res) => {
     }
   } catch (error) {
     console.error('Repair session error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// Add a new endpoint to get chat conversation history
+exports.getChatHistory = async (req, res) => {
+  try {
+    console.log('Get chat history endpoint called');
+    const sessionKey = buildSessionKey(req);
+    console.log('Get chat history: Session key:', sessionKey);
+
+    try {
+      const historyData = await redis.get(sessionKey);
+      if (!historyData) {
+        return res.json({
+          success: true,
+          message: 'No conversation history found',
+          sessionKey: sessionKey,
+          history: [],
+          messageCount: 0
+        });
+      }
+      
+      const history = JSON.parse(historyData);
+      const sanitizedHistory = sanitizeMessageArray(history);
+      
+      // Filter out system messages and add timestamps
+      const conversationHistory = sanitizedHistory
+        .filter(msg => msg.role === 'user' || msg.role === 'assistant')
+        .map((msg, index) => {
+          // Calculate estimated timestamp based on message position
+          // Assuming messages are roughly 1 minute apart
+          const estimatedTime = new Date();
+          estimatedTime.setMinutes(estimatedTime.getMinutes() - (sanitizedHistory.length - index));
+          
+          return {
+            id: index + 1,
+            role: msg.role,
+            content: msg.content,
+            timestamp: estimatedTime.toISOString(),
+            messageNumber: index + 1,
+            estimatedTime: true // Flag to indicate this is an estimated timestamp
+          };
+        });
+      
+      console.log('Get chat history: Retrieved', conversationHistory.length, 'messages');
+      
+      res.json({
+        success: true,
+        message: 'Chat history retrieved successfully',
+        sessionKey: sessionKey,
+        history: conversationHistory,
+        messageCount: conversationHistory.length,
+        totalHistorySize: sanitizedHistory.length,
+        metadata: {
+          sessionId: sessionKey.replace('session:', ''),
+          hasSystemMessages: sanitizedHistory.some(msg => msg.role === 'system'),
+          hasToolMessages: sanitizedHistory.some(msg => msg.role === 'tool'),
+          estimatedSessionDuration: conversationHistory.length > 0 ? 
+            `${Math.round(conversationHistory.length * 1)} minutes` : '0 minutes',
+          lastUpdated: new Date().toISOString()
+        }
+      });
+    } catch (redisError) {
+      console.warn('Get chat history: Redis operation failed:', redisError.message);
+      res.status(500).json({ error: 'Failed to retrieve chat history', details: redisError.message });
+    }
+  } catch (error) {
+    console.error('Get chat history error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

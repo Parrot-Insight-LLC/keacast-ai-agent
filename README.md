@@ -33,6 +33,11 @@ curl -X POST /api/agent/summarize \
 # 3. Ask follow-up questions (AI remembers the transaction analysis)
 curl -X POST /api/agent/chat \
   -d '{"sessionId": "user123", "message": "Tell me more about those transactions"}'
+
+# 4. Retrieve conversation history
+curl -X GET /api/agent/chat-history \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId": "user123"}'
 ```
 
 ## 📡 API Endpoints
@@ -44,6 +49,53 @@ curl -X POST /api/agent/chat \
 ### Summarize Endpoint  
 - **POST** `/api/agent/summarize`
 - Analyzes transaction data and adds insights to conversation history
+
+### Chat History Endpoint
+- **GET** `/api/agent/chat-history`
+- Retrieves conversation history for a specific session with timestamps
+
+**Request Body:**
+```json
+{
+  "sessionId": "user123"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Chat history retrieved successfully",
+  "sessionKey": "session:user123",
+  "history": [
+    {
+      "id": 1,
+      "role": "user",
+      "content": "Hello!",
+      "timestamp": "2024-01-15T10:30:00.000Z",
+      "messageNumber": 1,
+      "estimatedTime": true
+    },
+    {
+      "id": 2,
+      "role": "assistant",
+      "content": "Hello! How can I help you with your finances today?",
+      "timestamp": "2024-01-15T10:31:00.000Z",
+      "messageNumber": 2,
+      "estimatedTime": true
+    }
+  ],
+  "messageCount": 2,
+  "totalHistorySize": 4,
+  "metadata": {
+    "sessionId": "user123",
+    "hasSystemMessages": true,
+    "hasToolMessages": false,
+    "estimatedSessionDuration": "2 minutes",
+    "lastUpdated": "2024-01-15T10:35:00.000Z"
+  }
+}
+```
 
 ### Clear History Endpoint
 - **DELETE** `/api/agent/clear-history`
