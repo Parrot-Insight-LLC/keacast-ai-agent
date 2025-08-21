@@ -505,7 +505,7 @@ exports.chat = async (req, res) => {
       console.warn('Chat endpoint: Request too large, clearing old history');
       // Clear old history to reduce size
       history = history.slice(-50); // Keep only last 50 messages
-      // messages.splice(1, messages.length - 2); // Keep only system and current user message
+      messages.splice(1, messages.length - 2); // Keep only system and current user message
       messages.splice(1, 0, ...history.map(truncateMessage));
       
       // Recalculate size after cleanup
