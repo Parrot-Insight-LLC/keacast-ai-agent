@@ -925,11 +925,16 @@ exports.getChatHistory = async (req, res) => {
       const history = JSON.parse(historyData);
       const sanitizedHistory = sanitizeMessageArray(history);
       
-      // Filter out system messages and context messages, then add timestamps
+      // Filter out system messages, context messages, and empty messages, then add timestamps
       const conversationHistory = sanitizedHistory
         .filter(msg => {
           // Only include user and assistant messages
           if (msg.role !== 'user' && msg.role !== 'assistant') {
+            return false;
+          }
+          
+          // Filter out empty or whitespace-only messages
+          if (!msg.content || msg.content.trim() === '') {
             return false;
           }
           
