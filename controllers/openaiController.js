@@ -438,7 +438,7 @@ exports.chat = async (req, res) => {
     // const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
     const completeContext = `
-        Use this context to answer the user's question.
+        Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
         Here are my account transactions split by historical, upcoming, and forecasted context each transaction has a date, amount, category, name, and description:
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
