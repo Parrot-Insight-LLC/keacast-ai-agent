@@ -236,6 +236,30 @@ function createContextSummary(userContext) {
         category: t.adjusted_category,
         status: t.status
       })) : [],
+    possibleRecurringTransactions: userContext.possibleRecurringTransactions ? 
+    userContext.possibleRecurringTransactions.slice(0, 250).map(t => ({
+        id: t.transaction_id,
+        name: t.name,
+        last_amount: t.last_amount,
+        average_amount: t.average_amount,
+        date: moment(t.date).format('MMM DD, YYYY'),
+        first_date: moment(t.first_date).format('MMM DD, YYYY'),
+        category: t.data[0].adjusted_category,
+        merchant_name: t.data[0].merchant,
+        frequency: t.frequency2,
+        transactions: t.data.map(d => ({
+          id: d.transaction_id,
+          amount: d.adjusted_amount,
+          name: d.name,
+          display_name: d.display_name,
+          description: d.description,
+          date: moment(d.date).format('MMM DD, YYYY'),
+          category: d.adjusted_category,
+          merchant_name: d.merchant_name,
+          frequency: d.frequency2,
+          status: d.status,
+        })).slice(0 , 20)
+      })) : [],
     breakdown: userContext.breakdown,
     balances: userContext.balances,
     available: userContext.available,
@@ -413,6 +437,7 @@ exports.chat = async (req, res) => {
              shoppingList: selectedAccounts[0]?.shoppingList || userContext.shoppingList || [], // fill if you expose a shoppingList tool in functionMap
              cfTransactions: allTransactions,
              upcomingTransactions: selectedAccounts[0]?.upcoming || [],
+             possibleRecurringTransactions: selectedAccounts[0]?.plaidRecurrings || [],
              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
              recentTransactions: selectedAccounts[0]?.recents || [],
              breakdown: selectedAccounts[0]?.breakdown || [],
@@ -443,6 +468,8 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
         ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
+        Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
+        ${JSON.stringify(contextSummary.possibleRecurringTransactions, null, 2)}
         Here is my account available balance:
         ${JSON.stringify(contextSummary.available, null, 2)}
         Here is my user's first name:
