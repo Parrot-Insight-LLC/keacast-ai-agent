@@ -938,7 +938,7 @@ Based on this transaction and your analysis of the user's categorization pattern
           console.log('Auto-categorize: Using closest match:', closestMatch);
           return res.json({
             success: true,
-            suggestedCategory: closestMatch,
+            suggestedCategory: closestMatch.name,
             confidence: 'medium',
             note: 'Category was adjusted to match available options',
             originalSuggestion: suggestedCategory
