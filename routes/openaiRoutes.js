@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory } = require('../controllers/openaiController');
+const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction } = require('../controllers/openaiController');
 const {redisTest} = require('../controllers/openaiController');
 
 // Chat and analysis endpoints
 router.post('/chat', chat);
 router.post('/summarize', analyzeTransactions);
+router.post('/auto-categorize', autoCategorizeTransaction);
 
 // History management endpoints
 router.post('/chat-history', getChatHistory);

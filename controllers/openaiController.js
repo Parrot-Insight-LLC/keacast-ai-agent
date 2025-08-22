@@ -816,6 +816,204 @@ exports.analyzeTransactions = async (req, res) => {
   }
 };
 
+// ----------------------------
+// 🏷️ Auto-categorization endpoint
+// ----------------------------
+exports.autoCategorizeTransaction = async (req, res) => {
+  try {
+    console.log('Auto-categorize transaction endpoint called');
+    const { sessionId, transaction, transactionHistory, categories } = req.body;
+    
+    if (!transaction) {
+      console.log('Auto-categorize: Missing transaction in request body');
+      return res.status(400).json({ error: 'Transaction is required' });
+    }
+    
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+      console.log('Auto-categorize: Missing or invalid categories array');
+      return res.status(400).json({ error: 'Categories array is required and must not be empty' });
+    }
+
+    console.log('Auto-categorize: Processing transaction:', transaction.name || transaction.display_name);
+    console.log('Auto-categorize: Available categories:', categories.length);
+
+    const systemPrompt = `You are an expert financial transaction categorizer. Your job is to analyze a transaction and suggest the most appropriate category from the user's existing categories.
+
+    **Your Task:**
+    - Analyze the transaction in question (amount, title, name, display_name, merchant_name)
+    - Review the user's transaction history to understand their categorization patterns
+    - Consider the user's existing categories and how they've categorized similar transactions
+    - Return ONLY the single best category name from the user's categories list
+
+    **Analysis Guidelines:**
+    1. **Merchant Analysis**: Look at the merchant name and consider what type of business it is
+    2. **Amount Patterns**: Consider the transaction amount and typical spending patterns for different categories
+    3. **Historical Patterns**: Review how the user has categorized similar transactions in the past
+    4. **Category Logic**: Use common sense - groceries from grocery stores, gas from gas stations, etc.
+    5. **User Preferences**: Respect the user's existing categorization choices and patterns
+
+    **Response Format:**
+    - Return ONLY the category name as a string
+    - Do not include explanations, justifications, or additional text
+    - The category must exactly match one of the categories in the user's list
+    - If no good match exists, choose the most reasonable category from the available options
+
+    **Example Response:**
+    "Groceries"
+    or
+    "Gas & Fuel"
+    or
+    "Entertainment"
+
+    Remember: Your response should be a single category name that best fits the transaction based on the user's history and preferences.`;
+
+    const userMessage = `Please categorize this transaction:
+
+**Transaction to Categorize:**
+- Name: ${transaction.name || 'N/A'}
+- Display Name: ${transaction.display_name || 'N/A'}
+- Amount: $${transaction.amount || 'N/A'}
+- Merchant: ${transaction.merchant_name || 'N/A'}
+- Description: ${transaction.description || 'N/A'}
+
+**Available Categories:**
+${categories.map(cat => `- ${cat}`).join('\n')}
+
+**User's Transaction History (for pattern analysis):**
+${transactionHistory ? JSON.stringify(transactionHistory.slice(0, 100), null, 2) : 'No transaction history provided'}
+
+Based on this transaction and your analysis of the user's categorization patterns, what is the best category for this transaction?`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage }
+    ];
+
+    console.log('Auto-categorize: Calling OpenAI with', messages.length, 'messages');
+
+    try {
+      const response = await queryAzureOpenAI(messages, { 
+        tools: functionSchemas, 
+        tool_choice: 'none',
+        temperature: 0.1, // Low temperature for consistent categorization
+        max_tokens: 50 // Short response, just the category name
+      });
+      
+      const choice = response?.choices?.[0];
+      const suggestedCategory = choice?.message?.content?.trim() || '';
+      
+      console.log('Auto-categorize: Suggested category:', suggestedCategory);
+      
+      // Validate that the suggested category exists in the user's categories
+      const isValidCategory = categories.some(cat => 
+        cat.toLowerCase() === suggestedCategory.toLowerCase()
+      );
+      
+      if (!isValidCategory && suggestedCategory) {
+        console.warn('Auto-categorize: Suggested category not in user list, finding closest match');
+        // Find the closest matching category
+        const closestMatch = categories.find(cat => 
+          cat.toLowerCase().includes(suggestedCategory.toLowerCase()) ||
+          suggestedCategory.toLowerCase().includes(cat.toLowerCase())
+        );
+        
+        if (closestMatch) {
+          console.log('Auto-categorize: Using closest match:', closestMatch);
+          return res.json({
+            success: true,
+            suggestedCategory: closestMatch,
+            confidence: 'medium',
+            note: 'Category was adjusted to match available options',
+            originalSuggestion: suggestedCategory
+          });
+        }
+      }
+      
+      res.json({
+        success: true,
+        suggestedCategory: isValidCategory ? suggestedCategory : categories[0], // Fallback to first category
+        confidence: isValidCategory ? 'high' : 'low',
+        note: isValidCategory ? 'Category matches user preferences' : 'Using fallback category',
+        availableCategories: categories
+      });
+
+    } catch (error) {
+      console.log('Auto-categorize: OpenAI call failed, using fallback logic');
+      
+      // Fallback categorization logic
+      const fallbackCategory = categorizeTransactionFallback(transaction, categories, transactionHistory);
+      
+      res.json({
+        success: true,
+        suggestedCategory: fallbackCategory,
+        confidence: 'low',
+        note: 'Used fallback categorization logic',
+        availableCategories: categories
+      });
+    }
+
+  } catch (error) {
+    console.error('Auto-categorize transaction error:', error);
+    console.error('Error stack:', error.stack);
+    
+    res.status(500).json({ 
+      error: 'Internal server error',
+      details: error.message || 'Unknown error occurred'
+    });
+  }
+};
+
+// Fallback categorization logic when OpenAI is unavailable
+function categorizeTransactionFallback(transaction, categories, transactionHistory) {
+  const transactionText = `${transaction.name || ''} ${transaction.display_name || ''} ${transaction.merchant_name || ''} ${transaction.description || ''}`.toLowerCase();
+  
+  // Common category keywords
+  const categoryKeywords = {
+    'groceries': ['grocery', 'food', 'supermarket', 'market', 'fresh', 'organic', 'whole foods', 'trader joe', 'kroger', 'safeway'],
+    'gas': ['gas', 'fuel', 'shell', 'exxon', 'chevron', 'bp', 'mobil', 'petro', 'station'],
+    'restaurants': ['restaurant', 'dining', 'food', 'eat', 'grub', 'doordash', 'uber eats', 'postmates'],
+    'entertainment': ['movie', 'theater', 'cinema', 'netflix', 'spotify', 'hulu', 'amazon prime', 'entertainment'],
+    'shopping': ['amazon', 'walmart', 'target', 'costco', 'shop', 'store', 'retail'],
+    'utilities': ['electric', 'water', 'gas', 'utility', 'power', 'energy'],
+    'transportation': ['uber', 'lyft', 'taxi', 'transport', 'transit', 'bus', 'train'],
+    'healthcare': ['doctor', 'medical', 'health', 'pharmacy', 'cvs', 'walgreens', 'hospital'],
+    'insurance': ['insurance', 'geico', 'state farm', 'allstate', 'progressive'],
+    'subscriptions': ['subscription', 'monthly', 'recurring', 'membership']
+  };
+  
+  // Find the best matching category
+  let bestMatch = categories[0]; // Default to first category
+  let bestScore = 0;
+  
+  for (const category of categories) {
+    const keywords = categoryKeywords[category.toLowerCase()] || [];
+    let score = 0;
+    
+    // Check for keyword matches
+    for (const keyword of keywords) {
+      if (transactionText.includes(keyword)) {
+        score += 2;
+      }
+    }
+    
+    // Check historical patterns
+    if (transactionHistory) {
+      const similarTransactions = transactionHistory.filter(t => 
+        t.category === category && 
+        Math.abs(t.amount - transaction.amount) < 50 // Similar amount range
+      );
+      score += similarTransactions.length * 0.5;
+    }
+    
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = category;
+    }
+  }
+  
+  return bestMatch;
+}
+
 exports.redisTest = async (req, res) => {
   try {
     console.log('Redis test endpoint called');

@@ -38,6 +38,20 @@ curl -X POST /api/agent/chat \
 curl -X GET /api/agent/chat-history \
   -H 'Content-Type: application/json' \
   -d '{"sessionId": "user123"}'
+
+# 5. Auto-categorize a transaction
+curl -X POST /api/agent/auto-categorize \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "sessionId": "user123",
+    "transaction": {
+      "name": "SHELL GAS STATION",
+      "amount": 35.50,
+      "merchant_name": "Shell"
+    },
+    "categories": ["Gas & Fuel", "Groceries", "Restaurants"],
+    "transactionHistory": []
+  }'
 ```
 
 ## 📡 API Endpoints
@@ -49,6 +63,44 @@ curl -X GET /api/agent/chat-history \
 ### Summarize Endpoint  
 - **POST** `/api/agent/summarize`
 - Analyzes transaction data and adds insights to conversation history
+
+### Auto-Categorize Transaction Endpoint
+- **POST** `/api/agent/auto-categorize`
+- Suggests the best category for a transaction based on user's history and patterns
+
+**Request Body:**
+```json
+{
+  "sessionId": "user123",
+  "transaction": {
+    "name": "WALMART.COM",
+    "display_name": "Walmart Grocery",
+    "amount": 45.67,
+    "merchant_name": "Walmart",
+    "description": "Grocery purchase"
+  },
+  "transactionHistory": [
+    {
+      "name": "SAFEWAY",
+      "amount": 23.45,
+      "category": "Groceries",
+      "merchant_name": "Safeway"
+    }
+  ],
+  "categories": ["Groceries", "Gas & Fuel", "Restaurants", "Shopping", "Entertainment"]
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "suggestedCategory": "Groceries",
+  "confidence": "high",
+  "note": "Category matches user preferences",
+  "availableCategories": ["Groceries", "Gas & Fuel", "Restaurants", "Shopping", "Entertainment"]
+}
+```
 
 ### Chat History Endpoint
 - **GET** `/api/agent/chat-history`
