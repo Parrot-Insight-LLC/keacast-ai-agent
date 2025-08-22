@@ -628,7 +628,9 @@ exports.chat = async (req, res) => {
       contextLoaded: !!Object.keys(userContext || {}).length,
       dataMessage: dataMessage,
       requestSize: requestSize,
-      error: result?.error
+      error: result?.error,
+      possibleRecurringTransactions: selectedAccounts[0].plaidRecurrings,
+      possibelRecurringTransactions: selectedAccounts[0].possibleRecurringTransactions,
     });
 
   } catch (error) {
