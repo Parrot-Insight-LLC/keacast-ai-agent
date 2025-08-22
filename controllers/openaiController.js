@@ -871,6 +871,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
     - Do not include explanations, justifications, or additional text
     - The category must exactly match one of the categories in the user's list
     - If no good match exists, choose the most reasonable category from the available options
+    - Categories used most often should rank higher than categories used less often
 
     **Example Response:**
     "Groceries"
