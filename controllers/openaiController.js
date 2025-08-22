@@ -865,7 +865,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
     or
     "Entertainment"
 
-    Remember: Your response should be a single category name that best fits the transaction based on the user's history and preferences.`;
+    Remember: Your response should be a single category name that best fits the transaction based on the user's history,preferences, and is picked from the list of available categories provided.`;
 
     const userMessage = `Please categorize this transaction:
 
