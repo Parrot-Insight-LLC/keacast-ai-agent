@@ -237,7 +237,7 @@ function createContextSummary(userContext) {
         status: t.status
       })) : [],
     possibleRecurringTransactions: userContext.possibleRecurringTransactions && Array.isArray(userContext.possibleRecurringTransactions) ? 
-    userContext.possibleRecurringTransactions.slice(0, 250).map(t => ({
+    userContext.possibleRecurringTransactions.map(t => ({
         id: t.transaction_id,
         name: t.name,
         last_amount: t.last_amount,
@@ -259,7 +259,7 @@ function createContextSummary(userContext) {
           frequency: d.frequency2,
           status: d.status,
         })).slice(0 , 20)
-      })) : [],
+      })).slice(0, 250) : [],
     breakdown: userContext.breakdown && Array.isArray(userContext.breakdown) ? userContext.breakdown : [],
     balances: userContext.balances && Array.isArray(userContext.balances) ? userContext.balances : [],
     available: userContext.available && Array.isArray(userContext.available) ? userContext.available : [],
