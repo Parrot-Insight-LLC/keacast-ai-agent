@@ -838,18 +838,18 @@ exports.autoCategorizeTransaction = async (req, res) => {
     console.log('Auto-categorize: Available categories:', categories.length);
 
     // Fast-path: Try to categorize using simple pattern matching first
-    const fastCategory = categorizeTransactionFast(transaction, categories, transactionHistory);
-    if (fastCategory) {
-      console.log('Auto-categorize: Using fast-path categorization:', fastCategory);
-      return res.json({
-        success: true,
-        suggestedCategory: fastCategory,
-        confidence: 'high',
-        note: 'Category determined using fast pattern matching',
-        availableCategories: categories,
-        method: 'fast-path'
-      });
-    }
+    // const fastCategory = categorizeTransactionFast(transaction, categories, transactionHistory);
+    // if (fastCategory) {
+    //   console.log('Auto-categorize: Using fast-path categorization:', fastCategory);
+    //   return res.json({
+    //     success: true,
+    //     suggestedCategory: fastCategory,
+    //     confidence: 'high',
+    //     note: 'Category determined using fast pattern matching',
+    //     availableCategories: categories,
+    //     method: 'fast-path'
+    //   });
+    // }
 
     const systemPrompt = `You are an expert financial transaction categorizer. Your job is to analyze a transaction and suggest the most appropriate category from the user's existing categories.
 
@@ -987,14 +987,88 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
   
   // High-confidence merchant patterns
   const highConfidencePatterns = {
-    'groceries': ['whole foods', 'trader joe', 'kroger', 'safeway', 'albertsons', 'publix', 'wegmans', 'food lion', 'giant eagle', 'shoprite', 'stop & shop'],
-    'gas': ['shell', 'exxon', 'chevron', 'bp', 'mobil', 'petro', 'marathon', 'sunoco', 'valero', '76', 'arco'],
-    'restaurants': ['mcdonalds', 'burger king', 'wendys', 'subway', 'dominos', 'pizza hut', 'chipotle', 'panera', 'starbucks', 'dunkin', 'doordash', 'uber eats', 'grubhub'],
-    'utilities': ['pg&e', 'southern california edison', 'conedison', 'duke energy', 'dominion energy', 'exelon', 'nextera'],
-    'transportation': ['uber', 'lyft', 'taxi', 'amtrak', 'greyhound', 'metropolitan transportation authority'],
-    'healthcare': ['cvs', 'walgreens', 'rite aid', 'kroger pharmacy', 'walmart pharmacy', 'costco pharmacy'],
-    'insurance': ['geico', 'state farm', 'allstate', 'progressive', 'farmers', 'liberty mutual', 'nationwide'],
-    'subscriptions': ['netflix', 'spotify', 'hulu', 'amazon prime', 'disney+', 'hbo max', 'apple tv+', 'youtube premium']
+    'groceries': [
+      'whole foods', 'trader joe', 'kroger', 'safeway', 'albertsons', 'publix', 'wegmans', 'food lion', 'giant eagle', 'shoprite', 'stop & shop',
+      'sprouts', 'fresh market', 'natural grocers', 'earth fare', 'fresh thyme', 'lucky', 'ralphs', 'vons', 'food 4 less', 'winco', 'aldi', 'lidl',
+      'heb', 'meijer', 'hy-vee', 'price chopper', 'tops', 'giant', 'martins', 'weis', 'acme', 'shaws', 'hannaford', 'price rite', 'save a lot'
+    ],
+    'gas': [
+      'shell', 'exxon', 'chevron', 'bp', 'mobil', 'petro', 'marathon', 'sunoco', 'valero', '76', 'arco', 'phillips 66', 'conoco', 'citgo',
+      'speedway', 'circle k', '7-eleven', 'quik trip', 'kum & go', 'caseys', 'wawa', 'sheet', 'love', 'murphy', 'race trac', 'pilot', 'flying j'
+    ],
+    'restaurants': [
+      'mcdonalds', 'burger king', 'wendys', 'subway', 'dominos', 'pizza hut', 'chipotle', 'panera', 'starbucks', 'dunkin', 'doordash', 'uber eats', 'grubhub',
+      'taco bell', 'kfc', 'popeyes', 'chick-fil-a', 'in-n-out', 'five guys', 'shake shack', 'whataburger', 'culvers', 'sonic', 'arbys', 'jack in the box',
+      'papa johns', 'little caesars', 'papa murphys', 'blaze pizza', 'mod pizza', 'pizza ranch', 'postmates', 'seamless', 'caviar', 'bite squad'
+    ],
+    'utilities': [
+      'pg&e', 'southern california edison', 'conedison', 'duke energy', 'dominion energy', 'exelon', 'nextera', 'firstenergy', 'pacificorp', 'xcel energy',
+      'entergy', 'southern company', 'american electric power', 'centerpoint energy', 'comed', 'pepco', 'bge', 'pseg', 'national grid', 'eversource'
+    ],
+    'transportation': [
+      'uber', 'lyft', 'taxi', 'amtrak', 'greyhound', 'metropolitan transportation authority', 'chicago transit authority', 'los angeles metro',
+      'bay area rapid transit', 'washington metropolitan area transit authority', 'septa', 'mbta', 'nj transit', 'metro-north', 'long island railroad'
+    ],
+    'healthcare': [
+      'cvs', 'walgreens', 'rite aid', 'kroger pharmacy', 'walmart pharmacy', 'costco pharmacy', 'target pharmacy', 'safeway pharmacy',
+      'albertsons pharmacy', 'publix pharmacy', 'wegmans pharmacy', 'giant eagle pharmacy', 'shoprite pharmacy', 'stop & shop pharmacy'
+    ],
+    'insurance': [
+      'geico', 'state farm', 'allstate', 'progressive', 'farmers', 'liberty mutual', 'nationwide', 'american family', 'erie', 'travelers',
+      'hartford', 'metlife', 'prudential', 'aflac', 'mutual of omaha', 'new york life', 'northwestern mutual', 'guardian', 'principal'
+    ],
+    'subscriptions': [
+      'netflix', 'spotify', 'hulu', 'amazon prime', 'disney+', 'hbo max', 'apple tv+', 'youtube premium', 'paramount+', 'peacock', 'discovery+',
+      'crunchyroll', 'funimation', 'roku', 'sling tv', 'fubo tv', 'youtube tv', 'hulu live', 'directv stream', 'philo', 'at&t tv'
+    ],
+    'shopping': [
+      'amazon', 'walmart', 'target', 'costco', 'best buy', 'home depot', 'lowes', 'michaels', 'joann', 'hobby lobby', 'dicks sporting goods',
+      'academy sports', 'bass pro shops', 'cabelas', 'rei', 'nordstrom', 'macys', 'kohls', 'jcpenney', 'sears', 'belk', 'dillards', 'neiman marcus'
+    ],
+    'entertainment': [
+      'movie', 'theater', 'cinema', 'amc', 'regal', 'cinemark', 'marcus', 'harkins', 'landmark', 'angelika', 'alamo drafthouse',
+      'bowling', 'arcade', 'dave & busters', 'main event', 'topgolf', 'escape room', 'axe throwing', 'paintball', 'laser tag'
+    ],
+    'automotive': [
+      'autozone', 'oreilly', 'advance auto', 'napa', 'pep boys', 'firestone', 'goodyear', 'bridgestone', 'michelin', 'jiffy lube',
+      'valvoline', 'quick lube', 'mavis', 'discount tire', 'tire kingdom', 'les schwab', 'big o tires', 'tire rack'
+    ],
+    'home improvement': [
+      'home depot', 'lowes', 'menards', 'ace hardware', 'true value', 'do it best', '84 lumber', 'beacon roofing', 'abc supply',
+      'sherwin williams', 'benjamin moore', 'ppg', 'valspar', 'glidden', 'behr'
+    ],
+    'clothing': [
+      'nike', 'adidas', 'under armour', 'old navy', 'gap', 'banana republic', 'athleta', 'lululemon', 'athleta', 'victorias secret',
+      'pink', 'american eagle', 'aeropostale', 'hollister', 'abercrombie', 'forever 21', 'h&m', 'zara', 'uniqlo', 'asos'
+    ],
+    'electronics': [
+      'apple', 'samsung', 'google', 'microsoft', 'dell', 'hp', 'lenovo', 'asus', 'acer', 'lg', 'sony', 'panasonic', 'sharp',
+      'best buy', 'micro center', 'frys', 'newegg', 'b&h photo', 'adorama'
+    ],
+    'pharmacy': [
+      'cvs', 'walgreens', 'rite aid', 'kroger pharmacy', 'walmart pharmacy', 'costco pharmacy', 'target pharmacy', 'safeway pharmacy',
+      'albertsons pharmacy', 'publix pharmacy', 'wegmans pharmacy', 'giant eagle pharmacy', 'shoprite pharmacy', 'stop & shop pharmacy'
+    ],
+    'banking': [
+      'chase', 'bank of america', 'wells fargo', 'citibank', 'us bank', 'pnc', 'capital one', 'td bank', 'bb&t', 'suntrust',
+      'regions', 'keybank', 'fifth third', 'huntington', 'citizens', 'comerica', 'bmo harris', 'usaa', 'navy federal'
+    ],
+    'education': [
+      'university', 'college', 'school', 'tuition', 'textbook', 'campus', 'student', 'blackboard', 'canvas', 'moodle',
+      'coursera', 'udemy', 'skillshare', 'masterclass', 'khan academy', 'duolingo', 'rosetta stone'
+    ],
+    'fitness': [
+      'planet fitness', 'la fitness', '24 hour fitness', 'equinox', 'lifetime', 'ymca', 'ymwca', 'golds gym', 'crunch', 'snap fitness',
+      'anytime fitness', 'orangetheory', 'crossfit', 'barry', 'soulcycle', 'peloton', 'fitbit', 'garmin', 'apple fitness'
+    ],
+    'travel': [
+      'airline', 'hotel', 'marriott', 'hilton', 'hyatt', 'ihg', 'choice', 'wyndham', 'best western', 'motel 6', 'super 8',
+      'expedia', 'booking', 'hotels', 'airbnb', 'vrbo', 'tripadvisor', 'kayak', 'priceline', 'orbitz', 'travelocity'
+    ],
+    'online services': [
+      'google', 'microsoft', 'adobe', 'dropbox', 'box', 'slack', 'zoom', 'teams', 'webex', 'gotomeeting', 'asana', 'trello',
+      'notion', 'evernote', 'lastpass', '1password', 'dashlane', 'bitwarden', 'grammarly', 'canva', 'figma'
+    ]
   };
   
   // Check for high-confidence matches first
