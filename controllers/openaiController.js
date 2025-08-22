@@ -923,15 +923,15 @@ Based on this transaction and your analysis of the user's categorization pattern
       
       // Validate that the suggested category exists in the user's categories
       const isValidCategory = categories.some(cat => 
-        cat.name.toLowerCase() === suggestedCategory.name.toLowerCase()
+        cat.name.toLowerCase() === suggestedCategory.toLowerCase()
       );
       
       if (!isValidCategory && suggestedCategory) {
         console.warn('Auto-categorize: Suggested category not in user list, finding closest match');
         // Find the closest matching category
         const closestMatch = categories.find(cat => 
-          cat.name.toLowerCase().includes(suggestedCategory.name.toLowerCase()) ||
-          suggestedCategory.name.toLowerCase().includes(cat.name.toLowerCase())
+          cat.name.toLowerCase().includes(suggestedCategory.toLowerCase()) ||
+          suggestedCategory.toLowerCase().includes(cat.name.toLowerCase())
         );
         
         if (closestMatch) {
@@ -941,14 +941,14 @@ Based on this transaction and your analysis of the user's categorization pattern
             suggestedCategory: closestMatch,
             confidence: 'medium',
             note: 'Category was adjusted to match available options',
-            originalSuggestion: suggestedCategory.name
+            originalSuggestion: suggestedCategory
           });
         }
       }
       
       res.json({
         success: true,
-        suggestedCategory: isValidCategory ? suggestedCategory.name : categories[0].name, // Fallback to first category
+        suggestedCategory: isValidCategory ? suggestedCategory : categories[0], // Fallback to first category
         confidence: isValidCategory ? 'high' : 'low',
         note: isValidCategory ? 'Category matches user preferences' : 'Using fallback category',
         availableCategories: categories,
