@@ -948,7 +948,7 @@ Based on this transaction and your analysis of the user's categorization pattern
       
       res.json({
         success: true,
-        suggestedCategory: isValidCategory ? suggestedCategory : categories[0], // Fallback to first category
+        suggestedCategory: isValidCategory ? suggestedCategory.name : categories[0], // Fallback to first category
         confidence: isValidCategory ? 'high' : 'low',
         note: isValidCategory ? 'Category matches user preferences' : 'Using fallback category',
         availableCategories: categories,
