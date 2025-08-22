@@ -67,6 +67,7 @@ curl -X POST /api/agent/auto-categorize \
 ### Auto-Categorize Transaction Endpoint
 - **POST** `/api/agent/auto-categorize`
 - Suggests the best category for a transaction based on user's history and patterns
+- **Performance**: Uses fast pattern matching for common merchants, falls back to AI for complex cases
 
 **Request Body:**
 ```json
@@ -97,10 +98,16 @@ curl -X POST /api/agent/auto-categorize \
   "success": true,
   "suggestedCategory": "Groceries",
   "confidence": "high",
-  "note": "Category matches user preferences",
-  "availableCategories": ["Groceries", "Gas & Fuel", "Restaurants", "Shopping", "Entertainment"]
+  "note": "Category determined using fast pattern matching",
+  "availableCategories": ["Groceries", "Gas & Fuel", "Restaurants", "Shopping", "Entertainment"],
+  "method": "fast-path"
 }
 ```
+
+**Method Types:**
+- `fast-path`: Instant categorization using pattern matching (common merchants)
+- `ai`: AI-powered categorization for complex cases
+- `fallback`: Basic keyword matching when AI is unavailable
 
 ### Chat History Endpoint
 - **GET** `/api/agent/chat-history`
