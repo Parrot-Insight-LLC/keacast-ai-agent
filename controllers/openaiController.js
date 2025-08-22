@@ -861,7 +861,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
 
     **Analysis Guidelines:**
     1. **Merchant Analysis**: Look at the merchant name and consider what type of business it is
-    2. **Amount Patterns**: Consider the transaction amount and typical spending patterns for different categories
+    2. **Amount Patterns**: Consider the transaction amount and typical spending patterns for different categories (ex: if the transaction is at a gas station and is a large amount, it is likely a gas transaction, but smaller amount may be groceries, or food & beverage, etc.)
     3. **Historical Patterns**: Review how the user has categorized similar transactions in the past
     4. **Category Logic**: Use common sense - groceries from grocery stores, gas from gas stations, etc.
     5. **User Preferences**: Respect the user's existing categorization choices and patterns
