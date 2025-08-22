@@ -881,7 +881,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
 ${categories.map(cat => `- ${cat}`).join('\n')}
 
 **User's Transaction History (for pattern analysis):**
-${transactionHistory ? JSON.stringify(transactionHistory.slice(0, 100), null, 2) : 'No transaction history provided'}
+${transactionHistory ? JSON.stringify(transactionHistory, null, 2) : 'No transaction history provided'}
 
 Based on this transaction and your analysis of the user's categorization patterns, what is the best category for this transaction?`;
 
