@@ -501,7 +501,7 @@ exports.chat = async (req, res) => {
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
 
-    Tone & Style:
+    Tone & Style: 
     - Clear, empathetic, and supportive
     - Professional yet approachable
     - Insightful when explaining forecasting logic, actionable when guiding users
@@ -543,15 +543,35 @@ exports.chat = async (req, res) => {
     console.log('Chat endpoint: Request size:', requestSize, 'bytes');
     
     if (requestSize > 750000) { // Increased to 750KB limit to allow more context
-      console.warn('Chat endpoint: Request too large, clearing old history');
-      // Clear old history to reduce size
-      history = history.slice(-50); // Keep only last 50 messages
-      messages.splice(1, messages.length - 2); // Keep only system and current user message
-      messages.splice(1, 0, ...history.map(truncateMessage));
+      console.warn('Chat endpoint: Request too large, removing oldest messages one by one');
       
-      // Recalculate size after cleanup
-      const newSize = JSON.stringify(messages).length;
-      console.log('Chat endpoint: After cleanup, new size:', newSize, 'bytes');
+      // Remove oldest messages one by one until we're under the limit
+      let attempts = 0;
+      const maxAttempts = 20; // Prevent infinite loops
+      
+      while (requestSize > 750000 && attempts < maxAttempts && history.length > 2) {
+        // Remove the oldest message (skip system message at index 0)
+        history.shift(); // Remove first (oldest) message
+        
+        // Rebuild messages array
+        messages.splice(1, messages.length - 2); // Keep only system and current user message
+        messages.splice(1, 0, ...history.map(truncateMessage));
+        
+        // Recalculate size
+        const newSize = JSON.stringify(messages).length;
+        console.log(`Chat endpoint: Removed oldest message, new size: ${newSize} bytes (attempt ${attempts + 1})`);
+        
+        if (newSize <= 750000) {
+          console.log('Chat endpoint: Successfully reduced size below limit');
+          break;
+        }
+        
+        attempts++;
+      }
+      
+      if (attempts >= maxAttempts) {
+        console.warn('Chat endpoint: Could not reduce size below limit after', maxAttempts, 'attempts');
+      }
     }
 
     // Function-calling loop (uses functionMap.js)
