@@ -875,6 +875,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
 - Amount: $${transaction.amount || 'N/A'}
 - Merchant: ${transaction.merchant_name || 'N/A'}
 - Description: ${transaction.description || 'N/A'}
+- Category: ${transaction.adjusted_category || 'N/A'}
 
 **Available Categories:**
 ${categories.map(cat => `- ${cat}`).join('\n')}
@@ -906,15 +907,15 @@ Based on this transaction and your analysis of the user's categorization pattern
       
       // Validate that the suggested category exists in the user's categories
       const isValidCategory = categories.some(cat => 
-        cat.toLowerCase() === suggestedCategory.toLowerCase()
+        cat.name.toLowerCase() === suggestedCategory.toLowerCase()
       );
       
       if (!isValidCategory && suggestedCategory) {
         console.warn('Auto-categorize: Suggested category not in user list, finding closest match');
         // Find the closest matching category
         const closestMatch = categories.find(cat => 
-          cat.toLowerCase().includes(suggestedCategory.toLowerCase()) ||
-          suggestedCategory.toLowerCase().includes(cat.toLowerCase())
+          cat.name.toLowerCase().includes(suggestedCategory.toLowerCase()) ||
+          suggestedCategory.toLowerCase().includes(cat.name.toLowerCase())
         );
         
         if (closestMatch) {
