@@ -871,11 +871,11 @@ exports.autoCategorizeTransaction = async (req, res) => {
 
 **Transaction to Categorize:**
 - Name: ${transaction.name || 'N/A'}
-- Display Name: ${transaction.display_name || 'N/A'}
 - Amount: $${transaction.amount || 'N/A'}
 - Merchant: ${transaction.merchant_name || 'N/A'}
 - Description: ${transaction.description || 'N/A'}
 - Category: ${transaction.adjusted_category || 'N/A'}
+- location: ${transaction.location || 'N/A'}
 
 **Available Categories:**
 ${categories.map(cat => `- ${cat}`).join('\n')}
