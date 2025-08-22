@@ -892,7 +892,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
 - Category: ${transaction.adjusted_category || 'N/A'}
 - location: ${transaction.location || 'N/A'}
 
-**Available Categories (Please choose from this list) name, description are the main data points to consider:**
+**Available Categories (Please choose from this list and reduce to the category name) name, description are the main data points to consider:**
 ${categories.map(cat => `- ${cat}`).join('\n')}
 
 **User's Transaction History (for pattern analysis) anaylyze the transaction name, merchant, description, amount, and category to determine the best category:**
@@ -948,7 +948,7 @@ Based on this transaction and your analysis of the user's categorization pattern
       
       res.json({
         success: true,
-        suggestedCategory: isValidCategory ? suggestedCategory.name : categories[0], // Fallback to first category
+        suggestedCategory: isValidCategory ? suggestedCategory : categories[0], // Fallback to first category
         confidence: isValidCategory ? 'high' : 'low',
         note: isValidCategory ? 'Category matches user preferences' : 'Using fallback category',
         availableCategories: categories,
