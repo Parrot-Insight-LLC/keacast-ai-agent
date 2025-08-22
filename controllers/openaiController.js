@@ -189,8 +189,8 @@ function createContextSummary(userContext) {
       breakdown: userContext.breakdown ? userContext.breakdown.length : 0
     },
     // Include a sample of recent transactions for context
-    categories: userContext.categories,
-    transactions: userContext.cfTransactions ? 
+    categories: userContext.categories && Array.isArray(userContext.categories) ? userContext.categories : [],
+    transactions: userContext.cfTransactions && Array.isArray(userContext.cfTransactions) ? 
       userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 250).map(t => ({
         id: t.id,
         name: t.title,
@@ -203,7 +203,7 @@ function createContextSummary(userContext) {
         merchant_name: t.merchant,
         frequency: t.frequency2,
       })) : [],
-    recentTransactions: userContext.recentTransactions ? 
+    recentTransactions: userContext.recentTransactions && Array.isArray(userContext.recentTransactions) ? 
       userContext.recentTransactions.slice(0, 250).map(t => ({
         id: t.id,
         amount: t.amount,
@@ -211,7 +211,7 @@ function createContextSummary(userContext) {
         date: moment(t.start).format('MMM DD, YYYY'),
         category: t.category
       })) : [],
-    upcomingTransactions: userContext.upcomingTransactions ? 
+    upcomingTransactions: userContext.upcomingTransactions && Array.isArray(userContext.upcomingTransactions) ? 
     userContext.upcomingTransactions.slice(0, 250).map(t => ({
         id: t.id,
         name: t.title,
@@ -225,7 +225,7 @@ function createContextSummary(userContext) {
         frequency: t.frequency2,
         daysUntil: t.daysUntil
       })) : [],
-    plaidTransactions: userContext.plaidTransactions ? 
+    plaidTransactions: userContext.plaidTransactions && Array.isArray(userContext.plaidTransactions) ? 
     userContext.plaidTransactions.slice(0, 250).map(t => ({
         transaction_id: t.transaction_id,
         amount: t.adjusted_amount,
@@ -236,7 +236,7 @@ function createContextSummary(userContext) {
         category: t.adjusted_category,
         status: t.status
       })) : [],
-    possibleRecurringTransactions: userContext.possibleRecurringTransactions ? 
+    possibleRecurringTransactions: userContext.possibleRecurringTransactions && Array.isArray(userContext.possibleRecurringTransactions) ? 
     userContext.possibleRecurringTransactions.slice(0, 250).map(t => ({
         id: t.transaction_id,
         name: t.name,
@@ -260,9 +260,9 @@ function createContextSummary(userContext) {
           status: d.status,
         })).slice(0 , 20)
       })) : [],
-    breakdown: userContext.breakdown,
-    balances: userContext.balances,
-    available: userContext.available,
+    breakdown: userContext.breakdown && Array.isArray(userContext.breakdown) ? userContext.breakdown : [],
+    balances: userContext.balances && Array.isArray(userContext.balances) ? userContext.balances : [],
+    available: userContext.available && Array.isArray(userContext.available) ? userContext.available : [],
   };
 
   return summary;
