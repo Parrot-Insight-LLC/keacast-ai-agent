@@ -880,7 +880,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
     or
     "Entertainment"
 
-    Remember: Your response should be a single category name that best fits the transaction based on the user's history,preferences, and is picked from the list of available categories provided.`;
+    Remember: Your response should be a single category name that best fits the transaction based on the user's history,preferences, and is picked from the list of available categories provided. (Please return only the category name)`;
 
     const userMessage = `Please categorize this transaction:
 
@@ -892,7 +892,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
 - Category: ${transaction.adjusted_category || 'N/A'}
 - location: ${transaction.location || 'N/A'}
 
-**Available Categories (Please choose from this list and reduce to the category name) name, description are the main data points to consider:**
+**Available Categories (Please choose from this list and return only the category name) name, description are the main data points to consider:**
 ${categories.map(cat => `- ${cat}`).join('\n')}
 
 **User's Transaction History (for pattern analysis) anaylyze the transaction name, merchant, description, amount, and category to determine the best category:**
