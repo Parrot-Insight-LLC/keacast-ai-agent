@@ -236,30 +236,8 @@ function createContextSummary(userContext) {
         category: t.adjusted_category,
         status: t.status
       })) : [],
-    possibleRecurringTransactions: userContext.possibleRecurringTransactions && Array.isArray(userContext.possibleRecurringTransactions) ? 
-    userContext.possibleRecurringTransactions.map(t => ({
-        id: t.transaction_id,
-        name: t.name,
-        last_amount: t.last_amount,
-        average_amount: t.average_amount,
-        date: moment(t.date).format('MMM DD, YYYY'),
-        first_date: moment(t.first_date).format('MMM DD, YYYY'),
-        category: t.data[0].adjusted_category,
-        merchant_name: t.data[0].merchant,
-        frequency: t.frequency2,
-        transactions: t.data.map(d => ({
-          id: d.transaction_id,
-          amount: d.adjusted_amount,
-          name: d.name,
-          display_name: d.display_name,
-          description: d.description,
-          date: moment(d.date).format('MMM DD, YYYY'),
-          category: d.adjusted_category,
-          merchant_name: d.merchant_name,
-          frequency: d.frequency2,
-          status: d.status,
-        })).slice(0 , 20)
-      })).slice(0, 250) : [],
+    possibleRecurringTransactions: userContext.possibleRecurringTransactions ? 
+    userContext.possibleRecurringTransactions : [],
     breakdown: userContext.breakdown && Array.isArray(userContext.breakdown) ? userContext.breakdown : [],
     balances: userContext.balances && Array.isArray(userContext.balances) ? userContext.balances : [],
     available: userContext.available && Array.isArray(userContext.available) ? userContext.available : [],
@@ -629,8 +607,6 @@ exports.chat = async (req, res) => {
       dataMessage: dataMessage,
       requestSize: requestSize,
       error: result?.error,
-      possibleRecurringTransactions: userContext.possibleRecurringTransactions,
-      possibleRecurringTransactions: userContext.possibleRecurringTransactions,
     });
 
   } catch (error) {
