@@ -291,6 +291,19 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     try {
       const content = JSON.parse(tr.content);
       if (content.error) return `Error in ${tr.name}: ${content.error}`;
+      
+      // Special handling for createTransaction
+      if (tr.name === 'createTransaction') {
+        if (content.message && content.message.includes('successfully created')) {
+          return `Successfully created transaction: ${content.data?.id ? `ID ${content.data.id}` : 'Transaction created'}. ${content.message}`;
+        } else if (content.error) {
+          return `Failed to create transaction: ${content.error}`;
+        } else {
+          return `Transaction creation completed: ${content.message || 'Transaction processed'}`;
+        }
+      }
+      
+      // Handle other tools
       if (Array.isArray(content) && content.length > 0) {
         return `Retrieved ${content.length} items from ${tr.name}`;
       }
@@ -302,7 +315,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   
   cleanMessages.push({
     role: 'user',
-    content: `I have executed the following tools: ${toolSummary.join('. ')}. Please provide a comprehensive answer based on this data.`
+    content: `I have executed the following tools: ${toolSummary.join('. ')}. Please provide a comprehensive answer based on this data. If any transactions were created, make sure to clearly confirm the creation to the user with relevant details.`
   });
   
   // Get final response from Azure OpenAI
@@ -318,6 +331,19 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       try {
         const content = JSON.parse(tr.content);
         if (content.error) return `Error in ${tr.name}: ${content.error}`;
+        
+        // Special handling for createTransaction
+        if (tr.name === 'createTransaction') {
+          if (content.message && content.message.includes('successfully created')) {
+            return `Successfully created transaction: ${content.data?.id ? `ID ${content.data.id}` : 'Transaction created'}. ${content.message}`;
+          } else if (content.error) {
+            return `Failed to create transaction: ${content.error}`;
+          } else {
+            return `Transaction creation completed: ${content.message || 'Transaction processed'}`;
+          }
+        }
+        
+        // Handle other tools
         if (Array.isArray(content) && content.length > 0) {
           return `Found ${content.length} items from ${tr.name}`;
         }
@@ -502,6 +528,7 @@ exports.chat = async (req, res) => {
     - If users add big one-time transactions, help them see scenarios to understand the impact on their financial situation.
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
+    - When creating transactions using the createTransaction tool, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast.
 
     Tone & Style: 
     - Clear, empathetic, and supportive
