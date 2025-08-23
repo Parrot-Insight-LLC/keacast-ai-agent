@@ -3,6 +3,7 @@ const redis = require('../services/redisService');
 const { queryAzureOpenAI, functionSchemas } = require('../services/openaiService'); // must support tools
 const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.js
 const moment = require('moment');
+const momentTimezone = require('moment-timezone');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
@@ -146,6 +147,66 @@ function extractContextFromBody(req) {
     };
   }
   return undefined;
+}
+
+// Function to get timezone from coordinates using a simple approximation
+function getTimezoneFromCoordinates(latitude, longitude) {
+  // Simple timezone approximation based on longitude
+  // This is a basic implementation - for production, consider using a proper timezone API
+  const timezoneOffset = Math.round(longitude / 15);
+  
+  // Map common timezone offsets to timezone names
+  const timezoneMap = {
+    '-12': 'Pacific/Auckland', // UTC-12
+    '-11': 'Pacific/Midway',   // UTC-11
+    '-10': 'Pacific/Honolulu', // UTC-10
+    '-9': 'America/Anchorage', // UTC-9
+    '-8': 'America/Los_Angeles', // UTC-8
+    '-7': 'America/Denver',    // UTC-7
+    '-6': 'America/Chicago',   // UTC-6
+    '-5': 'America/New_York',  // UTC-5
+    '-4': 'America/Halifax',   // UTC-4
+    '-3': 'America/Sao_Paulo', // UTC-3
+    '-2': 'Atlantic/South_Georgia', // UTC-2
+    '-1': 'Atlantic/Azores',   // UTC-1
+    '0': 'Europe/London',      // UTC+0
+    '1': 'Europe/Paris',       // UTC+1
+    '2': 'Europe/Kiev',        // UTC+2
+    '3': 'Europe/Moscow',      // UTC+3
+    '4': 'Asia/Dubai',         // UTC+4
+    '5': 'Asia/Tashkent',      // UTC+5
+    '6': 'Asia/Almaty',        // UTC+6
+    '7': 'Asia/Bangkok',       // UTC+7
+    '8': 'Asia/Shanghai',      // UTC+8
+    '9': 'Asia/Tokyo',         // UTC+9
+    '10': 'Australia/Sydney',  // UTC+10
+    '11': 'Pacific/Guadalcanal', // UTC+11
+    '12': 'Pacific/Auckland'   // UTC+12
+  };
+  
+  return timezoneMap[timezoneOffset.toString()] || 'UTC';
+}
+
+// Function to get current date in user's timezone
+function getCurrentDateInTimezone(location) {
+  if (!location || typeof location.latitude !== 'number' || typeof location.longitude !== 'number') {
+    // Fallback to UTC if no valid location provided
+    console.log('No valid location provided, using UTC');
+    return moment().utc().format('YYYY-MM-DD');
+  }
+  
+  try {
+    const timezone = getTimezoneFromCoordinates(location.latitude, location.longitude);
+    console.log(`Calculated timezone for coordinates (${location.latitude}, ${location.longitude}): ${timezone}`);
+    
+    const currentDate = momentTimezone.tz(timezone).format('YYYY-MM-DD');
+    console.log(`Current date in ${timezone}: ${currentDate}`);
+    
+    return currentDate;
+  } catch (error) {
+    console.warn('Error calculating timezone, falling back to UTC:', error.message);
+    return moment().utc().format('YYYY-MM-DD');
+  }
 }
 
 function createContextSummary(userContext) {
@@ -435,6 +496,14 @@ exports.chat = async (req, res) => {
     // Prefer explicit context sent in body
     let userContext = extractContextFromBody(req) || {};
 
+    // Extract location data from request body
+    const location = req.body?.location;
+    console.log('Location data received:', location);
+
+    // Calculate current date based on user's timezone
+    const currentDate = getCurrentDateInTimezone(location);
+    console.log('Using current date:', currentDate);
+
     // If no explicit context or we need to preload additional data, we can preload some via tools (direct calls through functionMap)
     if (!userContext || Object.keys(userContext).length === 0 || !userContext.selectedAccounts) {
       if (userId && token) {
@@ -445,10 +514,9 @@ exports.chat = async (req, res) => {
           const userData = await functionMap.getUserData({ userId, token }, ctx);
           console.log('User data retrieved:', userData);
 
-          const upcomingEnd = moment().add(14, 'days').format('YYYY-MM-DD');
-          const currentDate = moment(moment().format('YYYY-MM-DD') + 'T00:00:00').format('YYYY-MM-DD');
-          const recentStart = moment().subtract(3, 'months').format('YYYY-MM-DD');
-          const recentEnd = moment().add(1, 'days').format('YYYY-MM-DD');
+          const upcomingEnd = moment(currentDate).add(14, 'days').format('YYYY-MM-DD');
+          const recentStart = moment(currentDate).subtract(3, 'months').format('YYYY-MM-DD');
+          const recentEnd = moment(currentDate).add(1, 'days').format('YYYY-MM-DD');
           
           // Then use user data to get selected accounts
           const selectedAccounts = await functionMap.getSelectedKeacastAccounts({ 
@@ -574,6 +642,7 @@ exports.chat = async (req, res) => {
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
     - When creating transactions using the createTransaction tool, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created. Make sure not to duplicate or repeat anything in your response.
       - Always return with the transaction_id and if the transaction is recurring then also return the group_id which you can refer to as the recurring_id.
+    - When working with dates and times, consider the user's location and timezone to provide accurate date-based responses. The system automatically calculates the correct current date based on the user's coordinates.
 
     Tone & Style: 
     - Clear, empathetic, and supportive
