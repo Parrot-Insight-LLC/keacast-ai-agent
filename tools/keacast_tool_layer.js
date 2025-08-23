@@ -72,6 +72,12 @@ async function getBalances({ accountId, userId, token, body }) {
   return response.data;
 }
 
+async function createTransaction({ userId, accountId, token, body }) {
+  const url = `${BASE_URL}/transactions/create/${userId}/${accountId}`;
+  const response = await axios.post(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
 // --------------------------------------
 // Function Map for Tool Execution
 // --------------------------------------
@@ -84,7 +90,8 @@ const functionMap = {
   getShoppingList,
   getUserData,
   getSelectedKeacastAccounts,
-  getBalances
+  getBalances,
+  createTransaction
 };
 
 module.exports = {
@@ -97,5 +104,6 @@ module.exports = {
   getUserData,
   getSelectedKeacastAccounts,
   getBalances,
+  createTransaction,
   functionMap // 👈 Exported for OpenAI tool handler integration
 };

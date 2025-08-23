@@ -503,80 +503,6 @@ exports.chat = async (req, res) => {
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
 
-    endpoint base url: https://cashflow-backend-production.herokuapp.com/
-
-    Available tools:
-    - the following endpoints will require an authorization header with the following format: Bearer <token> where <token> is the user's token. ${token}
-    # CashFlow Transaction API - createTransaction Endpoint
-    - userid = ${userId}
-    - accid = ${accountid}
-
-    **POST /transaction/create/:userid/:accid**
-
-    Creates financial transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency. If all of the request data is not provided then fill out the required properties with the most relevant data.
-
-    ## Required Properties
-    - 'title' (string): Transaction name
-    - 'type' (string): "expense" or "income"  
-    - 'category' (string): Transaction category (choose from this list of categories (name is the main property we are looking for): ${JSON.stringify(contextSummary.categories, null, 2)})
-    - 'description' (string): Detailed description
-    - 'start' (string): Start date (ISO format: YYYY-MM-DDTHH:mm:ss.sssZ)
-    - 'end' (string): End date (ISO format: YYYY-MM-DDTHH:mm:ss.sssZ)
-    - 'time' (string): Time of day (HH:mm format)
-    - 'amount' (number): Transaction amount (negative for expenses, positive for income)
-    - 'location' (string): Location of transaction
-    - 'frequency' (number): Recurrence code (see mapping below)
-    - 'display_name' (string): Display name for UI
-
-    ## Optional Properties
-    - 'isAlreadyGrouped' (boolean, default: false)
-    - 'match_id' (string, default: null): For bank transaction matching
-    - 'website' (string, default: null): URL or logo
-    - 'combined_id' (string, default: auto-generated)
-    - 'monthlyTimeStamp' (boolean, default: false)
-    - 'match_groupid' (string, default: null)
-    - 'matchStatus' (number, default: 0)
-    - 'forecast_type' (string, default: "F"): "F"=Forecast, "A"=Actual, "RF"=Rollover Forecast (essentially a budget that rolls over frequency period)
-    - 'goal' (number, default: null): Goal amount for savings
-    - 'merchant_name' (string, default: null)
-
-    ## Frequency Codes
-    - 1=Daily, 2=Once, 7=Weekly, 14=Bi-Weekly
-    - 15=Semi-Monthly (1st & 15th), 16=Semi-Monthly (15th & end)
-    - 28-31=Monthly, 60=Bi-Monthly, 91=Quarterly
-    - 182-183=Semi-Annually, 365-366=Annually
-
-    ## Key Behaviors
-    - System adds 1 day to end date for processing
-    - Auto-generates 'combined_id' and 'groupid' if not provided
-    - Creates multiple transaction records for recurring transactions
-    - Handles different month lengths and leap years automatically
-
-    ## Response (201) json
-    {
-      "message": "Transaction has been successfully created.",
-      "data": {
-        "result": {"insertId": "number", "affectedRows": "number"},
-        "id": "number",
-        "groupid": "string"
-      }
-    }
-
-    ## Example json body:
-    {
-      "title": "Netflix Subscription",
-      "type": "expense",
-      "category": "Entertainment", 
-      "description": "Monthly Netflix streaming service",
-      "start": "2024-01-15T00:00:00.000Z",
-      "end": "2024-12-31T00:00:00.000Z",
-      "time": "09:00",
-      "amount": -15.99,
-      "location": "Online",
-      "frequency": 30,
-      "display_name": "Netflix"
-    }
-
     Tone & Style: 
     - Clear, empathetic, and supportive
     - Professional yet approachable
@@ -662,14 +588,14 @@ exports.chat = async (req, res) => {
       const choice = responseWithTools?.choices?.[0];
       const msg = choice?.message;
       
-      // // If the model wants to call tools, execute them
-      // if (msg?.tool_calls && msg.tool_calls.length > 0) {
-      //   console.log('Model requested tool calls, executing...');
-      //   result = await executeToolCalls(messages, msg.tool_calls, ctx);
-      // } else {
-      //   // No tool calls needed, use the response directly
-      //   result = { content: msg?.content || '', raw: responseWithTools };
-      // }
+      // If the model wants to call tools, execute them
+      if (msg?.tool_calls && msg.tool_calls.length > 0) {
+        console.log('Model requested tool calls, executing...');
+        result = await executeToolCalls(messages, msg.tool_calls, ctx);
+      } else {
+        // No tool calls needed, use the response directly
+        result = { content: msg?.content || '', raw: responseWithTools };
+      }
       result = { content: msg?.content || '', raw: responseWithTools };
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');

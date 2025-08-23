@@ -215,6 +215,12 @@ const functionMap = {
     const { accountId, userId, token, body } = args;
     const result = await getBalances({ accountId, userId, token, body });
     return result;
+  },
+
+  async createTransaction(args, ctx) {
+    const { userId, accountId, token, body } = args;
+    const result = await createTransaction({ userId, accountId, token, body });
+    return result;
   }
 };
 

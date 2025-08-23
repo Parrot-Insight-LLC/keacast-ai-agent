@@ -2,103 +2,117 @@
   {
     "type": "function",
     "function": {
-      "name": "getUserAccounts",
-      "description": "Fetch bank accounts for a user with pagination support to prevent memory issues.",
-      "parameters": {
-        "type": "object",
-        "properties": { 
-          "userId": { "type": "string" },
-          "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
-          "limit": { "type": "integer", "description": "Number of accounts per page (default: 20, max: 100)" }
-        },
-        "required": ["userId"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": { 
-      "name": "getUserAccountData",
-      "description": "Fetch account data for a user",
+      "name": "createTransaction",
+      "description": "Creates financial transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency, start date, and end date. If all of the request data is not provided then fill out the required properties with the most relevant data.",
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": { "type": "string" },
-          "token": { "type": "string" },
-          "body": { "type": "object" }
+          "userId": {
+            "type": "string",
+            "description": "The user ID for the transaction"
+          },
+          "accountId": {
+            "type": "string", 
+            "description": "The account ID for the transaction"
+          },
+          "title": {
+            "type": "string",
+            "description": "Transaction name"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["expense", "income"],
+            "description": "Transaction type - expense or income"
+          },
+          "category": {
+            "type": "string",
+            "description": "Transaction category"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed description of the transaction"
+          },
+          "start": {
+            "type": "string",
+            "description": "Start date in ISO format (YYYY-MM-DDTHH:mm:ss.sssZ)"
+          },
+          "end": {
+            "type": "string", 
+            "description": "End date in ISO format (YYYY-MM-DDTHH:mm:ss.sssZ)"
+          },
+          "time": {
+            "type": "string",
+            "description": "Time of day in HH:mm format"
+          },
+          "amount": {
+            "type": "number",
+            "description": "Transaction amount (negative for expenses, positive for income)"
+          },
+          "location": {
+            "type": "string",
+            "description": "Location of the transaction"
+          },
+          "frequency": {
+            "type": "number",
+            "description": "Recurrence code: 1=Daily, 2=Once, 7=Weekly, 14=Bi-Weekly, 15=Semi-Monthly (1st & 15th), 16=Semi-Monthly (15th & end), 28-31=Monthly, 60=Bi-Monthly, 91=Quarterly, 182-183=Semi-Annually, 365-366=Annually"
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Display name for UI"
+          },
+          "isAlreadyGrouped": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether the transaction is already grouped"
+          },
+          "match_id": {
+            "type": "string",
+            "default": null,
+            "description": "For bank transaction matching"
+          },
+          "website": {
+            "type": "string",
+            "default": null,
+            "description": "URL or logo"
+          },
+          "combined_id": {
+            "type": "string",
+            "default": null,
+            "description": "Combined ID (auto-generated if not provided)"
+          },
+          "monthlyTimeStamp": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether to use monthly timestamp"
+          },
+          "match_groupid": {
+            "type": "string",
+            "default": null,
+            "description": "Match group ID"
+          },
+          "matchStatus": {
+            "type": "number",
+            "default": 0,
+            "description": "Match status"
+          },
+          "forecast_type": {
+            "type": "string",
+            "enum": ["F", "A", "RF"],
+            "default": "F",
+            "description": "F=Forecast, A=Actual, RF=Recurring Forecast"
+          },
+          "goal": {
+            "type": "number",
+            "default": null,
+            "description": "Goal amount for savings"
+          },
+          "merchant_name": {
+            "type": "string",
+            "default": null,
+            "description": "Merchant name"
+          }
         },
-        "required": ["userId", "token", "body"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "getUserTransactions",
-      "description": "Retrieve transactions for a user account in a date window with pagination support to prevent memory issues.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "userId": { "type": "string" },
-          "accountId": { "type": "string" },
-          "startDate": { "type": "string" },
-          "endDate": { "type": "string" },
-          "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
-          "limit": { "type": "integer", "description": "Number of transactions per page (default: 50, max: 200)" }
-        },
-        "required": ["userId", "accountId"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "getRecurringForecasts",
-      "description": "Get recurring/forecast transactions for an account with pagination support to prevent memory issues.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "accountId": { "type": "string" },
-          "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
-          "limit": { "type": "integer", "description": "Number of forecasts per page (default: 25, max: 100)" }
-        },
-        "required": ["accountId"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "getUpcomingTransactions",
-      "description": "Get upcoming transactions for an account over a date range with pagination support to prevent memory issues.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "accountId": { "type": "string" },
-          "startDate": { "type": "string" },
-          "endDate": { "type": "string" },
-          "forecastType": { "type": "string" },
-          "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
-          "limit": { "type": "integer", "description": "Number of transactions per page (default: 30, max: 100)" }
-        },
-        "required": ["accountId", "startDate", "endDate"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "getTransactionSummary",
-      "description": "Get transaction summary statistics without loading full transaction data to prevent memory issues.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "userId": { "type": "string" },
-          "accountId": { "type": "string" },
-          "startDate": { "type": "string" },
-          "endDate": { "type": "string" }
-        },
-        "required": ["userId", "accountId"]
+        "required": ["userId", "accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "frequency", "display_name"]
       }
     }
   }
