@@ -218,9 +218,9 @@ const functionMap = {
   },
 
   async createTransaction(args, ctx) {
-    const { userId, accountId, token, body } = ctx;
+    const { userId, token, accountId} = ctx;
 
-    const result = await createTransaction({ userId, accountId, token, body });
+    const result = await createTransaction({ userId, accountId, token, args });
     return result;
   }
 };
