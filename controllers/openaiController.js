@@ -582,6 +582,7 @@ exports.chat = async (req, res) => {
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
     let error;
+    let toolCalls;
     try {
       console.log('Attempting to get response with tools...');
       const responseWithTools = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'auto' });
@@ -591,6 +592,7 @@ exports.chat = async (req, res) => {
       // If the model wants to call tools, execute them
       if (msg?.tool_calls && msg.tool_calls.length > 0) {
         console.log('Model requested tool calls, executing...');
+        toolCalls = msg.tool_calls;
         result = await executeToolCalls(messages, msg.tool_calls, ctx);
       } else {
         // No tool calls needed, use the response directly
@@ -630,6 +632,7 @@ exports.chat = async (req, res) => {
       dataMessage: dataMessage,
       requestSize: requestSize,
       error: result?.error,
+      toolCalls: toolCalls
     });
 
   } catch (error) {
