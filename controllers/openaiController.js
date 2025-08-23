@@ -369,7 +369,17 @@ exports.chat = async (req, res) => {
     if (!userContext || Object.keys(userContext).length === 0 || !userContext.selectedAccounts) {
       if (userId && token) {
         try {
-          const ctx = { userId, authHeader };          
+          const ctx = { userId, authHeader };
+          
+          // First get user data
+          const userData = await functionMap.getUserData({ userId, token }, ctx);
+          console.log('User data retrieved:', userData);
+
+          const upcomingEnd = moment().add(14, 'days').format('YYYY-MM-DD');
+          const currentDate = moment(moment().format('YYYY-MM-DD') + 'T00:00:00').format('YYYY-MM-DD');
+          const recentStart = moment().subtract(3, 'months').format('YYYY-MM-DD');
+          const recentEnd = moment().add(1, 'days').format('YYYY-MM-DD');
+          
           // Then use user data to get selected accounts
           const selectedAccounts = await functionMap.getSelectedKeacastAccounts({ 
             userId, 
