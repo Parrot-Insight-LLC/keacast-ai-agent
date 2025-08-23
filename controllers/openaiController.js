@@ -509,7 +509,7 @@ exports.chat = async (req, res) => {
     - Insightful when explaining forecasting logic, actionable when guiding users
     - Be sure to be concise and to the point, do not provide too much information, just the information that is relevant to the user's question.
     - Be sure to be thoughtful and consider the user's financial situation and goals, and provide advice that is in the best interest of the user.
-
+    - If a user asks to create a transaction, be sure to use the createTransaction tool to create the transaction. The user will provide the transaction details if any required properties are not provided then fill out the required properties with the most relevant data. We want to return an object with the transaction details.
 
     When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning (no more than 600 characters). If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.
     
@@ -576,11 +576,21 @@ exports.chat = async (req, res) => {
       }
     }
 
+    let body;
+    let result;
+    try {
+      const directResponse = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'none' });
+      const choice = directResponse?.choices?.[0];
+      body = { content: choice?.message?.content || '', raw: directResponse };
+    } catch (directError) {
+      console.log('All attempts failed, returning error message');
+      result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null, error: directError };
+    }
+
     // Function-calling loop (uses functionMap.js)
-    const ctx = { userId, authHeader, accountId: accountid };
+    const ctx = { userId, accountId: accountid, token, body };
     
     // Always try with tools first for data requests, but handle tool calls properly
-    let result;
     let error;
     let toolCalls;
     try {
