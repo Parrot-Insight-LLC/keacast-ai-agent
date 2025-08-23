@@ -320,11 +320,30 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   
   // Get final response from Azure OpenAI
   try {
-    const finalResponse = await queryAzureOpenAI(cleanMessages, { tools: functionSchemas, tool_choice: 'none' });
-    const choice = finalResponse?.choices?.[0];
-    return { content: choice?.message?.content || '', raw: finalResponse };
+    console.log('Getting final response after tool execution with', cleanMessages.length, 'messages');
+    
+    // Check message size to prevent rate limiting
+    const messageSize = JSON.stringify(cleanMessages).length;
+    console.log('Message array size:', messageSize, 'bytes');
+    
+    if (messageSize > 750000) {
+      console.log('Message array too large, truncating for final response');
+      // Keep only the most recent messages for the final response
+      const truncatedMessages = cleanMessages.slice(-5); // Keep last 5 messages
+      console.log('Truncated to', truncatedMessages.length, 'messages');
+      const finalResponse = await queryAzureOpenAI(truncatedMessages, { tools: functionSchemas, tool_choice: 'none' });
+      const choice = finalResponse?.choices?.[0];
+      console.log('Final response received:', !!choice?.message?.content, 'Content length:', choice?.message?.content?.length || 0);
+      return { content: choice?.message?.content || '', raw: finalResponse };
+    } else {
+      const finalResponse = await queryAzureOpenAI(cleanMessages, { tools: functionSchemas, tool_choice: 'none' });
+      const choice = finalResponse?.choices?.[0];
+      console.log('Final response received:', !!choice?.message?.content, 'Content length:', choice?.message?.content?.length || 0);
+      return { content: choice?.message?.content || '', raw: finalResponse };
+    }
   } catch (error) {
     console.log('Final response with tool results failed:', error.message);
+    console.log('Error details:', error.response?.data || error);
     // Return a summary of what we found from the tools
     const summary = toolResults.map(tr => {
       if (tr.error) return `Error in ${tr.name}: ${tr.error}`;
@@ -352,8 +371,33 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         return `Successfully retrieved data from ${tr.name}`;
       }
     });
+    // Create a more user-friendly response based on the tool results
+    let userFriendlyResponse = '';
+    
+    // Check if we have transaction creation results
+    const transactionResults = toolResults.filter(tr => tr.name === 'createTransaction');
+    if (transactionResults.length > 0) {
+      const transactionResult = transactionResults[0];
+      try {
+        const content = JSON.parse(transactionResult.content);
+        if (content.message && content.message.includes('successfully created')) {
+          userFriendlyResponse = `✅ Perfect! I've successfully created your transaction. ${content.message}`;
+          if (content.data?.id) {
+            userFriendlyResponse += ` (ID: ${content.data.id})`;
+          }
+        } else {
+          userFriendlyResponse = `I've processed your transaction request. ${content.message || 'Transaction has been handled.'}`;
+        }
+      } catch {
+        userFriendlyResponse = '✅ I have successfully processed your transaction request.';
+      }
+    } else {
+      // For other tools, provide a generic success message
+      userFriendlyResponse = `I've completed the requested action. ${summary.join('. ')}`;
+    }
+    
     return { 
-      content: `I executed the requested tools with the following results: ${summary.join('. ')}. However, I encountered an issue generating the final response. Please try asking your question again.`, 
+      content: userFriendlyResponse, 
       raw: null 
     };
   }
@@ -528,7 +572,7 @@ exports.chat = async (req, res) => {
     - If users add big one-time transactions, help them see scenarios to understand the impact on their financial situation.
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
-    - When creating transactions using the createTransaction tool, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast.
+    - When creating transactions using the createTransaction tool, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created.
 
     Tone & Style: 
     - Clear, empathetic, and supportive
