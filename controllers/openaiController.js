@@ -537,7 +537,6 @@ exports.chat = async (req, res) => {
     - Be sure to be concise and to the point, do not provide too much information, just the information that is relevant to the user's question.
     - Be sure to be thoughtful and consider the user's financial situation and goals, and provide advice that is in the best interest of the user.
 
-
     When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning (no more than 600 characters). If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.
     
     Review the app here: https://keacast.app/ for more context and information.`;
@@ -615,6 +614,13 @@ exports.chat = async (req, res) => {
       const choice = responseWithTools?.choices?.[0];
       const msg = choice?.message;
       
+      console.log('Response message structure:', {
+        hasContent: !!msg?.content,
+        hasToolCalls: !!msg?.tool_calls,
+        toolCallsLength: msg?.tool_calls?.length || 0,
+        contentLength: msg?.content?.length || 0
+      });
+      
       // If the model wants to call tools, execute them
       if (msg?.tool_calls && msg.tool_calls.length > 0) {
         console.log('Model requested tool calls, executing...');
@@ -623,7 +629,6 @@ exports.chat = async (req, res) => {
         // No tool calls needed, use the response directly
         result = { content: msg?.content || '', raw: responseWithTools };
       }
-      result = { content: msg?.content || '', raw: responseWithTools };
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
@@ -636,6 +641,12 @@ exports.chat = async (req, res) => {
       }
     }
 
+    console.log('Final result structure:', {
+      hasContent: !!result?.content,
+      contentLength: result?.content?.length || 0,
+      hasError: !!result?.error
+    });
+    
     const finalText = result.content || 'Sorry, no response generated.';
     const updatedHistory = [
       ...sanitizeMessageArray(history),
