@@ -507,7 +507,7 @@ exports.chat = async (req, res) => {
     - the following endpoints will require an authorization header with the following format: Bearer <token> where <token> is the user's token. ${token}
     # CashFlow Transaction API - createTransaction Endpoint
     - userid = ${userId}
-    - accid = ${accountId}
+    - accid = ${accountid}
 
     **POST /transaction/create/:userid/:accid**
 
