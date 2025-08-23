@@ -596,7 +596,7 @@ exports.chat = async (req, res) => {
         // No tool calls needed, use the response directly
         result = { content: msg?.content || '', raw: responseWithTools };
       }
-      result = { content: msg?.content || '', raw: responseWithTools };
+      // result = { content: msg?.content || '', raw: responseWithTools };
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
