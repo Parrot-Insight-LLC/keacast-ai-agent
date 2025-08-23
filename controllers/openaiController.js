@@ -577,7 +577,7 @@ exports.chat = async (req, res) => {
     }
 
     // Function-calling loop (uses functionMap.js)
-    const ctx = { userId, authHeader };
+    const ctx = { userId, authHeader, accountId: accountid };
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;

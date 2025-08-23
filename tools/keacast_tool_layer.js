@@ -73,7 +73,7 @@ async function getBalances({ accountId, userId, token, body }) {
 }
 
 async function createTransaction({ userId, accountId, token, body }) {
-  const url = `${BASE_URL}/transactions/create/${userId}/${accountId}`;
+  const url = `${BASE_URL}/transaction/create/${userId}/${accountId}`;
   const response = await axios.post(url, body, AUTH_HEADER(token));
   return response.data;
 }
