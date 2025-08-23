@@ -106,7 +106,7 @@
     "type": "function",
     "function": {
       "name": "createTransaction",
-      "description": "Creates financial transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency, start date, and end date. If all of the request data is not provided then fill out the required properties with the most relevant data.",
+      "description": "Creates financial transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency, start date, and end date. If all of the request data is not provided then fill out the required properties with the most relevant data. Always return with the transaction_id and if the transaction is recurring then also return the group_id which you can refer to as the recurring_id.",
       "parameters": {
         "type": "object",
         "properties": {
