@@ -448,6 +448,8 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
         Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
         ${JSON.stringify(contextSummary.possibleRecurringTransactions, null, 2)}
+        Here are the user's categories:
+        ${JSON.stringify(contextSummary.categories, null, 2)}
         Here is my account available balance:
         ${JSON.stringify(contextSummary.available, null, 2)}
         Here is my user's first name:
@@ -511,12 +513,12 @@ exports.chat = async (req, res) => {
 
     **POST /transaction/create/:userid/:accid**
 
-    Creates financial transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency.
+    Creates financial transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency. If all of the request data is not provided then fill out the required properties with the most relevant data.
 
     ## Required Properties
     - 'title' (string): Transaction name
     - 'type' (string): "expense" or "income"  
-    - 'category' (string): Transaction category
+    - 'category' (string): Transaction category (choose from this list of categories (name is the main property we are looking for): ${JSON.stringify(contextSummary.categories, null, 2)})
     - 'description' (string): Detailed description
     - 'start' (string): Start date (ISO format: YYYY-MM-DDTHH:mm:ss.sssZ)
     - 'end' (string): End date (ISO format: YYYY-MM-DDTHH:mm:ss.sssZ)
