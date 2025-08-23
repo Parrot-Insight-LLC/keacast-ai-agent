@@ -504,6 +504,7 @@ exports.chat = async (req, res) => {
     endpoint base url: https://cashflow-backend-production.herokuapp.com/
 
     Available tools:
+    - the following endpoints will require an authorization header with the following format: Bearer <token> where <token> is the user's token. ${token}
     # CashFlow Transaction API - createTransaction Endpoint
     - userid = ${userId}
     - accid = ${accountId}
