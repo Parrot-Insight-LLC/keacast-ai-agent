@@ -215,7 +215,7 @@
             "description": "Merchant name"
           }
         },
-        "required": ["userId", "accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "location", "frequency", "display_name"]
+        "required": ["title", "start", "amount", "frequency"]
       }
     }
   }
