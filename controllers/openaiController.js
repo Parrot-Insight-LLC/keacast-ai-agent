@@ -227,7 +227,7 @@ function createContextSummary(userContext) {
       count: userContext.selectedAccounts.length,
       // Include key account details
       accounts: userContext.selectedAccounts.map(acc => ({
-        id: acc.id,
+        accountid: acc.accountid,
         name: acc.accountname,
         type: acc.account_type,
         balance: acc.balance,
@@ -253,7 +253,7 @@ function createContextSummary(userContext) {
     categories: userContext.categories && Array.isArray(userContext.categories) ? userContext.categories : [],
     transactions: userContext.cfTransactions && Array.isArray(userContext.cfTransactions) ? 
       userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 250).map(t => ({
-        id: t.transactionid,
+        transaction_id: t.transactionid,
         name: t.title,
         display_name: t.display_name,
         amount: t.amount,
@@ -274,7 +274,7 @@ function createContextSummary(userContext) {
     //   })) : [],
     upcomingTransactions: userContext.upcomingTransactions && Array.isArray(userContext.upcomingTransactions) ? 
     userContext.upcomingTransactions.slice(0, 250).map(t => ({
-        id: t.transactionid,
+        transaction_id: t.transactionid,
         name: t.title,
         display_name: t.display_name,
         amount: t.amount,
