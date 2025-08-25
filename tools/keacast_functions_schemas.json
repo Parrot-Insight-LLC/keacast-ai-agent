@@ -106,7 +106,7 @@
     "type": "function",
     "function": {
       "name": "createTransaction",
-      "description": "Creates financial transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency, start date, and end date. Required inputs are title or description, amount, frequency, start date, if these fields have not been provided prompt the user to provide them. For all other properties insert the most relevant data based on the information provided. You can set the end date depending on the details you have recieved as well as the context you have been given of transaction data. Any spending transactions should be created as an expense and any income transactions should be created as an income. We want creating transactions to be as easy as possible for the user and we want to make sure that the user is aware of the financial implications of their actions.",
+      "description": "Creates financial forecasts or transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency, start date, and end date. Required inputs are title, amount, frequency, and start date. If title, amount, frequency, or start date fields have not been provided prompt the user to provide them. For all other fields insert the most relevant data based on the information provided. You can set the end date depending on the details you have recieved as well as the context you have been given of transaction data. Any spending transactions should be created as an expense and any income transactions should be created as an income. We want creating transactions to be as easy as possible for the user and we want to make sure that the user is aware of the financial implications of their actions.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -216,6 +216,21 @@
           }
         },
         "required": ["userId", "accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "location", "frequency", "display_name"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "deleteTransaction",
+      "description": "Deletes a transaction from the user's account. If the transaction is not found then return a message saying 'Transaction not found'. Always confirm with the user before deleting a transaction or a group of transactions. If the user is not sure about deleting a transaction then ask them to confirm their decision. Always list out the deleted transactions and the number of transactions deleted. Transactions can be deleted by their transactionid. If the user does not provide a transactionid then ask the user to provide it, else use the relevant information to find the transactionid found in context. Also you can only delete forecasted transaction and not actual transactions. If forecast_type is 'A' then return a message saying 'Transaction is an actual transaction and cannot be deleted'. If forecast_type is 'F' then delete the transaction.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "userId": { "type": "string" },
+          "transactionid": { "type": "string" }
+        },
+        "required": ["userId", "transactionid"]
       }
     }
   }

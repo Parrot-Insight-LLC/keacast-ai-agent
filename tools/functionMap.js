@@ -221,6 +221,14 @@ const functionMap = {
     const { userId, token, accountId } = ctx;
     const result = await createTransaction({ userId, accountId, token, body: args });
     return result;
+  },
+
+  async deleteTransaction(args, ctx) {
+    const { userId, token, body } = args;
+    const { id } = ctx;
+    const transactionid = id || transactionId;
+    const result = await deleteTransaction({ userId, transactionid, token, body });
+    return result;
   }
 };
 

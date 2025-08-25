@@ -78,6 +78,12 @@ async function createTransaction({ userId, accountId, token, body }) {
   return response.data;
 }
 
+async function deleteTransaction({ userId, transactionId, token, body }) {
+  const url = `${BASE_URL}/transaction/delete/${userId}/${transactionId}`;
+  const response = await axios.delete(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
 // --------------------------------------
 // Function Map for Tool Execution
 // --------------------------------------
@@ -91,7 +97,8 @@ const functionMap = {
   getUserData,
   getSelectedKeacastAccounts,
   getBalances,
-  createTransaction
+  createTransaction,
+  deleteTransaction
 };
 
 module.exports = {
@@ -105,5 +112,6 @@ module.exports = {
   getSelectedKeacastAccounts,
   getBalances,
   createTransaction,
+  deleteTransaction,
   functionMap // 👈 Exported for OpenAI tool handler integration
 };
