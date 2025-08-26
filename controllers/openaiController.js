@@ -301,7 +301,8 @@ function createContextSummary(userContext) {
     userContext.possibleRecurringTransactions : [],
     breakdown: userContext.breakdown && Array.isArray(userContext.breakdown) ? userContext.breakdown : [],
     balances: userContext.balances && Array.isArray(userContext.balances) ? userContext.balances : [],
-    available: userContext.available && Array.isArray(userContext.available) ? userContext.available : [],
+    availableBalance: userContext.available && Array.isArray(userContext.available) ? userContext.available : [],
+    forecastedBalance: userContext.balances.find((balance) => moment(balance.date, 'YYYY/MM/DD').format('YYYY-MM-DD') === moment(currentDate).format('YYYY-MM-DD')).amount
   };
 
   return summary;
@@ -589,7 +590,9 @@ exports.chat = async (req, res) => {
         Here are the user's categories:
         ${JSON.stringify(contextSummary.categories, null, 2)}
         Here is my account available balance:
-        ${JSON.stringify(contextSummary.available, null, 2)}
+        ${JSON.stringify(contextSummary.availableBalance, null, 2)}
+        Here is my account forecasted balance:
+        ${JSON.stringify(contextSummary.forecastedBalance, null, 2)}
         Here is my user's first name:
         ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
         Here is my user's last name:
