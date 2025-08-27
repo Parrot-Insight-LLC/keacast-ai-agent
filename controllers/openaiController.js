@@ -1012,8 +1012,9 @@ exports.autoCategorizeTransaction = async (req, res) => {
 
     **Your Task:**
     - Analyze the transaction in question (amount, title, name, display_name, merchant_name)
-    - Review the user's transaction history to understand their categorization patterns
-    - Consider the user's existing categories and how they've categorized similar transactions
+    - Review the user's transaction history in context to understand their categorization patterns (amount, title, name, display_name, merchant_name)
+    - Consider the user's existing categories and how they've categorized similar transactions (amount, title, name, display_name, merchant_name)
+    - Find the best possible category by reviewing your transaction. We want to be as accurate as possible and use your knowledge of the user's spending patterns to make the best guess.
     - Return ONLY the single best category name from the user's categories list
 
     **Analysis Guidelines:**
