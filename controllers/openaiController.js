@@ -302,7 +302,7 @@ function createContextSummary(userContext) {
     breakdown: userContext.breakdown && Array.isArray(userContext.breakdown) ? userContext.breakdown : [],
     balances: userContext.balances && Array.isArray(userContext.balances) ? userContext.balances : [],
     availableBalance: userContext.available && Array.isArray(userContext.available) ? userContext.available : [],
-    forecastedBalance: userContext.balances.find((balance) => moment(balance.date, 'YYYY/MM/DD').format('YYYY-MM-DD') === moment(currentDate).format('YYYY-MM-DD')).amount
+    forecastedBalance: userContext.balances.find((balance) => moment(balance.date, 'YYYY/MM/DD').format('YYYY-MM-DD') === moment(userContext.currentDate).format('YYYY-MM-DD')).amount
   };
 
   return summary;
@@ -560,6 +560,7 @@ exports.chat = async (req, res) => {
              breakdown: selectedAccounts[0]?.breakdown || [],
              balances: filteredBalances || selectedAccounts[0]?.balances || [],
              available: selectedAccounts[0]?.available || [],
+             currentDate: currentDate
            };
           console.log('Chat endpoint: Preloaded user context via functionMap.');
           dataMessage = 'Chat endpoint: Preloaded user context via functionMap.';
@@ -645,7 +646,7 @@ exports.chat = async (req, res) => {
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
     - When creating transactions using the createTransaction tool, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created. Make sure not to duplicate or repeat anything in your response.
       - Always return with the transaction_id and if the transaction is recurring then also return the group_id which you can refer to as the recurring_id.
-      - When working with dates and times, consider the user's location and timezone to provide accurate date-based responses. Forecasted transactions can not be created on date before the current date (today's date). The system automatically calculates the correct date based on the user's coordinates.
+      - When working with dates and times, consider the user's location and timezone to provide accurate date-based responses. Forecasted transactions can not be created on date before the ${currentDate}. The system automatically calculates the correct date based on the user's coordinates.
       - When creating forecasts always consider whether the user has enough in the coming days, weeks, months, or years and warn them about how this may effect their financial state in the future. 
 
     Tone & Style: 
