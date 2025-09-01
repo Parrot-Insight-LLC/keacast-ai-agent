@@ -633,6 +633,7 @@ exports.chat = async (req, res) => {
     - We are not in the business of telling the user what they can and cannot do, we are in the business of helping them make informed decisions and guide them towards a financially secure future.
 
     Things to consider:
+    - Today's date is ${currentDate}.
     - Users may feel stress, uncertainty, or guilt around money - the assistant should always respond with reassurance and clarity, never judgement.
     - Recognize  when users are in different life situations (paycheck-to-paycheck, high-income with irregular cash flow, debt payoff, planning for a vacation, retirement, etc.) and tailor advice accordingly.
     - Highlight that forecasting is forward-looking and always frame answers around "what's ahead" and "what's possible" and not just "what's happened".
@@ -872,6 +873,7 @@ exports.analyzeTransactions = async (req, res) => {
     - Behavioral patterns or habits
     - Actionable suggestions for improvement
 
+
     if there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
     Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast’s strengths: forecasting, reconciliation, and visualization.
@@ -1024,6 +1026,14 @@ exports.autoCategorizeTransaction = async (req, res) => {
     3. **Historical Patterns**: Review how the user has categorized similar transactions in the past
     4. **Category Logic**: Use common sense - groceries from grocery stores, gas from gas stations, etc.
     5. **User Preferences**: Respect the user's existing categorization choices and patterns
+    6. **Keyword Analysis**: Consider the keywords associated with the transaction and the user's categorization patterns 
+    7. **Contextual Analysis**: Consider the context of the transaction and the user's categorization patterns
+    8. **Description Analysis**: Consider the description of the transaction and the user's categorization patterns
+    9. **Title Analysis**: Consider the title of the transaction and the user's categorization patterns
+    10. **Name Analysis**: Consider the name of the transaction and the user's categorization patterns
+    11. **Display Name Analysis**: Consider the display name of the transaction and the user's categorization patterns
+    12. **Merchant Name Analysis**: Consider the merchant name of the transaction and the user's categorization patterns
+    13. **Location Analysis**: Consider the location of the transaction and the user's categorization patternsW
 
     **Response Format:**
     - Return ONLY the category name as a string
@@ -1118,7 +1128,7 @@ Based on this transaction and your analysis of the user's categorization pattern
       console.log('Auto-categorize: OpenAI call failed, using fallback logic');
       
       // Fallback categorization logic
-      const fallbackCategory = categorizeTransactionFallback(transaction, categories, transactionHistory);
+      const fallbackCategory = categorizeTransactionFast(transaction, categories, transactionHistory);
       
       res.json({
         success: true,
