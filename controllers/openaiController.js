@@ -377,7 +377,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   
   cleanMessages.push({
     role: 'user',
-    content: `I have executed the following tools: ${toolSummary.join('. ')}. Please provide a comprehensive answer based on this data. If any transactions were created, make sure to clearly confirm the creation to the user with relevant details.`
+    content: `I have executed the following tools: ${toolSummary.join('. ')}. Please provide a comprehensive answer based on this data. If any transactions were created, make sure to clearly confirm the creation to the user with relevant details. IMPORTANT: Always respond with markdown formatting.`
   });
   
   // Get final response from Azure OpenAI
@@ -443,19 +443,19 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       try {
         const content = JSON.parse(transactionResult.content);
         if (content.message && content.message.includes('successfully created')) {
-          userFriendlyResponse = `✅ Perfect! I've successfully created your transaction. ${content.message}`;
+          userFriendlyResponse = `## ✅ Transaction Created Successfully!\n\n**${content.message}**`;
           if (content.data?.id) {
-            userFriendlyResponse += ` (ID: ${content.data.id})`;
+            userFriendlyResponse += `\n\n**Transaction ID:** ${content.data.id}`;
           }
         } else {
-          userFriendlyResponse = `I've processed your transaction request. ${content.message || 'Transaction has been handled.'}`;
+          userFriendlyResponse = `## Transaction Processed\n\n**${content.message || 'Transaction has been handled.'}**`;
         }
       } catch {
-        userFriendlyResponse = '✅ I have successfully processed your transaction request.';
+        userFriendlyResponse = '## ✅ Transaction Processed\n\n**I have successfully processed your transaction request.**';
       }
     } else {
       // For other tools, provide a generic success message
-      userFriendlyResponse = `I've completed the requested action. ${summary.join('. ')}`;
+      userFriendlyResponse = `## Action Completed\n\n**${summary.join('. ')}**`;
     }
     
     return { 
@@ -759,7 +759,7 @@ exports.chat = async (req, res) => {
         result = { content: choice?.message?.content || '', raw: directResponse };
       } catch (directError) {
         console.log('All attempts failed, returning error message');
-        result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null, error: directError };
+        result = { content: '## ❌ Error\n\n**I apologize, but I encountered an error while processing your request. Please try again.**', raw: null, error: directError };
       }
     }
 
@@ -769,7 +769,7 @@ exports.chat = async (req, res) => {
       hasError: !!result?.error
     });
     
-    const finalText = result.content || 'Sorry, no response generated.';
+    const finalText = result.content || '## ❌ No Response\n\n**Sorry, no response generated.**';
     const updatedHistory = [
       ...sanitizeMessageArray(history),
       { role: 'user', content: message },
@@ -875,12 +875,13 @@ exports.analyzeTransactions = async (req, res) => {
     - Behavioral patterns or habits
     - Actionable suggestions for improvement
 
+    If there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
-    if there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
+    Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast's strengths: forecasting, reconciliation, and visualization.
 
-    Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast’s strengths: forecasting, reconciliation, and visualization.
+    At the end of the summary, include relevant follow-up questions that guide the user toward improving their financial wellness through Keacast's forecasting features. Avoid unnecessary formatting, symbols, or filler (such as "...").
 
-    At the end of the summary, include relevant follow-up questions that guide the user toward improving their financial wellness through Keacast’s forecasting features. Avoid unnecessary formatting, symbols, or filler (such as “...”).`;
+    IMPORTANT: Always respond with markdown formatting. Use headers, bullet points, bold text, and other markdown elements to make your responses clear and well-structured.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -914,7 +915,7 @@ exports.analyzeTransactions = async (req, res) => {
       //   // No tool calls needed, use the response directly
       //   result = { content: msg?.content || '', raw: responseWithTools };
       // }
-      result = { content: msg?.content || 'How can I help? Ask Keacast anything about your finances or to perform a task.', raw: responseWithTools };
+      result = { content: msg?.content || '## Welcome to Keacast! 👋\n\n**How can I help? Ask Keacast anything about your finances or to perform a task.**', raw: responseWithTools };
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
@@ -923,7 +924,7 @@ exports.analyzeTransactions = async (req, res) => {
         result = { content: choice?.message?.content || '', raw: directResponse };
       } catch (directError) {
         console.log('All attempts failed, returning error message');
-        result = { content: 'I apologize, but I encountered an error while processing your request. Please try again.', raw: null, error: directError };
+        result = { content: '## ❌ Error\n\n**I apologize, but I encountered an error while processing your request. Please try again.**', raw: null, error: directError };
       }
     }
 
