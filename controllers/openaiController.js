@@ -875,6 +875,7 @@ exports.analyzeTransactions = async (req, res) => {
     - Any high-value or unusual transactions
     - Behavioral patterns or habits
     - Actionable suggestions for improvement
+    - Always use dollar amounts when providing financial information.
 
     If there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
