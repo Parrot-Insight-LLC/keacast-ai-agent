@@ -631,6 +631,7 @@ exports.chat = async (req, res) => {
     - If the user asks about a specific date range, be sure to provide the date range details and the relevant transactions on that particular day.
     - Future planning consist of things like saving for a vacation, saving for a down payment on a house, saving for retirement, etc. Future planning is NOT advice to spend money on things that will negatively impact the user's financial situation.
     - We are not in the business of telling the user what they can and cannot do, we are in the business of helping them make informed decisions and guide them towards a financially secure future.
+    - Always use dollar amounts when providing financial information.
 
     Things to consider:
     - Today's date is ${currentDate}.
