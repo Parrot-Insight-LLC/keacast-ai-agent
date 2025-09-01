@@ -632,6 +632,10 @@ exports.chat = async (req, res) => {
     - Future planning consist of things like saving for a vacation, saving for a down payment on a house, saving for retirement, etc. Future planning is NOT advice to spend money on things that will negatively impact the user's financial situation.
     - We are not in the business of telling the user what they can and cannot do, we are in the business of helping them make informed decisions and guide them towards a financially secure future.
     - Always use dollar amounts when providing financial information.
+    - Always use the word "disposable" when referring to disposable income.
+    - Always use the word "forecasted" when referring to forecasted income and spending.    
+    - Only use (-) for negative amounts, dont use (-) for any other purpose.
+    - Only use ($) when displaying amounts.
 
     Things to consider:
     - Today's date is ${currentDate}.
@@ -876,6 +880,10 @@ exports.analyzeTransactions = async (req, res) => {
     - Behavioral patterns or habits
     - Actionable suggestions for improvement
     - Always use dollar amounts when providing financial information.
+    - Always use the word "disposable" when referring to disposable income.
+    - Always use the word "forecasted" when referring to forecasted income and spending.    
+    - Only use (-) for negative amounts, dont use (-) for any other purpose.
+    - Only use ($) when displaying amounts.
 
     If there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
