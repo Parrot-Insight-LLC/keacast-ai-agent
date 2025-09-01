@@ -9,56 +9,6 @@ const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
 
-// Add rate limiting constants
-const RATE_LIMIT_WINDOW = 60000; // 1 minute
-const MAX_REQUESTS_PER_WINDOW = 10; // Max requests per minute per session
-const REQUEST_SIZE_LIMIT = 400000; // Reduce to 400KB to stay well under Azure limits
-const CONTEXT_TRANSACTION_LIMIT = 100; // Limit transactions in context to 100
-const CONTEXT_CATEGORY_LIMIT = 50; // Limit categories in context to 50
-
-// Rate limiting storage
-const rateLimitStore = new Map();
-
-// Cleanup old rate limit entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW;
-  
-  for (const [sessionKey, requests] of rateLimitStore.entries()) {
-    const recentRequests = requests.filter(timestamp => timestamp > windowStart);
-    if (recentRequests.length === 0) {
-      rateLimitStore.delete(sessionKey);
-    } else {
-      rateLimitStore.set(sessionKey, recentRequests);
-    }
-  }
-  
-  console.log('Rate limit cleanup: Cleaned up old entries, current sessions:', rateLimitStore.size);
-}, 5 * 60 * 1000); // 5 minutes
-
-function checkRateLimit(sessionKey) {
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW;
-  
-  if (!rateLimitStore.has(sessionKey)) {
-    rateLimitStore.set(sessionKey, []);
-  }
-  
-  const requests = rateLimitStore.get(sessionKey);
-  
-  // Remove old requests outside the window
-  const recentRequests = requests.filter(timestamp => timestamp > windowStart);
-  rateLimitStore.set(sessionKey, recentRequests);
-  
-  if (recentRequests.length >= MAX_REQUESTS_PER_WINDOW) {
-    return false; // Rate limited
-  }
-  
-  // Add current request
-  recentRequests.push(now);
-  return true; // Allowed
-}
-
 function buildSessionKey(req) {
   // Check multiple sources for sessionId in order of preference
   const sessionId = req.body.sessionId || 
@@ -299,27 +249,31 @@ function createContextSummary(userContext) {
       recentTransactions: userContext.recentTransactions ? userContext.recentTransactions.length : 0,
       breakdown: userContext.breakdown ? userContext.breakdown.length : 0
     },
-    // Limit context data to prevent massive message sizes
-    categories: userContext.categories && Array.isArray(userContext.categories) ? 
-      userContext.categories.slice(0, CONTEXT_CATEGORY_LIMIT) : [],
+    // Include a sample of recent transactions for context
+    categories: userContext.categories && Array.isArray(userContext.categories) ? userContext.categories : [],
     transactions: userContext.cfTransactions && Array.isArray(userContext.cfTransactions) ? 
-      userContext.cfTransactions
-        .filter(t => t.forecast_type !== 'A')
-        .slice(0, CONTEXT_TRANSACTION_LIMIT)
-        .map(t => ({
-          transaction_id: t.transactionid,
-          name: t.title,
-          display_name: t.display_name,
-          amount: t.amount,
-          description: t.description,
-          date: moment(t.start).format('MMM DD, YYYY'),
-          category: t.category,
-          status: t.status,
-          merchant_name: t.merchant,
-          frequency: t.frequency2,
-        })) : [],
+      userContext.cfTransactions.filter(t => t.forecast_type !== 'A').slice(0, 250).map(t => ({
+        transaction_id: t.transactionid,
+        name: t.title,
+        display_name: t.display_name,
+        amount: t.amount,
+        description: t.description,
+        date: moment(t.start).format('MMM DD, YYYY'),
+        category: t.category,
+        status: t.status,
+        merchant_name: t.merchant,
+        frequency: t.frequency2,
+      })) : [],
+    // recentTransactions: userContext.recentTransactions && Array.isArray(userContext.recentTransactions) ? 
+    //   userContext.recentTransactions.slice(0, 250).map(t => ({
+    //     id: t.tid,
+    //     amount: t.amount,
+    //     description: t.description,
+    //     date: moment(t.start).format('MMM DD, YYYY'),
+    //     category: t.category
+    //   })) : [],
     upcomingTransactions: userContext.upcomingTransactions && Array.isArray(userContext.upcomingTransactions) ? 
-      userContext.upcomingTransactions.slice(0, CONTEXT_TRANSACTION_LIMIT).map(t => ({
+    userContext.upcomingTransactions.slice(0, 250).map(t => ({
         transaction_id: t.transactionid,
         name: t.title,
         display_name: t.display_name,
@@ -333,7 +287,7 @@ function createContextSummary(userContext) {
         daysUntil: t.daysUntil
       })) : [],
     plaidTransactions: userContext.plaidTransactions && Array.isArray(userContext.plaidTransactions) ? 
-      userContext.plaidTransactions.slice(0, CONTEXT_TRANSACTION_LIMIT).map(t => ({
+    userContext.plaidTransactions.slice(0, 250).map(t => ({
         transaction_id: t.transaction_id,
         amount: t.adjusted_amount,
         name: t.name,
@@ -344,15 +298,11 @@ function createContextSummary(userContext) {
         status: t.status
       })) : [],
     possibleRecurringTransactions: userContext.possibleRecurringTransactions ? 
-      userContext.possibleRecurringTransactions.slice(0, 25) : [], // Limit to 25
-    breakdown: userContext.breakdown && Array.isArray(userContext.breakdown) ? 
-      userContext.breakdown.slice(0, 25) : [], // Limit to 25
-    balances: userContext.balances && Array.isArray(userContext.balances) ? 
-      userContext.balances.slice(0, 30) : [], // Limit to 30
-    availableBalance: userContext.available && Array.isArray(userContext.available) ? 
-      userContext.available.slice(0, 10) : [], // Limit to 10
-    forecastedBalance: userContext.balances && userContext.balances.length > 0 ? 
-      userContext.balances.find((balance) => moment(balance.date, 'YYYY/MM/DD').format('YYYY-MM-DD') === moment(userContext.currentDate).format('YYYY-MM-DD'))?.amount || 0 : 0
+    userContext.possibleRecurringTransactions : [],
+    breakdown: userContext.breakdown && Array.isArray(userContext.breakdown) ? userContext.breakdown : [],
+    balances: userContext.balances && Array.isArray(userContext.balances) ? userContext.balances : [],
+    availableBalance: userContext.available && Array.isArray(userContext.available) ? userContext.available : [],
+    forecastedBalance: userContext.balances.find((balance) => moment(balance.date, 'YYYY/MM/DD').format('YYYY-MM-DD') === moment(userContext.currentDate).format('YYYY-MM-DD')).amount
   };
 
   return summary;
@@ -528,17 +478,6 @@ exports.chat = async (req, res) => {
     }
 
     const sessionKey = buildSessionKey(req);
-    
-    // Check rate limiting first
-    if (!checkRateLimit(sessionKey)) {
-      console.log('Chat endpoint: Rate limit exceeded for session:', sessionKey);
-      return res.status(429).json({ 
-        error: 'Rate limit exceeded', 
-        message: 'Too many requests. Please wait a moment before trying again.',
-        retryAfter: Math.ceil(RATE_LIMIT_WINDOW / 1000)
-      });
-    }
-    
     const accountid = req.body.accountid;
     const { token, userId, authHeader } = extractAuthFromRequest(req);
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
@@ -751,15 +690,14 @@ exports.chat = async (req, res) => {
     const requestSize = JSON.stringify(messages).length;
     console.log('Chat endpoint: Request size:', requestSize, 'bytes');
     
-    // Enforce stricter size limits to prevent 429 errors
-    if (requestSize > REQUEST_SIZE_LIMIT) {
+    if (requestSize > 750000) { // Increased to 750KB limit to allow more context
       console.warn('Chat endpoint: Request too large, removing oldest messages one by one');
       
       // Remove oldest messages one by one until we're under the limit
       let attempts = 0;
       const maxAttempts = 20; // Prevent infinite loops
       
-      while (requestSize > REQUEST_SIZE_LIMIT && attempts < maxAttempts && history.length > 2) {
+      while (requestSize > 750000 && attempts < maxAttempts && history.length > 2) {
         // Remove the oldest message (skip system message at index 0)
         history.shift(); // Remove first (oldest) message
         
@@ -771,7 +709,7 @@ exports.chat = async (req, res) => {
         const newSize = JSON.stringify(messages).length;
         console.log(`Chat endpoint: Removed oldest message, new size: ${newSize} bytes (attempt ${attempts + 1})`);
         
-        if (newSize <= REQUEST_SIZE_LIMIT) {
+        if (newSize <= 750000) {
           console.log('Chat endpoint: Successfully reduced size below limit');
           break;
         }
@@ -781,11 +719,6 @@ exports.chat = async (req, res) => {
       
       if (attempts >= maxAttempts) {
         console.warn('Chat endpoint: Could not reduce size below limit after', maxAttempts, 'attempts');
-        // Force truncate context if still too large
-        if (contextArray.length > 0) {
-          contextArray[0] = contextArray[0].substring(0, 50000); // Force truncate to 50KB
-          console.log('Chat endpoint: Forced context truncation to prevent 429 error');
-        }
       }
     }
 
@@ -805,7 +738,7 @@ exports.chat = async (req, res) => {
         hasContent: !!msg?.content,
         hasToolCalls: !!msg?.tool_calls,
         toolCallsLength: msg?.tool_calls?.length || 0,
-        contentLength: msg?.message?.content?.length || 0
+        contentLength: msg?.content?.length || 0
       });
       
       // If the model wants to call tools, execute them
@@ -876,11 +809,7 @@ exports.chat = async (req, res) => {
       });
     }
     if (error.response?.status === 429) {
-      return res.status(429).json({ 
-        error: 'Rate limit exceeded',
-        message: 'Azure OpenAI rate limit reached. Please try again in a few moments.',
-        suggestion: 'Consider clearing conversation history to reduce request size'
-      });
+      return res.status(429).json({ error: 'Rate limit exceeded' });
     }
     
     // Generic error for other cases
@@ -905,16 +834,6 @@ exports.analyzeTransactions = async (req, res) => {
 
     console.log('Analyze transactions: Processing', transactions.length, 'transactions');
     const sessionKey = buildSessionKey(req);
-
-    // Check rate limiting first
-    if (!checkRateLimit(sessionKey)) {
-      console.log('Analyze transactions: Rate limit exceeded for session:', sessionKey);
-      return res.status(429).json({ 
-        error: 'Rate limit exceeded', 
-        message: 'Too many requests. Please wait a moment before trying again.',
-        retryAfter: Math.ceil(RATE_LIMIT_WINDOW / 1000)
-      });
-    }
 
     let history = [];
     try {
@@ -957,13 +876,10 @@ exports.analyzeTransactions = async (req, res) => {
 
     if there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
-    Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast's strengths: forecasting, reconciliation, and visualization.
+    Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast’s strengths: forecasting, reconciliation, and visualization.
 
-    At the end of the summary, include relevant follow-up questions that guide the user toward improving their financial wellness through Keacast's forecasting features. Avoid unnecessary formatting, symbols, or filler (such as "...").`;
+    At the end of the summary, include relevant follow-up questions that guide the user toward improving their financial wellness through Keacast’s forecasting features. Avoid unnecessary formatting, symbols, or filler (such as “...”).`;
 
-    // Limit transaction data to prevent large requests
-    const limitedTransactions = transactions ? transactions.slice(0, CONTEXT_TRANSACTION_LIMIT) : [];
-    
     const messages = [
       { role: 'system', content: systemPrompt },
       ...sanitizeMessageArray(history),
@@ -974,28 +890,8 @@ exports.analyzeTransactions = async (req, res) => {
       Here is my user's email:
       ${JSON.stringify(userData.email, null, 2)}
       
-      Here are the latest transactions:\n${JSON.stringify(limitedTransactions)}` }
+      Here are the latest transactions:\n${JSON.stringify(transactions)}` }
     ];
-
-    // Check request size before sending
-    const requestSize = JSON.stringify(messages).length;
-    console.log('Analyze transactions: Request size:', requestSize, 'bytes');
-    
-    if (requestSize > REQUEST_SIZE_LIMIT) {
-      console.warn('Analyze transactions: Request too large, truncating transaction data');
-      // Force truncate if still too large
-      const truncatedTransactions = limitedTransactions.slice(0, Math.floor(limitedTransactions.length / 2));
-      messages[messages.length - 1].content = `Here is my user's first name:
-      ${JSON.stringify(userData.firstname, null, 2)}
-      Here is my user's last name:
-      ${JSON.stringify(userData.lastname, null, 2)}
-      Here is my user's email:
-      ${JSON.stringify(userData.email, null, 2)}
-      
-      Here are the latest transactions:\n${JSON.stringify(truncatedTransactions)}`;
-      
-      console.log('Analyze transactions: Truncated transactions to prevent 429 error');
-    }
 
     console.log('Analyze transactions: Calling OpenAI (tools enabled) with', messages.length, 'messages');
 
@@ -1035,7 +931,7 @@ exports.analyzeTransactions = async (req, res) => {
       ...sanitizeMessageArray(history),
       { role: 'user', content: `Here is my user's data:\n${JSON.stringify(userData)}\n 
       
-      Here are the latest transactions each transactions has a unique id, date, amount, and description:\n${JSON.stringify(limitedTransactions)}` },
+      Here are the latest transactions each transactions has a unique id, date, amount, and description:\n${JSON.stringify(transactions)}` },
       { role: 'assistant', content: finalText }
     ].slice(-MAX_MEMORY);
 
@@ -1069,11 +965,7 @@ exports.analyzeTransactions = async (req, res) => {
       });
     }
     if (error.response?.status === 429) {
-      return res.status(429).json({ 
-        error: 'Rate limit exceeded',
-        message: 'Azure OpenAI rate limit reached. Please try again in a few moments.',
-        suggestion: 'Consider reducing the amount of transaction data sent'
-      });
+      return res.status(429).json({ error: 'Rate limit exceeded' });
     }
     
     // Generic error for other cases
@@ -1762,55 +1654,5 @@ exports.getChatHistory = async (req, res) => {
   } catch (error) {
     console.error('Get chat history error:', error);
     res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-// Add a new endpoint to check rate limit status
-exports.checkRateLimitStatus = async (req, res) => {
-  try {
-    const sessionKey = buildSessionKey(req);
-    const now = Date.now();
-    const windowStart = now - RATE_LIMIT_WINDOW;
-    
-    if (!rateLimitStore.has(sessionKey)) {
-      return res.json({
-        success: true,
-        sessionKey: sessionKey,
-        rateLimited: false,
-        requestsInWindow: 0,
-        maxRequestsPerWindow: MAX_REQUESTS_PER_WINDOW,
-        windowSizeSeconds: RATE_LIMIT_WINDOW / 1000,
-        timeUntilReset: RATE_LIMIT_WINDOW / 1000,
-        message: 'No rate limiting applied to this session'
-      });
-    }
-    
-    const requests = rateLimitStore.get(sessionKey);
-    const recentRequests = requests.filter(timestamp => timestamp > windowStart);
-    const isRateLimited = recentRequests.length >= MAX_REQUESTS_PER_WINDOW;
-    
-    // Calculate time until next request is allowed
-    let timeUntilNextRequest = 0;
-    if (isRateLimited && recentRequests.length > 0) {
-      const oldestRequest = Math.min(...recentRequests);
-      timeUntilNextRequest = Math.max(0, (oldestRequest + RATE_LIMIT_WINDOW) - now);
-    }
-    
-    res.json({
-      success: true,
-      sessionKey: sessionKey,
-      rateLimited: isRateLimited,
-      requestsInWindow: recentRequests.length,
-      maxRequestsPerWindow: MAX_REQUESTS_PER_WINDOW,
-      windowSizeSeconds: RATE_LIMIT_WINDOW / 1000,
-      timeUntilReset: Math.ceil(timeUntilNextRequest / 1000),
-      timeUntilNextRequestMs: timeUntilNextRequest,
-      message: isRateLimited ? 
-        `Rate limited. Wait ${Math.ceil(timeUntilNextRequest / 1000)} seconds before next request` :
-        `${MAX_REQUESTS_PER_WINDOW - recentRequests.length} requests remaining in this window`
-    });
-  } catch (error) {
-    console.error('Check rate limit status error:', error);
-    res.status(500).json({ error: 'Failed to check rate limit status' });
   }
 };

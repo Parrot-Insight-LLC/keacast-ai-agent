@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction, checkRateLimitStatus } = require('../controllers/openaiController');
+const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction } = require('../controllers/openaiController');
 const {redisTest} = require('../controllers/openaiController');
 
 // Chat and analysis endpoints
@@ -14,9 +14,6 @@ router.delete('/clear-history', clearHistory);
 router.get('/check-history-size', checkHistorySize);
 router.delete('/clear-session/:sessionId', clearSessionById);
 router.post('/repair-session', repairSession);
-
-// Rate limiting endpoints
-router.get('/rate-limit-status', checkRateLimitStatus);
 
 // New paginated data endpoints for memory-efficient queries
 router.get('/accounts/:userId', async (req, res) => {
