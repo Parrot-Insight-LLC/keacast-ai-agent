@@ -636,6 +636,8 @@ exports.chat = async (req, res) => {
     - Always use the word "forecasted" when referring to forecasted income and spending.    
     - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
     - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
+    - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
+    - Use tables when displaying data in a structured way.
 
     Things to consider:
     - Today's date is ${currentDate}.
@@ -884,6 +886,8 @@ exports.analyzeTransactions = async (req, res) => {
     - Always use the word "forecasted" when referring to forecasted income and spending.    
     - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
     - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
+    - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
+    - Use tables when displaying data in a structured way.
 
     If there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
