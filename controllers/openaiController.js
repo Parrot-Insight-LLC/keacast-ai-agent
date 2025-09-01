@@ -634,8 +634,8 @@ exports.chat = async (req, res) => {
     - Always use dollar amounts when providing financial information.
     - Always use the word "disposable" when referring to disposable income.
     - Always use the word "forecasted" when referring to forecasted income and spending.    
-    - Only use (-) for negative amounts, dont use (-) for any other purpose.
-    - Only use ($) when displaying amounts.
+    - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
+    - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
 
     Things to consider:
     - Today's date is ${currentDate}.
@@ -882,8 +882,8 @@ exports.analyzeTransactions = async (req, res) => {
     - Always use dollar amounts when providing financial information.
     - Always use the word "disposable" when referring to disposable income.
     - Always use the word "forecasted" when referring to forecasted income and spending.    
-    - Only use (-) for negative amounts, dont use (-) for any other purpose.
-    - Only use ($) when displaying amounts.
+    - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
+    - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
 
     If there are no transactions, return a message that is nice and welcoming, and provides a space for the user to ask financial and Keacast related questions.
 
