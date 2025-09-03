@@ -634,6 +634,9 @@ exports.chat = async (req, res) => {
     - Always use dollar amounts when providing financial information.
     - Always use the word "disposable" when referring to disposable income.
     - Always use the word "forecasted" when referring to forecasted income and spending.    
+    - if referring to an expense or expense transaction always use the word "expense" and not "transaction".
+    - if referring to an income or income transaction always use the word "income" and not "transaction".
+    - if referring to an expense always use (-) to symbolize negative amounts.
     - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
     - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
     - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
