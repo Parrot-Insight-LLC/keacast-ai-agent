@@ -114,7 +114,7 @@
     "type": "function",
     "function": {
       "name": "getSelectedKeacastAccounts",
-      "description": "Get the selected Keacast accounts for a user with detailed account information, transactions, balances, and forecasts.",
+      "description": "Get the selected Keacast accounts for a user with detailed account information, transactions (forecasted and historical), balances (forecasted and historical), and account information details.",
       "parameters": {
         "type": "object",
         "properties": {
