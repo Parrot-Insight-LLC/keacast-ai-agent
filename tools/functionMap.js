@@ -71,10 +71,29 @@ const functionMap = {
   },
 
   async getUserTransactions(args, ctx) {
-    const { userId } = ctx;
-    const { accountId, startDate, endDate } = args;
+    const { userId, accountId: contextAccountId } = ctx;
+    const { accountId: argsAccountId, startDate, endDate } = args;
+    const accountId = argsAccountId || contextAccountId;
     const page = args.page || 1;
     const limit = args.limit || SMART_LIMITS.transactions;
+    
+    console.log('getUserTransactions called with:', { 
+      argsAccountId, 
+      contextAccountId, 
+      finalAccountId: accountId,
+      userId,
+      startDate,
+      endDate 
+    });
+    
+    if (!accountId) {
+      console.log('getUserTransactions: No accountId available in args or context');
+      return {
+        transactions: [],
+        error: 'Account ID is required but not provided in arguments or context',
+        message: 'Please specify an accountId parameter or ensure it is available in the session context'
+      };
+    }
     
     try {
       // Try to get paginated results first
@@ -109,7 +128,9 @@ const functionMap = {
   },
 
   async getRecurringForecasts(args, ctx) {
-    const { accountId } = args;
+    const { accountId: contextAccountId } = ctx;
+    const { accountId: argsAccountId } = args;
+    const accountId = argsAccountId || contextAccountId;
     const page = args.page || 1;
     const limit = args.limit || SMART_LIMITS.forecasts;
     
@@ -143,7 +164,9 @@ const functionMap = {
   },
 
   async getUpcomingTransactions(args, ctx) {
-    const { accountId, startDate, endDate, forecastType='F' } = args;
+    const { accountId: contextAccountId } = ctx;
+    const { accountId: argsAccountId, startDate, endDate, forecastType='F' } = args;
+    const accountId = argsAccountId || contextAccountId;
     const page = args.page || 1;
     const limit = args.limit || SMART_LIMITS.upcoming;
     
@@ -180,8 +203,9 @@ const functionMap = {
 
   // New function to get transaction summary without loading all data
   async getTransactionSummary(args, ctx) {
-    const { userId } = ctx;
-    const { accountId, startDate, endDate } = args;
+    const { userId, accountId: contextAccountId } = ctx;
+    const { accountId: argsAccountId, startDate, endDate } = args;
+    const accountId = argsAccountId || contextAccountId;
     
     try {
       const summary = await getTransactionSummary(userId, accountId, { startDate, endDate });
@@ -216,8 +240,25 @@ const functionMap = {
   },
 
   async getBalances(args, ctx) {
-    const { userId, token } = ctx;
-    const { accountId } = args;
+    const { userId, token, accountId: contextAccountId } = ctx;
+    const { accountId: argsAccountId } = args;
+    const accountId = argsAccountId || contextAccountId;
+    
+    console.log('getBalances called with:', { 
+      argsAccountId, 
+      contextAccountId, 
+      finalAccountId: accountId,
+      userId 
+    });
+    
+    if (!accountId) {
+      console.log('getBalances: No accountId available in args or context');
+      return {
+        error: 'Account ID is required but not provided in arguments or context',
+        message: 'Please specify an accountId parameter or ensure it is available in the session context'
+      };
+    }
+    
     const result = await getBalances({ accountId, userId, token });
     return result;
   },

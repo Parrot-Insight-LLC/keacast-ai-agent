@@ -480,7 +480,7 @@ exports.chat = async (req, res) => {
     const sessionKey = buildSessionKey(req);
     const accountid = req.body.accountid;
     const { token, userId, authHeader } = extractAuthFromRequest(req);
-    console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
+    console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId, 'Account ID:', accountid);
 
     // Load prior conversation memory
     let history = [];
@@ -548,28 +548,44 @@ exports.chat = async (req, res) => {
     } else {
       // If no context data, provide guidance on using tools
       contextMessage = `
-        You have access to financial tools to help users with their money management:
+        IMPORTANT: You have access to financial tools and session context that allows you to help users without asking for additional information:
         
-        Available Tools:
+        CURRENT SESSION CONTEXT:
+        - User ID: ${userId || 'Not available'}
+        - Default Account ID: ${accountid || 'Not available'}
+        - Authentication: ${token ? 'Available' : 'Not available'}
+        
+        CRITICAL: When users ask about "their" transactions, balances, or account information, you should immediately use the available tools with the session context. DO NOT ask the user which account they want - use the default account ID from the session context.
+        
+        Available Tools (most can use session account automatically):
         - getUserData: Get user profile information
+        - getUserAccounts: Get user's bank accounts
         - getSelectedKeacastAccounts: Get detailed account data with transactions and forecasts
-        - getBalances: Get account balance information
-        - createTransaction: Create new financial forecasts or transactions
+        - getBalances: Get account balance information (automatically uses session account if accountId not specified)
+        - getUserTransactions: Get transaction history (automatically uses session account if accountId not specified)
+        - getUpcomingTransactions: Get upcoming forecasted transactions (automatically uses session account if accountId not specified)
+        - createTransaction: Create new financial forecasts or transactions (uses session account)
+        - getRecurringForecasts: Get recurring transaction forecasts (automatically uses session account if accountId not specified)
         
-        When users ask about their finances, use these tools to gather the necessary data before providing advice. Focus on:
+        USAGE EXAMPLES:
+        - User asks "What's my balance?" → Call getBalances() immediately (no accountId needed)
+        - User asks "Show my recent transactions" → Call getUserTransactions() immediately (no accountId needed)
+        - User asks "What transactions do I have coming up?" → Call getUpcomingTransactions() immediately (no accountId needed)
+        
+        Always use tools proactively to get the data needed to answer user questions. Focus on:
         - Cash flow forecasting and balance predictions
-        - Transaction analysis and categorization
+        - Transaction analysis and categorization  
         - Budgeting and financial planning
         - Warning about potential negative balances
         - Helping create financial forecasts
-        
-        Always provide actionable, personalized advice based on the user's actual financial data.
       `;
     }
     
     const contextArray = contextMessage.trim() ? [contextMessage] : [];
 
     const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting.
+
+    CRITICAL INSTRUCTION: You have access to financial tools that can automatically use the user's session context (including their account ID). When users ask about "their" financial information (transactions, balances, etc.), immediately use the appropriate tools WITHOUT asking which account they want. The session context provides the default account ID automatically.
 
     Core purpose:
     - Forecast future cash flow and account balances day-by-day, week-by-week, or month-by-month, so users can anticipate upcoming financial scenarios.
@@ -701,6 +717,7 @@ exports.chat = async (req, res) => {
 
     // Function-calling loop (uses functionMap.js)
     const ctx = { userId, token, authHeader, accountId: accountid };
+    console.log('Chat endpoint: Context being passed to tools:', { userId, accountId: accountid, hasToken: !!token });
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
