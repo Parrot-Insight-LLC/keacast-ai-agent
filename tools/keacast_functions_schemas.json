@@ -7,11 +7,10 @@
       "parameters": {
         "type": "object",
         "properties": { 
-          "userId": { "type": "string" },
           "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
           "limit": { "type": "integer", "description": "Number of accounts per page (default: 20, max: 100)" }
         },
-        "required": ["userId"]
+        "required": []
       }
     }
   },
@@ -23,11 +22,9 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": { "type": "string" },
-          "token": { "type": "string" },
           "body": { "type": "object" }
         },
-        "required": ["userId", "token", "body"]
+        "required": ["body"]
       }
     }
   },
@@ -38,17 +35,8 @@
       "description": "Get user profile data including personal information, preferences, and account settings.",
       "parameters": {
         "type": "object",
-        "properties": {
-          "userId": { 
-            "type": "string", 
-            "description": "The user ID to get data for" 
-          },
-          "token": { 
-            "type": "string", 
-            "description": "The authentication token" 
-          }
-        },
-        "required": ["userId", "token"],
+        "properties": {},
+        "required": [],
         "additionalProperties": false
       }
     }
@@ -61,14 +49,13 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": { "type": "string" },
           "accountId": { "type": "string" },
           "startDate": { "type": "string" },
           "endDate": { "type": "string" },
           "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
           "limit": { "type": "integer", "description": "Number of transactions per page (default: 50, max: 200)" }
         },
-        "required": ["userId", "accountId"]
+        "required": ["accountId"]
       }
     }
   },
@@ -115,12 +102,11 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": { "type": "string" },
           "accountId": { "type": "string" },
           "startDate": { "type": "string" },
           "endDate": { "type": "string" }
         },
-        "required": ["userId", "accountId"]
+        "required": ["accountId"]
       }
     }
   },
@@ -132,14 +118,6 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": { 
-            "type": "string", 
-            "description": "The user ID" 
-          },
-          "token": { 
-            "type": "string", 
-            "description": "The authentication token" 
-          },
           "body": { 
             "type": "object",
             "description": "The request body containing account selection parameters",
@@ -188,7 +166,7 @@
             "required": ["currentDate", "forecastType", "recentStart", "recentEnd", "page", "position", "selectedAccounts", "upcomingEnd", "user"]
           }
         },
-        "required": ["userId", "token", "body"],
+        "required": ["body"],
         "additionalProperties": false
       }
     }
@@ -204,17 +182,9 @@
           "accountId": { 
             "type": "string", 
             "description": "The account ID to get balances for" 
-          },
-          "userId": { 
-            "type": "string", 
-            "description": "The user ID" 
-          },
-          "token": { 
-            "type": "string", 
-            "description": "The authentication token" 
           }
         },
-        "required": ["accountId", "userId", "token"],
+        "required": ["accountId"],
         "additionalProperties": false
       }
     }
@@ -332,7 +302,7 @@
             "description": "Merchant name"
           }
         },
-        "required": ["userId", "accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "location", "frequency", "display_name"]
+        "required": ["accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "location", "frequency", "display_name"]
       }
     }
   },
@@ -344,10 +314,9 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": { "type": "string" },
           "transactionid": { "type": "number" }
         },
-        "required": ["userId", "transactionid"]
+        "required": ["transactionid"]
       }
     }
   }

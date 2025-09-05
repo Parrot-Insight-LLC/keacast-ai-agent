@@ -30,7 +30,7 @@ const SMART_LIMITS = {
 const functionMap = {
   async getUserAccounts(args, ctx) {
     // auth/ownership checks can go here: ensure ctx.userId === args.userId or allowed
-    const { userId } = args;
+    const { userId } = ctx;
     const page = args.page || 1;
     const limit = args.limit || SMART_LIMITS.accounts;
     
@@ -64,13 +64,15 @@ const functionMap = {
   },
 
   async getUserAccountData(args, ctx) {
-    const { userId, token, body } = args;
+    const { userId, token } = ctx;
+    const { body } = args;
     const result = await getUserAccountData(userId, token, body);
     return result;
   },
 
   async getUserTransactions(args, ctx) {
-    const { userId, accountId, startDate, endDate } = args;
+    const { userId } = ctx;
+    const { accountId, startDate, endDate } = args;
     const page = args.page || 1;
     const limit = args.limit || SMART_LIMITS.transactions;
     
@@ -178,7 +180,8 @@ const functionMap = {
 
   // New function to get transaction summary without loading all data
   async getTransactionSummary(args, ctx) {
-    const { userId, accountId, startDate, endDate } = args;
+    const { userId } = ctx;
+    const { accountId, startDate, endDate } = args;
     
     try {
       const summary = await getTransactionSummary(userId, accountId, { startDate, endDate });
@@ -200,19 +203,21 @@ const functionMap = {
   // Add more: categories, shopping list, account details, etc.
 
   async getUserData(args, ctx) {
-    const { userId, token } = args;
+    const { userId, token } = ctx;
     const result = await getUserData({ userId, token });
     return result;
   },
 
   async getSelectedKeacastAccounts(args, ctx) {
-    const { userId, token, body } = args;
+    const { userId, token } = ctx;
+    const { body } = args;
     const result = await getSelectedKeacastAccounts({ userId, token, body });
     return result;
   },
 
   async getBalances(args, ctx) {
-    const { accountId, userId, token } = args;
+    const { userId, token } = ctx;
+    const { accountId } = args;
     const result = await getBalances({ accountId, userId, token });
     return result;
   },
@@ -224,10 +229,9 @@ const functionMap = {
   },
 
   async deleteTransaction(args, ctx) {
-    const { userId, transaction_id, token, body } = args;
-    const { id } = ctx;
-    const transactionId = id || transaction_id;
-    const result = await deleteTransaction({ userId, transactionId, token, body });
+    const { userId, token } = ctx;
+    const { transactionid } = args;
+    const result = await deleteTransaction({ userId, transactionId: transactionid, token, body: {} });
     return result;
   }
 };

@@ -700,7 +700,7 @@ exports.chat = async (req, res) => {
     }
 
     // Function-calling loop (uses functionMap.js)
-    const ctx = { userId, token, accountId: accountid };
+    const ctx = { userId, token, authHeader, accountId: accountid };
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
@@ -886,7 +886,7 @@ exports.analyzeTransactions = async (req, res) => {
     console.log('Analyze transactions: Calling OpenAI (tools enabled) with', messages.length, 'messages');
 
     // Use the new executeToolCalls function for tool execution
-    const ctx = { userId, authHeader };
+    const ctx = { userId, token, authHeader };
     let result;
     try {
       // Try to get a response with tools first
