@@ -586,10 +586,6 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.transactions, null, 2)}
         ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
         ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
-        ${JSON.stringify(contextSummary.possibleRecurringTransactions, null, 2)}
-        Here are the user's categories:
-        ${JSON.stringify(contextSummary.categories, null, 2)}
         Here is my account available balance:
         ${JSON.stringify(contextSummary.availableBalance, null, 2)}
         Here is my account forecasted balance:
@@ -600,11 +596,14 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
         Here is my user's email:
         ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
-        Here is my user's selected accounts with relevant account details like name, account type, balance, available, current, credit limit, forecasted, bank account name, and institution name:
-        ${JSON.stringify(contextSummary.selectedAccounts, null, 2)}
         Here are my account balances (posted, pending and forecasted) with the following details: amount, date, status:
         ${JSON.stringify(contextSummary.balances, null, 2)}
     `
+    // Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
+    //     ${JSON.stringify(contextSummary.possibleRecurringTransactions, null, 2)}Here are the user's categories:
+    //     ${JSON.stringify(contextSummary.categories, null, 2)}
+    //     Here is my user's selected accounts with relevant account details like name, account type, balance, available, current, credit limit, forecasted, bank account name, and institution name:
+    //     ${JSON.stringify(contextSummary.selectedAccounts, null, 2)}
     // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
     const contextArray = [completeContext];
