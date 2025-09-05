@@ -559,13 +559,9 @@ exports.chat = async (req, res) => {
         
         Available Tools (most can use session account automatically):
         - getUserData: Get user profile information
-        - getUserAccounts: Get user's bank accounts
         - getSelectedKeacastAccounts: Get detailed account data with transactions and forecasts
         - getBalances: Get account balance information (automatically uses session account if accountId not specified)
-        - getUserTransactions: Get transaction history (automatically uses session account if accountId not specified)
-        - getUpcomingTransactions: Get upcoming forecasted transactions (automatically uses session account if accountId not specified)
         - createTransaction: Create new financial forecasts or transactions (uses session account)
-        - getRecurringForecasts: Get recurring transaction forecasts (automatically uses session account if accountId not specified)
         
         USAGE EXAMPLES:
         - User asks "What's my balance?" → Call getBalances() immediately (no accountId needed)
