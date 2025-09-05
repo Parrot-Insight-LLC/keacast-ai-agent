@@ -212,8 +212,8 @@ const functionMap = {
   },
 
   async getBalances(args, ctx) {
-    const { accountId, userId, token, body } = args;
-    const result = await getBalances({ accountId, userId, token, body });
+    const { accountId, userId, token } = args;
+    const result = await getBalances({ accountId, userId, token });
     return result;
   },
 

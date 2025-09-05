@@ -505,108 +505,69 @@ exports.chat = async (req, res) => {
     const currentDate = getCurrentDateInTimezone(location);
     console.log('Using current date:', currentDate);
 
-    // If no explicit context or we need to preload additional data, we can preload some via tools (direct calls through functionMap)
-    if (!userContext || Object.keys(userContext).length === 0 || !userContext.selectedAccounts) {
-      if (userId && token) {
-        try {
-          const ctx = { userId, authHeader };
-          
-          // First get user data
-          const userData = await functionMap.getUserData({ userId, token }, ctx);
-          console.log('User data retrieved:', userData);
-
-          const upcomingEnd = moment(currentDate).add(14, 'days').format('YYYY-MM-DD');
-          const recentStart = moment(currentDate).subtract(3, 'months').format('YYYY-MM-DD');
-          const recentEnd = moment(currentDate).add(1, 'days').format('YYYY-MM-DD');
-          
-          // Then use user data to get selected accounts
-          const selectedAccounts = await functionMap.getSelectedKeacastAccounts({ 
-            userId, 
-            token, 
-            body: {
-              "currentDate": currentDate,
-              "forecastType": "F",
-              "recentStart": recentStart,
-              "recentEnd": recentEnd,
-              "page": "layout",
-              "position": 0,
-              selectedAccounts: [accountid],
-              upcomingEnd: upcomingEnd,
-              user: userData
-            } 
-          }, ctx);
-          const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
-          const filteredBalances = balances ? balances.forecasted.filter(balance => moment(balance.date).isBetween(moment().subtract(6, 'months'), moment().add(12, 'months'))) : [];
-          console.log('Selected accounts retrieved:', selectedAccounts);
-
-                     // Merge transactions from both sources (request body and selected accounts)
-           const bodyTransactions = userContext.transactions || [];
-           const accountTransactions = selectedAccounts[0]?.cfTransactions || [];
-           const allTransactions = [...bodyTransactions, ...accountTransactions];
-           
-           console.log('Chat endpoint: Merged transactions - Body:', bodyTransactions.length, 'Account:', accountTransactions.length, 'Total:', allTransactions.length);
-           
-           userContext = {
-             userData: userData || {},
-             selectedAccounts: selectedAccounts || [],
-             accounts: [], // keep for backward compatibility
-             categories: selectedAccounts[0]?.categories || userContext.categories || [], // fill if you expose a categories tool in functionMap
-             shoppingList: selectedAccounts[0]?.shoppingList || userContext.shoppingList || [], // fill if you expose a shoppingList tool in functionMap
-             cfTransactions: allTransactions,
-             upcomingTransactions: selectedAccounts[0]?.upcoming || [],
-             possibleRecurringTransactions: selectedAccounts[0]?.plaidRecurrings || [],
-             plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
-             recentTransactions: selectedAccounts[0]?.recents || [],
-             breakdown: selectedAccounts[0]?.breakdown || [],
-             balances: filteredBalances || selectedAccounts[0]?.balances || [],
-             available: selectedAccounts[0]?.available || [],
-             currentDate: currentDate
-           };
-          console.log('Chat endpoint: Preloaded user context via functionMap.');
-          dataMessage = 'Chat endpoint: Preloaded user context via functionMap.';
-        } catch (err) {
-          console.warn('Chat endpoint: Preload via functionMap failed:', err?.message);
-          dataMessage = err?.message;
-        }
-      } else {
-        console.log('Chat endpoint: Skipping preload (missing userId or token)');
-        dataMessage = 'Chat endpoint: Skipping preload (missing userId or token)';
-      }
+    // Use context from request body if provided
+    if (!userContext || Object.keys(userContext).length === 0) {
+      console.log('Chat endpoint: No explicit context provided in request body');
+      dataMessage = 'Chat endpoint: No explicit context provided - AI will use tools as needed';
+    } else {
+      console.log('Chat endpoint: Using explicit context from request body');
+      dataMessage = 'Chat endpoint: Using explicit context from request body';
     }
 
     // Create a more intelligent context summary
     const contextSummary = createContextSummary(userContext);
 
-    // const plaidContext = `Here is my transaction history: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
-    // const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
-    // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
-    const completeContext = `
-        Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available and if the user has future negative balances then warn them. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
-        Here are my account transactions split by historical, upcoming, and forecasted context each transaction has a date, amount, category, name, and description:
-        ${JSON.stringify(contextSummary.transactions, null, 2)}
-        ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
-        ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here is my account available balance:
-        ${JSON.stringify(contextSummary.availableBalance, null, 2)}
-        Here is my account forecasted balance:
-        ${JSON.stringify(contextSummary.forecastedBalance, null, 2)}
-        Here is my user's first name:
-        ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
-        Here is my user's last name:
-        ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
-        Here is my user's email:
-        ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
-        Here are my account balances (posted, pending and forecasted) with the following details: amount, date, status:
-        ${JSON.stringify(contextSummary.balances, null, 2)}
-    `
-    // Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
-    //     ${JSON.stringify(contextSummary.possibleRecurringTransactions, null, 2)}Here are the user's categories:
-    //     ${JSON.stringify(contextSummary.categories, null, 2)}
-    //     Here is my user's selected accounts with relevant account details like name, account type, balance, available, current, credit limit, forecasted, bank account name, and institution name:
-    //     ${JSON.stringify(contextSummary.selectedAccounts, null, 2)}
-    // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
-    // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
-    const contextArray = [completeContext];
+    // Create context message based on available data or provide guidance for tool usage
+    let contextMessage = '';
+    
+    if (userContext && Object.keys(userContext).length > 0 && contextSummary.hasData) {
+      // If we have explicit context data, provide it to the AI
+      contextMessage = `
+        Here is the user's financial context data to help answer their questions:
+        
+        User Information:
+        - First Name: ${contextSummary.userData?.firstname || 'Not provided'}
+        - Last Name: ${contextSummary.userData?.lastname || 'Not provided'}
+        - Email: ${contextSummary.userData?.email || 'Not provided'}
+        
+        Account Information:
+        - Selected Accounts: ${contextSummary.selectedAccounts?.count || 0} accounts
+        - Available Balance: ${JSON.stringify(contextSummary.availableBalance || [])}
+        - Forecasted Balance: ${contextSummary.forecastedBalance || 'Not available'}
+        
+        Transaction Data:
+        - Historical Transactions: ${contextSummary.dataCounts?.transactions || 0} transactions
+        - Upcoming Transactions: ${contextSummary.dataCounts?.upcomingTransactions || 0} transactions
+        - Plaid Transactions: ${contextSummary.dataCounts?.plaidTransactions || 0} transactions
+        
+        Categories: ${contextSummary.categories?.length || 0} categories available
+        Account Balances: ${contextSummary.balances?.length || 0} balance records
+        
+        Use this information to provide personalized financial advice and insights. Always warn users about potential negative balances and help them make informed financial decisions.
+      `;
+    } else {
+      // If no context data, provide guidance on using tools
+      contextMessage = `
+        You have access to financial tools to help users with their money management:
+        
+        Available Tools:
+        - getUserData: Get user profile information
+        - getSelectedKeacastAccounts: Get detailed account data with transactions and forecasts
+        - getBalances: Get account balance information
+        - createTransaction: Create new financial forecasts or transactions
+        
+        When users ask about their finances, use these tools to gather the necessary data before providing advice. Focus on:
+        - Cash flow forecasting and balance predictions
+        - Transaction analysis and categorization
+        - Budgeting and financial planning
+        - Warning about potential negative balances
+        - Helping create financial forecasts
+        
+        Always provide actionable, personalized advice based on the user's actual financial data.
+      `;
+    }
+    
+    const contextArray = contextMessage.trim() ? [contextMessage] : [];
 
     const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting.
 
@@ -678,8 +639,8 @@ exports.chat = async (req, res) => {
       ...sanitizeMessageArray(history.map(truncateMessage))
     ];
 
-    // Add detailed context as a separate message if we have significant data
-    if (userContext && Object.keys(userContext).length > 0) {
+    // Add context message if we have one
+    if (contextArray.length > 0) {
       for (let i = 0; i < contextArray.length; i++) {
         if (contextArray[i]) {
           messages.push({
@@ -687,7 +648,12 @@ exports.chat = async (req, res) => {
             content: contextArray[i]
           });
           console.log('Chat endpoint: Added context message with size:', JSON.stringify(contextArray[i]).length, 'bytes');
-          console.log('Chat endpoint: Context includes transactions:', userContext.transactions ? userContext.transactions.length : 0, 'transactions');
+          if (userContext && contextSummary.hasData) {
+            console.log('Chat endpoint: Context includes transactions:', contextSummary.dataCounts?.transactions || 0, 'transactions');
+            console.log('Chat endpoint: Context includes accounts:', contextSummary.selectedAccounts?.count || 0, 'accounts');
+          } else {
+            console.log('Chat endpoint: Added tool guidance context');
+          }
         }
       }
     }
@@ -795,7 +761,9 @@ exports.chat = async (req, res) => {
     res.json({
       response: finalText,
       memoryUsed: updatedHistory.length,
-      contextLoaded: !!Object.keys(userContext || {}).length,
+      contextLoaded: !!(userContext && Object.keys(userContext).length > 0),
+      hasExplicitContext: !!(userContext && contextSummary.hasData),
+      toolsAvailable: true,
       dataMessage: dataMessage,
       requestSize: requestSize,
       error: result?.error,

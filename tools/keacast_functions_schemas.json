@@ -34,6 +34,28 @@
   {
     "type": "function",
     "function": {
+      "name": "getUserData",
+      "description": "Get user profile data including personal information, preferences, and account settings.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "userId": { 
+            "type": "string", 
+            "description": "The user ID to get data for" 
+          },
+          "token": { 
+            "type": "string", 
+            "description": "The authentication token" 
+          }
+        },
+        "required": ["userId", "token"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "getUserTransactions",
       "description": "Retrieve transactions for a user account in a date window with pagination support to prevent memory issues.",
       "parameters": {
@@ -106,24 +128,93 @@
     "type": "function",
     "function": {
       "name": "getSelectedKeacastAccounts",
-      "description": "Get the selected Keacast accounts for a user.",
+      "description": "Get the selected Keacast accounts for a user with detailed account information, transactions, balances, and forecasts.",
       "parameters": {
         "type": "object",
         "properties": {
-            "userId": { "type": "string", "description": "The user ID" },
-            "token": { "type": "string", "description": "The token" },
-            "body": { "type": "object", "description": "The body" },
-            "currentDate": { "type": "string", "description": "The current date", "enum": ["YYYY-MM-DD"] },
-            "forecastType": { "type": "string", "description": "The forecast type", "enum": ["F", "A", "RF"] },
-            "recentStart": { "type": "string", "description": "The recent start date", "enum": ["YYYY-MM-DD"] },
-            "recentEnd": { "type": "string", "description": "The recent end date", "enum": ["YYYY-MM-DD"] },
-            "page": { "type": "string", "description": "The page", "enum": ["layout"] },
-            "position": { "type": "integer", "description": "The position", "enum": [0] },
-            "selectedAccounts": { "type": "array", "description": "The selected accounts" , "enum": ["accountid"] },
-            "upcomingEnd": { "type": "string", "description": "The upcoming end date", "enum": ["YYYY-MM-DD"] },
-            "user": { "type": "object", "description": "The user data"  , "enum": ["userData"] }  
+          "userId": { 
+            "type": "string", 
+            "description": "The user ID" 
+          },
+          "token": { 
+            "type": "string", 
+            "description": "The authentication token" 
+          },
+          "body": { 
+            "type": "object",
+            "description": "The request body containing account selection parameters",
+            "properties": {
+              "currentDate": { 
+                "type": "string", 
+                "description": "The current date in YYYY-MM-DD format" 
+              },
+              "forecastType": { 
+                "type": "string", 
+                "description": "The forecast type", 
+                "enum": ["F", "A", "RF"] 
+              },
+              "recentStart": { 
+                "type": "string", 
+                "description": "The recent start date in YYYY-MM-DD format" 
+              },
+              "recentEnd": { 
+                "type": "string", 
+                "description": "The recent end date in YYYY-MM-DD format" 
+              },
+              "page": { 
+                "type": "string", 
+                "description": "The page type", 
+                "enum": ["layout"] 
+              },
+              "position": { 
+                "type": "integer", 
+                "description": "The position", 
+                "enum": [0] 
+              },
+              "selectedAccounts": { 
+                "type": "array", 
+                "description": "Array of selected account IDs",
+                "items": { "type": "string" }
+              },
+              "upcomingEnd": { 
+                "type": "string", 
+                "description": "The upcoming end date in YYYY-MM-DD format" 
+              },
+              "user": { 
+                "type": "object", 
+                "description": "The user data object" 
+              }
+            },
+            "required": ["currentDate", "forecastType", "recentStart", "recentEnd", "page", "position", "selectedAccounts", "upcomingEnd", "user"]
+          }
         },
-        "required": ["userId", "token", "body", "currentDate", "forecastType", "recentStart", "recentEnd", "page", "position", "selectedAccounts", "upcomingEnd", "user"],
+        "required": ["userId", "token", "body"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "getBalances",
+      "description": "Get account balances including posted, pending, and forecasted balances for a specific account.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "accountId": { 
+            "type": "string", 
+            "description": "The account ID to get balances for" 
+          },
+          "userId": { 
+            "type": "string", 
+            "description": "The user ID" 
+          },
+          "token": { 
+            "type": "string", 
+            "description": "The authentication token" 
+          }
+        },
+        "required": ["accountId", "userId", "token"],
         "additionalProperties": false
       }
     }
