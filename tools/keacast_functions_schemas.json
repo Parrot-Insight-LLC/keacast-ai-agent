@@ -124,20 +124,20 @@
             "properties": {
               "currentDate": { 
                 "type": "string", 
-                "description": "The current date in YYYY-MM-DD format" 
+                "description": "The current date in YYYY-MM-DD format (default: current date)" 
               },
               "forecastType": { 
                 "type": "string", 
-                "description": "The forecast type", 
+                "description": "The forecast type (default: F)", 
                 "enum": ["F"] 
               },
               "recentStart": { 
                 "type": "string", 
-                "description": "The recent start date in YYYY-MM-DD format" 
+                "description": "The recent start date in YYYY-MM-DD format (default: 3 months ago)" 
               },
               "recentEnd": { 
                 "type": "string", 
-                "description": "The recent end date in YYYY-MM-DD format" 
+                "description": "The recent end date in YYYY-MM-DD format (default: 1 day from current date)" 
               },
               "page": { 
                 "type": "string", 
@@ -156,7 +156,7 @@
               },
               "upcomingEnd": { 
                 "type": "string", 
-                "description": "The upcoming end date in YYYY-MM-DD format" 
+                "description": "The upcoming end date in YYYY-MM-DD format (default: 14 days from current date)" 
               },
               "user": { 
                 "type": "object", 
