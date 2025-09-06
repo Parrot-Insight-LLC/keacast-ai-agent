@@ -559,14 +559,18 @@ exports.chat = async (req, res) => {
         
         Available Tools (most can use session account automatically):
         - getUserData: Get user profile information
-        - getSelectedKeacastAccounts: Get detailed account data with transactions and forecasts
+        - getSelectedKeacastAccounts: Get detailed account data with transaction details (forecasted and historical), balance details (forecasted and historical), and account information details like account name, account type, account balance, account available balance, account credit limit, account forecasted balance, account bank account name, account institution name, and account institution logo.
         - getBalances: Get account balance information (automatically uses session account if accountId not specified)
         - createTransaction: Create new financial forecasts or transactions (uses session account)
         
         USAGE EXAMPLES:
         - User asks "What's my balance?" → Call getBalances() immediately (no accountId needed)
-        - User asks "Show my recent transactions" → Call getUserTransactions() immediately (no accountId needed)
-        - User asks "What transactions do I have coming up?" → Call getUpcomingTransactions() immediately (no accountId needed)
+        - User asks "Show my recent transactions" → Call getSelectedKeacastAccounts() immediately accountId needed
+        - User asks "What transactions do I have coming up?" → getSelectedKeacastAccounts() immediately accountId needed
+        - User ask "What is my forecasted balance?" → getSelectedKeacastAccounts() immediately accountId needed
+        - User asks "What is my account details?" → getSelectedKeacastAccounts() immediately accountId needed
+        - User asks "Can I add a new transaction?" → createTransaction() immediately accountId needed
+        - User asks "Can I spend money on something?" → getSelectedKeacastAccounts() immediately accountId needed
         
         Always use tools proactively to get the data needed to answer user questions. Focus on:
         - Cash flow forecasting and balance predictions
@@ -579,7 +583,7 @@ exports.chat = async (req, res) => {
     
     const contextArray = contextMessage.trim() ? [contextMessage] : [];
 
-    const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting.
+    const baseSystem = `You are the Keacast (pronunciation: kee-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting.
 
     CRITICAL INSTRUCTION: You have access to financial tools that can automatically use the user's session context (including their account ID). When users ask about "their" financial information (transactions, balances, etc.), immediately use the appropriate tools WITHOUT asking which account they want. The session context provides the default account ID automatically.
 
