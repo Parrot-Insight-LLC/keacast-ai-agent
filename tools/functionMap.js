@@ -481,7 +481,7 @@ const functionMap = {
           summaryStats: structuredResult.summary
         });
         
-        return structuredResult;
+        return JSON.stringify(structuredResult);
       }
       
       return result;
