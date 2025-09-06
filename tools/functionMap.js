@@ -23,8 +23,117 @@ const SMART_LIMITS = {
   transactions: 50,      // Load 50 transactions at a time
   forecasts: 25,         // Load 25 forecasts at a time
   upcoming: 30,          // Load 30 upcoming transactions at a time
-  accounts: 20           // Load 20 accounts at a time
+  accounts: 20,          // Load 20 accounts at a time
+  maxTransactions: 100,  // Maximum transactions to include in response
+  maxDaysHistory: 90,    // Maximum days of historical data
+  maxDaysFuture: 365     // Maximum days of future data
 };
+
+// Function to optimize account data size while preserving essential information
+function optimizeAccountData(data) {
+  if (!data || typeof data !== 'object') return data;
+  
+  const optimized = { ...data };
+  
+  // If data is an array (multiple accounts), optimize each account
+  if (Array.isArray(data)) {
+    return data.map(account => optimizeAccountData(account));
+  }
+  
+  // Optimize transactions arrays
+  if (optimized.cfTransactions && Array.isArray(optimized.cfTransactions)) {
+    optimized.cfTransactions = optimizeTransactionArray(optimized.cfTransactions, 'cfTransactions');
+  }
+  
+  if (optimized.plaidTransactions && Array.isArray(optimized.plaidTransactions)) {
+    optimized.plaidTransactions = optimizeTransactionArray(optimized.plaidTransactions, 'plaidTransactions');
+  }
+  
+  if (optimized.upcoming && Array.isArray(optimized.upcoming)) {
+    optimized.upcoming = optimizeTransactionArray(optimized.upcoming, 'upcoming');
+  }
+  
+  if (optimized.recents && Array.isArray(optimized.recents)) {
+    optimized.recents = optimizeTransactionArray(optimized.recents, 'recents');
+  }
+  
+  // Optimize balances array (keep last 6 months + next 12 months)
+  if (optimized.balances && Array.isArray(optimized.balances)) {
+    const now = new Date();
+    const sixMonthsAgo = new Date(now.getTime() - (6 * 30 * 24 * 60 * 60 * 1000));
+    const oneYearFromNow = new Date(now.getTime() + (365 * 24 * 60 * 60 * 1000));
+    
+    optimized.balances = optimized.balances
+      .filter(balance => {
+        const balanceDate = new Date(balance.date);
+        return balanceDate >= sixMonthsAgo && balanceDate <= oneYearFromNow;
+      })
+      .slice(0, 200) // Limit to 200 balance records max
+      .map(balance => ({
+        date: balance.date,
+        amount: balance.amount,
+        status: balance.status,
+        // Remove less critical fields to save space
+        ...(balance.type && { type: balance.type })
+      }));
+  }
+  
+  // Remove or limit other large arrays
+  if (optimized.plaidRecurrings && Array.isArray(optimized.plaidRecurrings)) {
+    optimized.plaidRecurrings = optimized.plaidRecurrings.slice(0, 20); // Limit to 20 recurring patterns
+  }
+  
+  return optimized;
+}
+
+// Function to optimize transaction arrays
+function optimizeTransactionArray(transactions, arrayType) {
+  if (!Array.isArray(transactions)) return transactions;
+  
+  const now = new Date();
+  const maxHistoryDate = new Date(now.getTime() - (SMART_LIMITS.maxDaysHistory * 24 * 60 * 60 * 1000));
+  const maxFutureDate = new Date(now.getTime() + (SMART_LIMITS.maxDaysFuture * 24 * 60 * 60 * 1000));
+  
+  return transactions
+    .filter(transaction => {
+      // Filter by date range if transaction has a date
+      if (transaction.start) {
+        const transactionDate = new Date(transaction.start);
+        return transactionDate >= maxHistoryDate && transactionDate <= maxFutureDate;
+      }
+      if (transaction.date) {
+        const transactionDate = new Date(transaction.date);
+        return transactionDate >= maxHistoryDate && transactionDate <= maxFutureDate;
+      }
+      return true; // Keep transactions without dates
+    })
+    .slice(0, SMART_LIMITS.maxTransactions) // Limit total number
+    .map(transaction => {
+      // Keep only essential transaction fields
+      const essential = {
+        transactionid: transaction.transactionid || transaction.transaction_id || transaction.id,
+        title: transaction.title || transaction.name,
+        display_name: transaction.display_name,
+        amount: transaction.amount,
+        description: transaction.description,
+        start: transaction.start || transaction.date,
+        category: transaction.category || transaction.adjusted_category,
+        status: transaction.status,
+        forecast_type: transaction.forecast_type,
+        frequency2: transaction.frequency2,
+        merchant: transaction.merchant || transaction.merchant_name
+      };
+      
+      // Remove undefined values to save space
+      Object.keys(essential).forEach(key => {
+        if (essential[key] === undefined || essential[key] === null) {
+          delete essential[key];
+        }
+      });
+      
+      return essential;
+    });
+}
 
 // Each tool gets (args, ctx), where ctx can include userId, auth, etc.
 const functionMap = {
@@ -235,7 +344,18 @@ const functionMap = {
   async getSelectedKeacastAccounts(args, ctx) {
     const { userId, token } = ctx;
     const { body } = args;
+    
+    console.log('getSelectedKeacastAccounts called with body:', JSON.stringify(body, null, 2));
+    
     const result = await getSelectedKeacastAccounts({ userId, token, body });
+    
+    // Apply smart data filtering to reduce size
+    if (result && typeof result === 'object') {
+      const optimizedResult = optimizeAccountData(result);
+      console.log('getSelectedKeacastAccounts: Original size:', JSON.stringify(result).length, 'bytes, Optimized size:', JSON.stringify(optimizedResult).length, 'bytes');
+      return optimizedResult;
+    }
+    
     return result;
   },
 

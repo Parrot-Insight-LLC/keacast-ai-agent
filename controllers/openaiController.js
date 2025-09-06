@@ -26,6 +26,81 @@ function truncateText(text, maxChars) {
   return str.slice(0, Math.max(0, maxChars - 1)) + '…';
 }
 
+function createIntelligentTruncation(data, maxSize) {
+  if (!data || typeof data !== 'object') {
+    const str = JSON.stringify(data);
+    return str.length > maxSize ? str.substring(0, maxSize - 50) + '..."_truncated":true}' : str;
+  }
+  
+  const truncated = { ...data };
+  
+  // Priority: Keep essential account info, limit transaction arrays
+  const essentialFields = ['accountid', 'accountname', 'account_type', 'balance', 'available', 'current', 'credit_limit', 'forecasted'];
+  const transactionFields = ['cfTransactions', 'plaidTransactions', 'upcoming', 'recents'];
+  
+  // Always preserve essential fields
+  const essential = {};
+  essentialFields.forEach(field => {
+    if (data[field] !== undefined) {
+      essential[field] = data[field];
+    }
+  });
+  
+  // Add limited transaction data
+  transactionFields.forEach(field => {
+    if (data[field] && Array.isArray(data[field])) {
+      // Keep only the most recent/important transactions
+      essential[field] = data[field].slice(0, 20).map(t => ({
+        transactionid: t.transactionid || t.transaction_id,
+        title: t.title || t.name,
+        amount: t.amount,
+        start: t.start || t.date,
+        category: t.category,
+        status: t.status
+      }));
+    }
+  });
+  
+  // Add balance data (limited)
+  if (data.balances && Array.isArray(data.balances)) {
+    essential.balances = data.balances.slice(0, 30).map(b => ({
+      date: b.date,
+      amount: b.amount,
+      status: b.status
+    }));
+  }
+  
+  // Add categories if available
+  if (data.categories) {
+    essential.categories = data.categories;
+  }
+  
+  essential._truncated = true;
+  essential._originalSize = JSON.stringify(data).length;
+  
+  let result = JSON.stringify(essential);
+  
+  // If still too large, further reduce transaction counts
+  if (result.length > maxSize) {
+    transactionFields.forEach(field => {
+      if (essential[field]) {
+        essential[field] = essential[field].slice(0, 10);
+      }
+    });
+    if (essential.balances) {
+      essential.balances = essential.balances.slice(0, 15);
+    }
+    result = JSON.stringify(essential);
+  }
+  
+  // Final fallback - simple truncation
+  if (result.length > maxSize) {
+    result = result.substring(0, maxSize - 50) + '..."_truncated":true}';
+  }
+  
+  return result;
+}
+
 function truncateMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
   if (!message || typeof message !== 'object') return message;
   
@@ -333,8 +408,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       
       // Truncate tool responses to prevent massive message growth
       let toolContent = JSON.stringify(result ?? {});
-      if (toolContent.length > 13000) { // Increased limit to 13KB for tool responses
-        toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
+      if (toolContent.length > 10000) { // Reduced limit to 10KB for tool responses
+        // Try to create a more intelligent truncation
+        toolContent = createIntelligentTruncation(result, 10000);
         console.log('Tool response truncated from', JSON.stringify(result ?? {}).length, 'to', toolContent.length, 'bytes');
       }
       
@@ -559,7 +635,7 @@ exports.chat = async (req, res) => {
         
         Available Tools (most can use session account automatically):
         - getUserData: Get user profile information
-        - getSelectedKeacastAccounts: Get detailed account data with transaction details (forecasted and historical), balance details (forecasted and historical), and account information details like account name, account type, account balance, account available balance, account credit limit, account forecasted balance, account bank account name, account institution name, and account institution logo.
+        - getSelectedKeacastAccounts: Get comprehensive account data including transactions, balances, and account details. Data is automatically optimized for performance (max 100 transactions per category, 6 months history + 12 months future balances).
         - getBalances: Get account balance information (automatically uses session account if accountId not specified)
         - createTransaction: Create new financial forecasts or transactions (uses session account)
         
