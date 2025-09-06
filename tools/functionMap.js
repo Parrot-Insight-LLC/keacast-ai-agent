@@ -54,7 +54,8 @@ function optimizeAccountData(data) {
   }
   
   if (optimized.recents && Array.isArray(optimized.recents)) {
-    optimized.recents = optimizeTransactionArray(optimized.recents, 'recents');
+    optimized.recents = [];
+    // optimizeTransactionArray(optimized.recents, 'recents');
   }
   
   // Optimize balances array (keep last 6 months + next 12 months)
@@ -63,19 +64,20 @@ function optimizeAccountData(data) {
     const sixMonthsAgo = new Date(now.getTime() - (6 * 30 * 24 * 60 * 60 * 1000));
     const oneYearFromNow = new Date(now.getTime() + (365 * 24 * 60 * 60 * 1000));
     
-    optimized.balances = optimized.balances
-      .filter(balance => {
-        const balanceDate = new Date(balance.date);
-        return balanceDate >= sixMonthsAgo && balanceDate <= oneYearFromNow;
-      })
-      .slice(0, 200) // Limit to 200 balance records max
-      .map(balance => ({
-        date: balance.date,
-        amount: balance.amount,
-        status: balance.status,
-        // Remove less critical fields to save space
-        ...(balance.type && { type: balance.type })
-      }));
+    optimized.balances = [];
+    // optimized.balances
+    //   .filter(balance => {
+    //     const balanceDate = new Date(balance.date);
+    //     return balanceDate >= sixMonthsAgo && balanceDate <= oneYearFromNow;
+    //   })
+    //   .slice(0, 200) // Limit to 200 balance records max
+    //   .map(balance => ({
+    //     date: balance.date,
+    //     amount: balance.amount,
+    //     status: balance.status,
+    //     // Remove less critical fields to save space
+    //     ...(balance.type && { type: balance.type })
+    //   }));
   }
   
   // Remove or limit other large arrays
@@ -114,10 +116,10 @@ function optimizeTransactionArray(transactions, arrayType) {
         transactionid: transaction.transactionid || transaction.transaction_id || transaction.id,
         title: transaction.title || transaction.name,
         display_name: transaction.display_name,
-        amount: transaction.amount,
+        amount: transaction.adjusted_amount || transaction.amount,
         description: transaction.description,
         start: transaction.start || transaction.date,
-        category: transaction.category || transaction.adjusted_category,
+        category: transaction.adjusted_category || transaction.category,
         status: transaction.status,
         forecast_type: transaction.forecast_type,
         frequency2: transaction.frequency2,

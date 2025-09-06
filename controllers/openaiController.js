@@ -555,6 +555,16 @@ exports.chat = async (req, res) => {
 
     const sessionKey = buildSessionKey(req);
     const accountid = req.body.accountid;
+    // Extract location data from request body
+    const location = req.body?.location;
+    console.log('Location data received:', location);
+
+    // Calculate current date based on user's timezone
+    const currentDate = getCurrentDateInTimezone(location);
+    console.log('Using current date:', currentDate);
+    const upcomingEnd = moment(currentDate).add(14, 'days').format('YYYY-MM-DD');
+    const recentStart = moment(currentDate).subtract(3, 'months').format('YYYY-MM-DD');
+    const recentEnd = moment(currentDate).add(1, 'days').format('YYYY-MM-DD');
     const { token, userId, authHeader } = extractAuthFromRequest(req);
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId, 'Account ID:', accountid);
 
@@ -572,14 +582,6 @@ exports.chat = async (req, res) => {
     let dataMessage;
     // Prefer explicit context sent in body
     let userContext = extractContextFromBody(req) || {};
-
-    // Extract location data from request body
-    const location = req.body?.location;
-    console.log('Location data received:', location);
-
-    // Calculate current date based on user's timezone
-    const currentDate = getCurrentDateInTimezone(location);
-    console.log('Using current date:', currentDate);
 
     // Use context from request body if provided
     if (!userContext || Object.keys(userContext).length === 0) {
@@ -628,8 +630,13 @@ exports.chat = async (req, res) => {
         
         CURRENT SESSION CONTEXT:
         - User ID: ${userId || 'Not available'}
-        - Default Account ID: ${accountid || 'Not available'}
+        - Account ID: ${accountid || 'Not available'}
         - Authentication: ${token ? 'Available' : 'Not available'}
+        - Location: ${location || 'Not available'}
+        - currentDate: ${currentDate || 'Not available'}
+        - upcomingEnd: ${upcomingEnd || 'Not available'}
+        - recentStart: ${recentStart || 'Not available'}
+        - recentEnd: ${recentEnd || 'Not available'}
         
         CRITICAL: When users ask about "their" transactions, balances, or account information, you should immediately use the available tools with the session context. DO NOT ask the user which account they want - use the default account ID from the session context.
         
@@ -640,13 +647,13 @@ exports.chat = async (req, res) => {
         - createTransaction: Create new financial forecasts or transactions (uses session account)
         
         USAGE EXAMPLES:
-        - User asks "What's my balance?" → Call getBalances() immediately (no accountId needed)
-        - User asks "Show my recent transactions" → Call getSelectedKeacastAccounts() immediately accountId needed
-        - User asks "What transactions do I have coming up?" → getSelectedKeacastAccounts() immediately accountId needed
-        - User ask "What is my forecasted balance?" → getSelectedKeacastAccounts() immediately accountId needed
-        - User asks "What is my account details?" → getSelectedKeacastAccounts() immediately accountId needed
+        - User asks "What's my balance?" → Call getBalances() immediately accountId is needed
+        - User asks "Show my recent transactions" → Call getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
+        - User asks "What transactions do I have coming up?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
+        - User ask "What is my forecasted balance?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
+        - User asks "What is my account details?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
         - User asks "Can I add a new transaction?" → createTransaction() immediately accountId needed
-        - User asks "Can I spend money on something?" → getSelectedKeacastAccounts() immediately accountId needed
+        - User asks "Can I spend money on something?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
         
         Always use tools proactively to get the data needed to answer user questions. Focus on:
         - Cash flow forecasting and balance predictions
@@ -654,6 +661,7 @@ exports.chat = async (req, res) => {
         - Budgeting and financial planning
         - Warning about potential negative balances
         - Helping create financial forecasts
+        - Helping the user make informed decisions and guide them towards a financially secure future.
       `;
     }
     
