@@ -114,7 +114,7 @@
     "type": "function",
     "function": {
       "name": "getSelectedKeacastAccounts",
-      "description": "Get comprehensive account data including transactions (forecasted, historical, upcoming), balances, and account details. All parameters are automatically provided from session context - no parameters needed. Returns optimized data (max 100 transactions per category, relevant date ranges).",
+      "description": "Get comprehensive account data including transactions, balances, and account details. Returns structured data with: accountInfo (name, type, institution), currentBalances (available, current, credit limit, forecasted), transactionData (forecastedTransactions, recentTransactions, upcomingTransactions with counts), balanceHistory, categories, potentialRecurringTransactions, and summary statistics (totalTransactions, totalIncome, totalExpenses). All parameters automatically provided from session context.",
       "parameters": {
         "type": "object",
         "properties": {

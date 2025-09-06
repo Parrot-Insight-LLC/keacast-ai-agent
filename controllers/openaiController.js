@@ -642,7 +642,7 @@ exports.chat = async (req, res) => {
         
         Available Tools (all use session context automatically):
         - getUserData: Get user profile information
-        - getSelectedKeacastAccounts: Get comprehensive account data including transactions, balances, and account details. All parameters are automatically provided from session context.
+        - getSelectedKeacastAccounts: Get comprehensive account data. Returns structured object with: accountInfo, currentBalances (available, current, creditLimit, forecasted), transactionData (forecastedTransactions, recentTransactions, upcomingTransactions), balanceHistory, categories, and summary statistics (totalTransactions, totalIncome, totalExpenses). All parameters automatically provided.
         - getBalances: Get account balance information (uses session account automatically)
         - createTransaction: Create new financial forecasts or transactions (uses session account)
         

@@ -137,6 +137,68 @@ function optimizeTransactionArray(transactions, arrayType) {
     });
 }
 
+// Function to create an AI-friendly response structure
+function createAIFriendlyResponse(data) {
+  if (!data || typeof data !== 'object') return data;
+  
+  // Handle array of accounts
+  if (Array.isArray(data)) {
+    return data.map(account => createAIFriendlyResponse(account));
+  }
+  
+  // Structure the response in a clear, AI-readable format
+  const structured = {
+    success: true,
+    accountInfo: {
+      accountId: data.accountid || data.id,
+      accountName: data.accountname || data.name,
+      accountType: data.account_type || data.type,
+      institutionName: data.institution_name,
+      bankAccountName: data.bankaccount_name || data.bank_account_name
+    },
+    currentBalances: {
+      available: data.available || 0,
+      current: data.current || data.balance || 0,
+      creditLimit: data.credit_limit || 0,
+      forecasted: data.forecasted || 0
+    },
+    transactionData: {
+      forecastedTransactions: data.forecastedTransactions || data.cfTransactions || [],
+      recentTransactions: data.recentTransactions || data.plaidTransactions || [],
+      upcomingTransactions: data.upcomingTransactions || data.upcoming || [],
+      totalForecastedCount: (data.forecastedTransactions || data.cfTransactions || []).length,
+      totalRecentCount: (data.recentTransactions || data.plaidTransactions || []).length,
+      totalUpcomingCount: (data.upcomingTransactions || data.upcoming || []).length
+    },
+    balanceHistory: data.balances || [],
+    categories: data.categories || [],
+    potentialRecurringTransactions: data.potentialRecurringTransactions || data.plaidRecurrings || [],
+    metadata: {
+      dataRetrievedAt: new Date().toISOString(),
+      optimized: true,
+      originalDataSize: data._originalSize || 'unknown'
+    }
+  };
+  
+  // Add summary statistics
+  const allTransactions = [
+    ...(structured.transactionData.forecastedTransactions || []),
+    ...(structured.transactionData.recentTransactions || []),
+    ...(structured.transactionData.upcomingTransactions || [])
+  ];
+  
+  structured.summary = {
+    totalTransactions: allTransactions.length,
+    totalIncome: allTransactions.filter(t => (t.amount || 0) > 0).reduce((sum, t) => sum + (t.amount || 0), 0),
+    totalExpenses: allTransactions.filter(t => (t.amount || 0) < 0).reduce((sum, t) => sum + Math.abs(t.amount || 0), 0),
+    categoriesCount: (structured.categories || []).length,
+    balanceRecordsCount: (structured.balanceHistory || []).length,
+    recurringPatternsCount: (structured.potentialRecurringTransactions || []).length
+  };
+  
+  return structured;
+}
+
 // Each tool gets (args, ctx), where ctx can include userId, auth, etc.
 const functionMap = {
   async getUserAccounts(args, ctx) {
@@ -380,16 +442,59 @@ const functionMap = {
       contextAccountId: accountId
     });
     
-    const result = await getSelectedKeacastAccounts({ userId, token, body: requestBody });
-    
-    // Apply smart data filtering to reduce size
-    if (result && typeof result === 'object') {
-      const optimizedResult = optimizeAccountData(result);
-      console.log('getSelectedKeacastAccounts: Original size:', JSON.stringify(result).length, 'bytes, Optimized size:', JSON.stringify(optimizedResult).length, 'bytes');
-      return optimizedResult;
+    try {
+      const result = await getSelectedKeacastAccounts({ userId, token, body: requestBody });
+      
+      console.log('getSelectedKeacastAccounts API response received:', {
+        hasData: !!result,
+        isArray: Array.isArray(result),
+        isObject: typeof result === 'object',
+        keys: result && typeof result === 'object' ? Object.keys(result).slice(0, 10) : []
+      });
+      
+      // Handle different response structures
+      if (!result) {
+        return {
+          success: false,
+          error: 'No data returned from API',
+          accountInfo: null,
+          transactionData: { forecastedTransactions: [], recentTransactions: [], upcomingTransactions: [] },
+          summary: { totalTransactions: 0, totalIncome: 0, totalExpenses: 0 }
+        };
+      }
+      
+      // Apply smart data filtering to reduce size and structure for AI
+      if (result && typeof result === 'object') {
+        const optimizedResult = optimizeAccountData(result);
+        const structuredResult = createAIFriendlyResponse(optimizedResult);
+        console.log('getSelectedKeacastAccounts: Original size:', JSON.stringify(result).length, 'bytes, Optimized size:', JSON.stringify(optimizedResult).length, 'bytes, Structured size:', JSON.stringify(structuredResult).length, 'bytes');
+        
+        // Log what data we're actually returning to the AI
+        console.log('getSelectedKeacastAccounts: Returning to AI:', {
+          hasAccountInfo: !!structuredResult.accountInfo,
+          hasBalances: !!structuredResult.currentBalances,
+          transactionCounts: {
+            forecasted: structuredResult.transactionData?.totalForecastedCount || 0,
+            recent: structuredResult.transactionData?.totalRecentCount || 0,
+            upcoming: structuredResult.transactionData?.totalUpcomingCount || 0
+          },
+          summaryStats: structuredResult.summary
+        });
+        
+        return structuredResult;
+      }
+      
+      return result;
+    } catch (error) {
+      console.error('getSelectedKeacastAccounts error:', error.message);
+      return {
+        success: false,
+        error: `API call failed: ${error.message}`,
+        accountInfo: null,
+        transactionData: { forecastedTransactions: [], recentTransactions: [], upcomingTransactions: [] },
+        summary: { totalTransactions: 0, totalIncome: 0, totalExpenses: 0 }
+      };
     }
-    
-    return result;
   },
 
   async getBalances(args, ctx) {
