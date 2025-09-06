@@ -11,6 +11,7 @@ const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit.redi
 
 const openaiRoutes = require('./routes/openaiRoutes');
 const authRoutes = require('./routes/authRoutes');
+const cacheRoutes = require('./routes/cacheRoutes');
 
 const app = express();
 
@@ -57,6 +58,7 @@ app.use('/api/agent/chat', sensitiveLimiter);
 app.use('/api/agent/summarize', sensitiveLimiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/agent', openaiRoutes);
+app.use('/api/cache', cacheRoutes);
 
 // Add a root route to handle the base URL
 app.get('/', (req, res) => {
@@ -79,6 +81,13 @@ app.get('/', (req, res) => {
         chat: 'POST /api/agent/chat',
         clearHistory: 'DELETE /api/agent/clear-history',
         testRedis: 'GET /api/agent/test-redis'
+      },
+      cache: {
+        invalidateUser: 'DELETE /api/cache/user/:userId',
+        invalidateAccount: 'DELETE /api/cache/user/:userId/account/:accountId',
+        warmUp: 'POST /api/cache/warmup/:userId/account/:accountId',
+        stats: 'GET /api/cache/stats/:userId',
+        health: 'GET /api/cache/health'
       }
     }
   });

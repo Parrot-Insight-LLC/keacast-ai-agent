@@ -7,10 +7,11 @@
       "parameters": {
         "type": "object",
         "properties": { 
+          "userId": { "type": "string" },
           "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
           "limit": { "type": "integer", "description": "Number of accounts per page (default: 20, max: 100)" }
         },
-        "required": []
+        "required": ["userId"]
       }
     }
   },
@@ -22,22 +23,11 @@
       "parameters": {
         "type": "object",
         "properties": {
+          "userId": { "type": "string" },
+          "token": { "type": "string" },
           "body": { "type": "object" }
         },
-        "required": ["body"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "getUserData",
-      "description": "Get user profile data including personal information, preferences, and account settings.",
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-        "additionalProperties": false
+        "required": ["userId", "token", "body"]
       }
     }
   },
@@ -45,17 +35,18 @@
     "type": "function",
     "function": {
       "name": "getUserTransactions",
-      "description": "Retrieve transactions for a user account in a date window with pagination support to prevent memory issues. If accountId is not provided, will use the account from the current session context.",
+      "description": "Retrieve transactions for a user account in a date window with pagination support to prevent memory issues.",
       "parameters": {
         "type": "object",
         "properties": {
-          "accountId": { "type": "string", "description": "Account ID (optional if available in session context)" },
+          "userId": { "type": "string" },
+          "accountId": { "type": "string" },
           "startDate": { "type": "string" },
           "endDate": { "type": "string" },
           "page": { "type": "integer", "description": "Page number for pagination (default: 1)" },
           "limit": { "type": "integer", "description": "Number of transactions per page (default: 50, max: 200)" }
         },
-        "required": []
+        "required": ["userId", "accountId"]
       }
     }
   },
@@ -102,11 +93,12 @@
       "parameters": {
         "type": "object",
         "properties": {
+          "userId": { "type": "string" },
           "accountId": { "type": "string" },
           "startDate": { "type": "string" },
           "endDate": { "type": "string" }
         },
-        "required": ["accountId"]
+        "required": ["userId", "accountId"]
       }
     }
   },
@@ -114,77 +106,24 @@
     "type": "function",
     "function": {
       "name": "getSelectedKeacastAccounts",
-      "description": "Get comprehensive account data including transactions, balances, and account details. Returns structured data with: accountInfo (name, type, institution), currentBalances (available, current, credit limit, forecasted), transactionData (forecastedTransactions, recentTransactions, upcomingTransactions with counts), balanceHistory, categories, potentialRecurringTransactions, and summary statistics (totalTransactions, totalIncome, totalExpenses). All parameters automatically provided from session context.",
+      "description": "Get the selected Keacast accounts for a user.",
       "parameters": {
         "type": "object",
         "properties": {
-          "body": { 
-            "type": "object",
-            "description": "The request body containing account selection parameters",
-            "properties": {
-              "currentDate": { 
-                "type": "string", 
-                "description": "The current date in YYYY-MM-DD format (default: current date)" 
-              },
-              "forecastType": { 
-                "type": "string", 
-                "description": "The forecast type (default: F)", 
-                "enum": ["F"] 
-              },
-              "recentStart": { 
-                "type": "string", 
-                "description": "The recent start date in YYYY-MM-DD format (default: 3 months ago)" 
-              },
-              "recentEnd": { 
-                "type": "string", 
-                "description": "The recent end date in YYYY-MM-DD format (default: 1 day from current date)" 
-              },
-              "page": { 
-                "type": "string", 
-                "description": "The page type", 
-                "enum": ["layout"] 
-              },
-              "position": { 
-                "type": "integer", 
-                "description": "The position", 
-                "enum": [0] 
-              },
-              "selectedAccounts": { 
-                "type": "array", 
-                "description": "Array of selected account IDs",
-                "items": { "type": "string" }
-              },
-              "upcomingEnd": { 
-                "type": "string", 
-                "description": "The upcoming end date in YYYY-MM-DD format (default: 14 days from current date)" 
-              },
-              "user": { 
-                "type": "object", 
-                "description": "The user data object" 
-              }
-            },
-            "required": []
-          }
+            "userId": { "type": "string", "description": "The user ID" },
+            "token": { "type": "string", "description": "The token" },
+            "body": { "type": "object", "description": "The body" },
+            "currentDate": { "type": "string", "description": "The current date", "enum": ["YYYY-MM-DD"] },
+            "forecastType": { "type": "string", "description": "The forecast type", "enum": ["F", "A", "RF"] },
+            "recentStart": { "type": "string", "description": "The recent start date", "enum": ["YYYY-MM-DD"] },
+            "recentEnd": { "type": "string", "description": "The recent end date", "enum": ["YYYY-MM-DD"] },
+            "page": { "type": "string", "description": "The page", "enum": ["layout"] },
+            "position": { "type": "integer", "description": "The position", "enum": [0] },
+            "selectedAccounts": { "type": "array", "description": "The selected accounts" , "enum": ["accountid"] },
+            "upcomingEnd": { "type": "string", "description": "The upcoming end date", "enum": ["YYYY-MM-DD"] },
+            "user": { "type": "object", "description": "The user data"  , "enum": ["userData"] }  
         },
-        "required": [],
-        "additionalProperties": false
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "getBalances",
-      "description": "Get account balances including posted, pending, and forecasted balances for a specific account. If accountId is not provided, will use the account from the current session context.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "accountId": { 
-            "type": "string", 
-            "description": "The account ID to get balances for (optional if available in session context)" 
-          }
-        },
-        "required": [],
+        "required": ["userId", "token", "body", "currentDate", "forecastType", "recentStart", "recentEnd", "page", "position", "selectedAccounts", "upcomingEnd", "user"],
         "additionalProperties": false
       }
     }
@@ -302,7 +241,7 @@
             "description": "Merchant name"
           }
         },
-        "required": ["accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "location", "frequency", "display_name"]
+        "required": ["userId", "accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "location", "frequency", "display_name"]
       }
     }
   },
@@ -314,9 +253,10 @@
       "parameters": {
         "type": "object",
         "properties": {
+          "userId": { "type": "string" },
           "transactionid": { "type": "number" }
         },
-        "required": ["transactionid"]
+        "required": ["userId", "transactionid"]
       }
     }
   }
