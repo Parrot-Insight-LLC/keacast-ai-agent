@@ -42,15 +42,15 @@ function optimizeAccountData(data) {
   
   // Optimize transactions arrays
   if (optimized.cfTransactions && Array.isArray(optimized.cfTransactions)) {
-    optimized.cfTransactions = optimizeTransactionArray(optimized.cfTransactions, 'cfTransactions');
+    optimized.forecastedTransactions = optimizeTransactionArray(optimized.cfTransactions, 'cfTransactions');
   }
   
   if (optimized.plaidTransactions && Array.isArray(optimized.plaidTransactions)) {
-    optimized.plaidTransactions = optimizeTransactionArray(optimized.plaidTransactions, 'plaidTransactions');
+    optimized.recentTransactions = optimizeTransactionArray(optimized.plaidTransactions, 'plaidTransactions');
   }
   
   if (optimized.upcoming && Array.isArray(optimized.upcoming)) {
-    optimized.upcoming = optimizeTransactionArray(optimized.upcoming, 'upcoming');
+    optimized.upcomingTransactions = optimizeTransactionArray(optimized.upcoming, 'upcoming');
   }
   
   if (optimized.recents && Array.isArray(optimized.recents)) {
@@ -82,7 +82,7 @@ function optimizeAccountData(data) {
   
   // Remove or limit other large arrays
   if (optimized.plaidRecurrings && Array.isArray(optimized.plaidRecurrings)) {
-    optimized.plaidRecurrings = optimized.plaidRecurrings.slice(0, 20); // Limit to 20 recurring patterns
+    optimized.potentialRecurringTransactions = optimized.plaidRecurrings.slice(0, 20); // Limit to 20 recurring patterns
   }
   
   return optimized;
