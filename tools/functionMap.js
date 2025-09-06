@@ -344,12 +344,43 @@ const functionMap = {
   },
 
   async getSelectedKeacastAccounts(args, ctx) {
-    const { userId, token } = ctx;
-    const { body } = args;
+    const { userId, token, accountId } = ctx;
+    const { body } = args || {};
     
-    console.log('getSelectedKeacastAccounts called with body:', JSON.stringify(body, null, 2));
+    // Get current date and calculate default date ranges
+    const moment = require('moment');
+    const currentDate = moment().format('YYYY-MM-DD');
+    const upcomingEnd = moment().add(14, 'days').format('YYYY-MM-DD');
+    const recentStart = moment().subtract(3, 'months').format('YYYY-MM-DD');
+    const recentEnd = moment().add(1, 'days').format('YYYY-MM-DD');
     
-    const result = await getSelectedKeacastAccounts({ userId, token, body });
+    if (!accountId) {
+      return {
+        error: 'Account ID is required but not provided in context',
+        message: 'Please ensure accountId is available in the session context'
+      };
+    }
+    
+    // Build the body with defaults if not provided
+    const requestBody = {
+      currentDate: body?.currentDate || currentDate,
+      forecastType: body?.forecastType || 'F',
+      recentStart: body?.recentStart || recentStart,
+      recentEnd: body?.recentEnd || recentEnd,
+      page: body?.page || 'layout',
+      position: body?.position || 0,
+      selectedAccounts: body?.selectedAccounts || [accountId],
+      upcomingEnd: body?.upcomingEnd || upcomingEnd,
+      user: body?.user || { id: userId }
+    };
+    
+    console.log('getSelectedKeacastAccounts called with:', {
+      originalBody: body,
+      finalBody: requestBody,
+      contextAccountId: accountId
+    });
+    
+    const result = await getSelectedKeacastAccounts({ userId, token, body: requestBody });
     
     // Apply smart data filtering to reduce size
     if (result && typeof result === 'object') {

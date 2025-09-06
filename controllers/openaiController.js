@@ -640,20 +640,20 @@ exports.chat = async (req, res) => {
         
         CRITICAL: When users ask about "their" transactions, balances, or account information, you should immediately use the available tools with the session context. DO NOT ask the user which account they want - use the default account ID from the session context.
         
-        Available Tools (most can use session account automatically):
+        Available Tools (all use session context automatically):
         - getUserData: Get user profile information
-        - getSelectedKeacastAccounts: Get comprehensive account data including transactions, balances, and account details. Data is automatically optimized for performance (max 100 transactions per category, 6 months history + 12 months future balances).
-        - getBalances: Get account balance information (automatically uses session account if accountId not specified)
+        - getSelectedKeacastAccounts: Get comprehensive account data including transactions, balances, and account details. All parameters are automatically provided from session context.
+        - getBalances: Get account balance information (uses session account automatically)
         - createTransaction: Create new financial forecasts or transactions (uses session account)
         
         USAGE EXAMPLES:
-        - User asks "What's my balance?" → Call getBalances() immediately accountId is needed
-        - User asks "Show my recent transactions" → Call getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
-        - User asks "What transactions do I have coming up?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
-        - User ask "What is my forecasted balance?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
-        - User asks "What is my account details?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
-        - User asks "Can I add a new transaction?" → createTransaction() immediately accountId needed
-        - User asks "Can I spend money on something?" → getSelectedKeacastAccounts() immediately accountId, currentDate, upcomingEnd, recentStart, recentEnd needed
+        - User asks "What's my balance?" → Call getBalances() immediately (no parameters needed)
+        - User asks "Show my recent transactions" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
+        - User asks "What transactions do I have coming up?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
+        - User ask "What is my forecasted balance?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
+        - User asks "What is my account details?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
+        - User asks "Can I add a new transaction?" → Use createTransaction() with transaction details
+        - User asks "Can I spend money on something?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
         
         Always use tools proactively to get the data needed to answer user questions. Focus on:
         - Cash flow forecasting and balance predictions
