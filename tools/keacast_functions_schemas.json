@@ -129,7 +129,7 @@
               "forecastType": { 
                 "type": "string", 
                 "description": "The forecast type", 
-                "enum": ["F", "A", "RF"] 
+                "enum": ["F"] 
               },
               "recentStart": { 
                 "type": "string", 
