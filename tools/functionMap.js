@@ -172,7 +172,7 @@ function createAIFriendlyResponse(data) {
     },
     balanceHistory: data.balances || [],
     categories: data.categories || [],
-    potentialRecurringTransactions: data.potentialRecurringTransactions || data.plaidRecurrings || [],
+    // potentialRecurringTransactions: data.potentialRecurringTransactions || data.plaidRecurrings || [],
     metadata: {
       dataRetrievedAt: new Date().toISOString(),
       optimized: true,
@@ -481,7 +481,7 @@ const functionMap = {
           summaryStats: structuredResult.summary
         });
         
-        return JSON.stringify(structuredResult);
+        return structuredResult;
       }
       
       return result;
