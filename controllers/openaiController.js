@@ -670,7 +670,7 @@ exports.chat = async (req, res) => {
     - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
     - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
     - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
-    - Use tables when displaying data in a structured way.
+    - Use tables in a properly formatted way when asked to compare data. Use lists when asked to list data.
 
     Things to consider:
     - Today's date is ${currentDate}.
