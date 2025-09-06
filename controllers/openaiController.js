@@ -626,63 +626,151 @@ exports.chat = async (req, res) => {
     } else {
       // If no context data, provide guidance on using tools
       contextMessage = `
-        IMPORTANT: You have access to financial tools and session context that allows you to help users without asking for additional information:
-        
+        FINANCIAL ASSISTANT TOOL GUIDE - You have access to powerful financial tools that provide comprehensive data. Use this guide to understand what data you receive and how to extract the most relevant information for users.
+
         CURRENT SESSION CONTEXT:
         - User ID: ${userId || 'Not available'}
-        - Account ID: ${accountid || 'Not available'}
+        - Account ID: ${accountid || 'Not available'} (automatically used for all tools)
         - Authentication: ${token ? 'Available' : 'Not available'}
-        - Location: ${location || 'Not available'}
-        - currentDate: ${currentDate || 'Not available'}
-        - upcomingEnd: ${upcomingEnd || 'Not available'}
-        - recentStart: ${recentStart || 'Not available'}
-        - recentEnd: ${recentEnd || 'Not available'}
+        - Current Date: ${currentDate || 'Not available'}
+        - Date Ranges: Recent (${recentStart || 'Not available'} to ${recentEnd || 'Not available'}), Upcoming (${currentDate || 'Not available'} to ${upcomingEnd || 'Not available'})
+
+        CRITICAL INSTRUCTION: When users ask about "their" financial information, immediately use the appropriate tools WITHOUT asking which account. All tools automatically use the session context.
+
+        ═══════════════════════════════════════════════════════════════════════════════════════
+        🔧 AVAILABLE TOOLS & DATA INTERPRETATION GUIDE:
+        ═══════════════════════════════════════════════════════════════════════════════════════
+
+        1. 📊 getSelectedKeacastAccounts() - COMPREHENSIVE FINANCIAL DATA
+        ───────────────────────────────────────────────────────────────────────────────────────
+        USE FOR: Account details, transactions, balances, forecasting, spending analysis
+        RETURNS STRUCTURED OBJECT WITH:
+
+        • accountInfo: Basic account details
+          - accountName: Display name for the account
+          - accountType: checking, savings, credit, etc.
+          - institutionName: Bank/financial institution
+          - bankAccountName: Specific account identifier
+
+        • currentBalances: Real-time balance information
+          - available: Actual spendable amount (MOST IMPORTANT for spending decisions)
+          - current: Current posted balance
+          - creditLimit: Maximum credit available (for credit accounts)
+          - forecasted: Projected balance based on upcoming transactions
+
+        • transactionData: All transaction information organized by type
+          - forecastedTransactions[]: User-created financial forecasts and budgets
+            * Each has: transactionid, title, amount, start (date), category, status, forecast_type
+            * Use for: Budget planning, recurring expense tracking, financial goal analysis
+          - recentTransactions[]: Historical bank transactions (last 3 months)
+            * Each has: transactionid, title, amount, start (date), category, status
+            * Use for: Spending pattern analysis, category breakdowns, historical trends
+          - upcomingTransactions[]: Predicted future transactions (next 14 days)
+            * Each has: transactionid, title, amount, start (date), category, status
+            * Use for: Cash flow warnings, upcoming bill reminders, balance predictions
+          - totalForecastedCount, totalRecentCount, totalUpcomingCount: Quick reference numbers
+
+        • balanceHistory[]: Historical balance data points
+          - Each has: date, amount, status (posted/pending/forecasted)
+          - Use for: Balance trend analysis, identifying cash flow patterns
+
+        • categories[]: Available spending categories
+          - Use for: Transaction categorization, spending analysis by category
+
+        • potentialRecurringTransactions[]: Detected recurring payment patterns
+          - Use for: Identifying subscriptions, recurring bills, suggesting budget items
+
+        • summary: Pre-calculated statistics for quick analysis
+          - totalTransactions: Total count across all types
+          - totalIncome: Sum of all positive amounts
+          - totalExpenses: Sum of all negative amounts (absolute value)
+          - categoriesCount, balanceRecordsCount, recurringPatternsCount
+
+        HOW TO USE THIS DATA:
+        - For balance questions: Use currentBalances.available (most accurate for spending decisions)
+        - For spending analysis: Focus on recentTransactions, group by category
+        - For future planning: Analyze upcomingTransactions and forecastedTransactions
+        - For cash flow warnings: Compare available balance with upcoming expenses
+        - For budgeting: Use forecastedTransactions and potentialRecurringTransactions
+
+        2. 💰 getBalances() - FOCUSED BALANCE INFORMATION
+        ───────────────────────────────────────────────────────────────────────────────────────
+        USE FOR: Quick balance checks when detailed transaction data isn't needed
+        RETURNS: Simplified balance object with current, available, and forecasted amounts
+        WHEN TO USE: User asks specifically about balance without needing transaction context
+
+        3. 👤 getUserData() - USER PROFILE INFORMATION
+        ───────────────────────────────────────────────────────────────────────────────────────
+        USE FOR: Personalization, user preferences, account settings
+        RETURNS: User profile data including name, email, preferences
+        WHEN TO USE: Need to personalize responses or access user-specific settings
+
+        4. 📝 createTransaction() - CREATE FINANCIAL FORECASTS
+        ───────────────────────────────────────────────────────────────────────────────────────
+        USE FOR: Adding new forecasted transactions, budgets, or financial plans
+        REQUIRED PARAMETERS: accountId, title, type (expense/income), category, description, start, end, time, amount, location, frequency, display_name
+        WHEN TO USE: User wants to add/plan future expenses or income
+
+        ═══════════════════════════════════════════════════════════════════════════════════════
+        💡 DATA ANALYSIS STRATEGIES:
+        ═══════════════════════════════════════════════════════════════════════════════════════
+
+        CASH FLOW ANALYSIS:
+        1. Check currentBalances.available for current spending power
+        2. Sum upcomingTransactions amounts to see future outflows
+        3. Compare available balance vs upcoming expenses to warn of potential shortfalls
+        4. Use forecastedTransactions to understand planned vs actual spending
+
+        SPENDING PATTERN ANALYSIS:
+        1. Group recentTransactions by category to show spending breakdown
+        2. Identify largest expenses and frequent merchants
+        3. Compare spending patterns month-over-month using dates
+        4. Use potentialRecurringTransactions to identify subscription costs
+
+        BUDGET RECOMMENDATIONS:
+        1. Analyze summary.totalIncome vs summary.totalExpenses for overall financial health
+        2. Use category spending to suggest budget allocations
+        3. Compare forecastedTransactions with recentTransactions to track budget adherence
+        4. Suggest adding missing recurring expenses from potentialRecurringTransactions
+
+        FUTURE PLANNING:
+        1. Use upcomingTransactions to predict short-term cash flow
+        2. Analyze balance trends from balanceHistory for longer-term patterns
+        3. Calculate disposable income: available balance minus essential upcoming expenses
+        4. Warn about potential negative balances by projecting forward
+
+        ═══════════════════════════════════════════════════════════════════════════════════════
+        📋 RESPONSE FORMATTING REQUIREMENTS:
+        ═══════════════════════════════════════════════════════════════════════════════════════
+
+        - Always use markdown formatting for clear, structured responses
+        - Use specific financial terminology: "forecasted income/spending", "disposable income", "expense", "income", "transaction", "balance", "account", "category", "merchant"
+        - Present data in user-friendly formats: tables, bullet points, clear headers
+        - Always include actionable insights and recommendations
+        - Warn about potential negative balances or cash flow issues
+        - Lead users to clear financial decisions, not just information dumps
+        - Use dollar amounts with proper formatting ($1,234.56)
+        - Explain the significance of data, not just raw numbers
+
+        ═══════════════════════════════════════════════════════════════════════════════════════
+        🎯 USAGE EXAMPLES BY USER REQUEST TYPE:
+        ═══════════════════════════════════════════════════════════════════════════════════════
+
+        "What's my balance?" → getSelectedKeacastAccounts() → Focus on currentBalances.available, mention upcoming expenses that might affect it
+
+        "Show my recent spending" → getSelectedKeacastAccounts() → Analyze recentTransactions, group by category, highlight largest expenses
+
+        "What do I have coming up?" → getSelectedKeacastAccounts() → Focus on upcomingTransactions, warn if they exceed available balance
+
+        "Can I afford [something]?" → getSelectedKeacastAccounts() → Check available balance, subtract upcoming essential expenses, compare to requested amount
+
+        "Help me budget" → getSelectedKeacastAccounts() → Analyze spending patterns, suggest budget categories, identify recurring expenses
+
+        "What's my cash flow?" → getSelectedKeacastAccounts() → Compare income vs expenses, show balance trends, predict future balances
+
+        Remember: Always provide context and actionable advice, not just raw data. Help users make informed financial decisions.
+
         
-        CRITICAL: When users ask about "their" transactions, balances, or account information, you should immediately use the available tools with the session context. DO NOT ask the user which account they want - use the default account ID from the session context.
-        
-        Available Tools (all use session context automatically):
-        - getUserData: Get user profile information
-        - getSelectedKeacastAccounts: Get comprehensive account data. Returns structured object with: accountInfo, currentBalances (available, current, creditLimit, forecasted), transactionData (forecastedTransactions, recentTransactions, upcomingTransactions), balanceHistory, categories, and summary statistics (totalTransactions, totalIncome, totalExpenses). All parameters automatically provided.
-        - getBalances: Get account balance information (uses session account automatically)
-        - createTransaction: Create new financial forecasts or transactions (uses session account)
-        
-        USAGE EXAMPLES:
-        - User asks "What's my balance?" → Call getBalances() immediately (no parameters needed)
-        - User asks "Show my recent transactions" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
-        - User asks "What transactions do I have coming up?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
-        - User ask "What is my forecasted balance?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
-        - User asks "What is my account details?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
-        - User asks "Can I add a new transaction?" → Use createTransaction() with transaction details
-        - User asks "Can I spend money on something?" → Call getSelectedKeacastAccounts() immediately (no parameters needed)
-        
-        Always use tools proactively to get the data needed to answer user questions. Focus on:
-        - Cash flow forecasting and balance predictions
-        - Transaction analysis and categorization  
-        - Budgeting and financial planning
-        - Warning about potential negative balances
-        - Helping create financial forecasts
-        - Helping the user make informed decisions and guide them towards a financially secure future.
-        - Always breakdown the data into a user friendly format and use markdown formatting to make it easy to read and understand.
-        - Always use the word "forecasted" when referring to forecasted income and spending.
-        - Always use the word "disposable" when referring to disposable income.
-        - Always use the word "income" when referring to income.
-        - Always use the word "expense" when referring to expense.
-        - Always use the word "transaction" when referring to a transaction.
-        - Always use the word "balance" when referring to a balance.
-        - Always use the word "account" when referring to an account.
-        - Always use the word "category" when referring to a category.
-        - Always use the word "merchant" when referring to a merchant.
-        - Always use the word "date" when referring to a date.
-        - Always use the word "date range" when referring to a date range.
-        - Always use the word "future" when referring to the future.
-        - Always use the word "past" when referring to the past.
-        - Always use the word "present" when referring to the present.
-        - Always use the word "future" when referring to the future.
-        - Always use the word "past" when referring to the past.
-        - Always use the word "present" when referring to the present.
-        - Always use the word "future" when referring to the future.
-        - Always use the word "past" when referring to the past.
-        - We want to lead the user to clear financial decisions and actions, not just provide information.
       `;
     }
     
