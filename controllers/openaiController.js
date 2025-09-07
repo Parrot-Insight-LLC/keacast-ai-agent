@@ -239,6 +239,7 @@ function createContextSummary(userContext) {
         bank_account_name: acc.bankaccount_name,
         institution_name: acc.institution_name,
         institution_logo: acc.institution_logo,
+        plaid_latest: acc.plaid_latest,
       })).slice(0, 3) // Limit to first 3 accounts
     } : { count: 0 },
     dataCounts: {
@@ -613,23 +614,24 @@ exports.chat = async (req, res) => {
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
     const completeContext = `
         Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available and if the user has future negative balances then warn them. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
-        The users name is ${contextSummary.userData?.firstname || ''} ${contextSummary.userData?.lastname || ''}.
-        The users email is ${contextSummary.userData?.email || ''}.
-        The account name is ${contextSummary.selectedAccounts?.name || ''}.
-        Here are my account transactions split by historical, upcoming, and forecasted context each transaction has a date, amount, category, name, and description:
-        ${JSON.stringify(contextSummary.transactions, null, 2)}
-        ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
-        ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here is my account available balance:
-        ${JSON.stringify(contextSummary.availableBalance, null, 2)}
-        Here is my account forecasted balance:
-        ${JSON.stringify(contextSummary.forecastedBalance, null, 2)}
         Here is my user's first name:
         ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
         Here is my user's last name:
         ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
         Here is my user's email:
         ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
+        The account name is ${contextSummary.selectedAccounts?.name || ''} ${contextSummary.selectedAccounts?.bank_account_name || ''}.
+        The account type is ${contextSummary.selectedAccounts?.account_type || ''}.
+        The institution name is ${contextSummary.selectedAccounts?.institution_name || ''}.
+        The latest activity was updated on ${contextSummary.selectedAccounts?.plaid_latest || ''}.
+        Here are my account transactions split by historical, upcoming, and forecasted context each transaction has a date, amount, category, name, and description:
+        Historical Transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}
+        Upcoming Transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
+        Forecasted Transactions: ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
+        Here is my account available balance:
+        ${JSON.stringify(contextSummary.availableBalance, null, 2)}
+        Here is my account forecasted balance:
+        ${JSON.stringify(contextSummary.forecastedBalance, null, 2)}
         Here are my account balances (posted, pending and forecasted) with the following details: amount, date, status:
         ${JSON.stringify(contextSummary.balances, null, 2)}
     `
