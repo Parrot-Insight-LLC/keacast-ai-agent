@@ -612,7 +612,9 @@ exports.chat = async (req, res) => {
     // const plaidContext = `Here is my transaction history: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
     // const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
-    const completeContext = `
+    let completeContext = '';
+    if (contextSummary.selectedAccounts?.length > 0) {
+      completeContext = `
         Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available and if the user has future negative balances then warn them. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
         Here is my user's first name:
         ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
@@ -635,6 +637,17 @@ exports.chat = async (req, res) => {
         Here are my account balances (posted, pending and forecasted) with the following details: amount, date, status:
         ${JSON.stringify(contextSummary.balances, null, 2)}
     `
+    } else  {
+      completeContext = `
+        Use this context to answer the user's question. The user has not loaded any accounts yet so we need to provide the user with Keacast's features and capabilities. Highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner. The user may need help understanding how to connect their accounts to Keacast via Plaid and setting up their accounts by adding forecasted transactions and reconciling their account history once they have connected their accounts. Point them to things they can be thinking about ahead of connecting their accounts, like understanding their incomes, expenses, and savings plans. Keacast likes to start with a blank slate and list the incomes, then the expenses and the Keacast calendar will help you understand your cashflow over time. 
+        Here is my user's first name:
+        ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
+        Here is my user's last name:
+        ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
+        Here is my user's email:
+        ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
+      `
+    }
     // Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
     //     ${JSON.stringify(contextSummary.possibleRecurringTransactions, null, 2)}Here are the user's categories:
     //     ${JSON.stringify(contextSummary.categories, null, 2)}
@@ -644,7 +657,8 @@ exports.chat = async (req, res) => {
     // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
     const contextArray = [completeContext];
 
-    const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting.
+    const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting. If the user has not loaded any accounts yet, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner. 
+    If the user has loaded accounts, then you should use the context provided to answer the user's question.
 
     Core purpose:
     - Forecast future cash flow and account balances day-by-day, week-by-week, or month-by-month, so users can anticipate upcoming financial scenarios.
@@ -676,6 +690,7 @@ exports.chat = async (req, res) => {
     - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
     - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
     - Use tables in a properly formatted way when asked to compare data. Use lists when asked to list data.
+    - If the user has not loaded any accounts yet, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner.
 
     Things to consider:
     - Today's date is ${currentDate}.
@@ -908,7 +923,7 @@ exports.analyzeTransactions = async (req, res) => {
       }
     }
 
-    const systemPrompt = `You are the Keacast Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Your purpose is to help users gain clarity, confidence, and foresight into their cash flow habits. You combine real-time transactions with forecasting to help users plan ahead, avoid surprises, and make better financial decisions.
+    const systemPrompt = `You are the Keacast Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Your purpose is to help users gain clarity, confidence, and foresight into their cash flow habits. You combine real-time transactions with forecasting to help users plan ahead, avoid surprises, and make better financial decisions. If the user has not provided any transactions, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner. Focus on teaching the user how to use Keacast and how it can help them.
 
     Give a warm welcome to the user and provide a space for the user to ask financial and Keacast related questions.
 
