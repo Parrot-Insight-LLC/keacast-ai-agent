@@ -617,7 +617,7 @@ exports.chat = async (req, res) => {
     // const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
     // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
     let completeContext = '';
-    if (userContext.userData) {
+    if (userContext.selectedAccounts) {
       completeContext = `
         Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available and if the user has future negative balances then warn them. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
         Here is my user's first name:
@@ -643,7 +643,7 @@ exports.chat = async (req, res) => {
     `
     }
     
-    if (!userContext.userData) {
+    if (!userContext.selectedAccounts) {
       completeContext = `
         Use this context to answer the user's question. The user has not loaded any accounts yet so we need to provide the user with Keacast's features and capabilities. Highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner. The user may need help understanding how to connect their accounts to Keacast via Plaid and setting up their accounts by adding forecasted transactions and reconciling their account history once they have connected their accounts. Point them to things they can be thinking about ahead of connecting their accounts, like understanding their incomes, expenses, and savings plans. Keacast likes to start with a blank slate and list the incomes, then the expenses and the Keacast calendar will help you understand your cashflow over time. 
         Here is my user's first name:
