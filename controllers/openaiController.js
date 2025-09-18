@@ -481,10 +481,9 @@ exports.chat = async (req, res) => {
 
     const sessionKey = buildSessionKey(req);
     const accountid = req.body.accountid;
-    const faqData = JSON.parse(req.body.faq);
     let faq;
-    if (faqData && faqData.userHasData) {
-      faq = faqData.allFaqItems;
+    if (req.body.faq) {
+      faq = JSON.parse(req.body.faq);
     }
     const { token, userId, authHeader } = extractAuthFromRequest(req);
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
