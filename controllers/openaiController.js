@@ -652,6 +652,7 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
         Here is my user's email:
         ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
+        Use the FAQ questions and answers to help the user understand Keacast and how it can help them, application specific questions and answers should be included.
         Here are the FAQ items:
         ${JSON.stringify(faq, null, 2)}
       `
