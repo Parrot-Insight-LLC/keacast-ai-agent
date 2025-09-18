@@ -652,9 +652,6 @@ exports.chat = async (req, res) => {
         ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
         Here is my user's email:
         ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
-        Use the FAQ questions and answers to help the user understand Keacast and how it can help them, application specific questions and answers should be included.
-        Here are the FAQ items:
-        ${JSON.stringify(faq, null, 2)}
       `
     }
     // Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
@@ -699,7 +696,10 @@ exports.chat = async (req, res) => {
     - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
     - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
     - Use tables in a properly formatted way when asked to compare data. Use lists when asked to list data.
-    - If the user has not loaded any accounts yet, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner.
+    - If the user has not loaded any accounts yet, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner and use the FAQ items to help the user understand how to use Keacast.
+    - Use the FAQ questions and answers to help the user understand Keacast and how it can help them, application specific questions and answers should be included.
+    - Here are the FAQ question and answers:
+    ${JSON.stringify(faq, null, 2)}
 
     Things to consider:
     - Today's date is ${currentDate}.
