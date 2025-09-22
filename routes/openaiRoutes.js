@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction } = require('../controllers/openaiController');
+const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction, getConversationInsights, summarizeConversation } = require('../controllers/openaiController');
 const {redisTest} = require('../controllers/openaiController');
 
 // Chat and analysis endpoints
@@ -14,6 +14,10 @@ router.delete('/clear-history', clearHistory);
 router.get('/check-history-size', checkHistorySize);
 router.delete('/clear-session/:sessionId', clearSessionById);
 router.post('/repair-session', repairSession);
+
+// Enhanced conversation context endpoints
+router.get('/conversation-insights', getConversationInsights);
+router.post('/summarize-conversation', summarizeConversation);
 
 // New paginated data endpoints for memory-efficient queries
 router.get('/accounts/:userId', async (req, res) => {

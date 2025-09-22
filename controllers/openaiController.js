@@ -6,9 +6,12 @@ const contextCache = require('../services/contextCache.service'); // <-- use con
 const moment = require('moment');
 const momentTimezone = require('moment-timezone');
 const MEMORY_TTL = 604800; // 1 week
-const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
+const MAX_MEMORY = 15; // increased memory context size for better conversation flow
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
+const CONVERSATION_SUMMARY_THRESHOLD = 20; // summarize when conversation exceeds this many messages
+const CONTEXT_WINDOW_SIZE = 750000; // bytes - maximum context window size
+const CONVERSATION_TOPIC_MEMORY = 5; // number of recent topics to track
 
 function buildSessionKey(req) {
   // Check multiple sources for sessionId in order of preference
@@ -208,6 +211,124 @@ function getCurrentDateInTimezone(location) {
     console.warn('Error calculating timezone, falling back to UTC:', error.message);
     return moment().utc().format('YYYY-MM-DD');
   }
+}
+
+// Function to create conversation summary for long chat sessions
+async function createConversationSummary(messages, currentDate) {
+  try {
+    console.log('Creating conversation summary for', messages.length, 'messages');
+    
+    // Filter to get only user and assistant messages for summarization
+    const conversationMessages = messages.filter(msg => 
+      msg.role === 'user' || msg.role === 'assistant'
+    );
+    
+    if (conversationMessages.length < 4) {
+      return null; // Not enough messages to summarize
+    }
+    
+    // Take the first 80% of messages for summarization, keep the last 20% in full context
+    const summaryEndIndex = Math.floor(conversationMessages.length * 0.8);
+    const messagesToSummarize = conversationMessages.slice(0, summaryEndIndex);
+    const recentMessages = conversationMessages.slice(summaryEndIndex);
+    
+    const summaryPrompt = `You are summarizing a conversation with the Keacast Assistant. Create a concise summary that captures:
+
+1. **Key Topics Discussed**: What financial topics, questions, or concerns were raised?
+2. **Important Decisions Made**: Any financial decisions, plans, or actions taken?
+3. **User Context**: Key information about the user's financial situation mentioned
+4. **Outstanding Items**: Any questions left unanswered or follow-up actions needed
+5. **Conversation Flow**: How the conversation evolved and what was accomplished
+
+Keep the summary under 300 words and focus on maintaining conversational continuity. Today's date is ${currentDate}.
+
+**Conversation to summarize:**
+${messagesToSummarize.map((msg, i) => `${msg.role}: ${msg.content}`).join('\n\n')}
+
+**Summary:**`;
+
+    const summaryMessages = [
+      { role: 'system', content: 'You are a helpful assistant that creates concise conversation summaries for maintaining context in ongoing chats.' },
+      { role: 'user', content: summaryPrompt }
+    ];
+
+    const summaryResponse = await queryAzureOpenAI(summaryMessages, { 
+      tools: functionSchemas, 
+      tool_choice: 'none',
+      temperature: 0.3,
+      max_tokens: 400
+    });
+    
+    const summary = summaryResponse?.choices?.[0]?.message?.content || '';
+    console.log('Generated conversation summary:', summary.length, 'characters');
+    
+    return {
+      summary,
+      recentMessages,
+      originalMessageCount: conversationMessages.length,
+      summarizedMessageCount: messagesToSummarize.length,
+      keptRecentCount: recentMessages.length
+    };
+  } catch (error) {
+    console.warn('Failed to create conversation summary:', error.message);
+    return null;
+  }
+}
+
+// Function to extract conversation topics for better context
+function extractConversationTopics(messages) {
+  const topics = [];
+  const userMessages = messages.filter(msg => msg.role === 'user');
+  
+  // Simple topic extraction based on keywords and patterns
+  const topicKeywords = {
+    'budgeting': ['budget', 'spending', 'expenses', 'income', 'cash flow'],
+    'transactions': ['transaction', 'payment', 'purchase', 'expense', 'income'],
+    'forecasting': ['forecast', 'future', 'upcoming', 'planning', 'projection'],
+    'accounts': ['account', 'balance', 'bank', 'credit', 'debt'],
+    'categories': ['category', 'categorize', 'spending category', 'expense category'],
+    'savings': ['save', 'savings', 'invest', 'investment', 'retirement'],
+    'debt': ['debt', 'loan', 'credit card', 'pay off', 'debt payoff'],
+    'goals': ['goal', 'target', 'plan', 'objective', 'milestone'],
+    'analysis': ['analyze', 'review', 'summary', 'insight', 'pattern']
+  };
+  
+  userMessages.slice(-CONVERSATION_TOPIC_MEMORY).forEach(msg => {
+    const content = msg.content.toLowerCase();
+    Object.entries(topicKeywords).forEach(([topic, keywords]) => {
+      if (keywords.some(keyword => content.includes(keyword))) {
+        if (!topics.includes(topic)) {
+          topics.push(topic);
+        }
+      }
+    });
+  });
+  
+  return topics.slice(-CONVERSATION_TOPIC_MEMORY); // Keep only recent topics
+}
+
+// Function to enhance conversation context with topic continuity
+function enhanceConversationContext(messages, topics, summary) {
+  let enhancedMessages = [...messages];
+  
+  // Add conversation summary if available
+  if (summary) {
+    enhancedMessages.unshift({
+      role: 'system',
+      content: `**Previous Conversation Summary:**\n${summary.summary}\n\nContinue the conversation naturally, referencing relevant context from the summary when appropriate.`
+    });
+  }
+  
+  // Add topic context if we have recent topics
+  if (topics.length > 0) {
+    const topicContext = `**Recent Conversation Topics:** ${topics.join(', ')}. Reference these topics naturally when relevant to maintain conversation flow.`;
+    enhancedMessages.unshift({
+      role: 'system',
+      content: topicContext
+    });
+  }
+  
+  return enhancedMessages;
 }
 
 function createContextSummary(userContext) {
@@ -490,10 +611,26 @@ exports.chat = async (req, res) => {
 
     // Load prior conversation memory
     let history = [];
+    let conversationSummary = null;
     try {
       const historyData = await redis.get(sessionKey);
       history = historyData ? JSON.parse(historyData) : [];
       console.log('Chat endpoint: Loaded history length:', history.length);
+      
+      // Check if we need to create a conversation summary for long sessions
+      if (history.length > CONVERSATION_SUMMARY_THRESHOLD) {
+        console.log('Chat endpoint: Long conversation detected, creating summary');
+        conversationSummary = await createConversationSummary(history, currentDate);
+        
+        if (conversationSummary) {
+          // Replace old messages with summary + recent messages
+          history = [
+            ...conversationSummary.recentMessages,
+            { role: 'system', content: `[Conversation Summary: ${conversationSummary.summary}]` }
+          ];
+          console.log('Chat endpoint: Applied conversation summary, new history length:', history.length);
+        }
+      }
     } catch (redisError) {
       console.warn('Chat endpoint: Redis history load failed:', redisError.message);
       history = [];
@@ -733,11 +870,18 @@ exports.chat = async (req, res) => {
     
     Review the app here: https://keacast.app/ for more context and information.`;
 
+    // Extract conversation topics for better context
+    const conversationTopics = extractConversationTopics(history);
+    console.log('Chat endpoint: Extracted conversation topics:', conversationTopics);
+    
     // Build message array with memory and clean up long messages
-    const messages = [
+    let messages = [
       { role: 'system', content: baseSystem },
       ...sanitizeMessageArray(history.map(truncateMessage))
     ];
+    
+    // Enhance conversation context with topics and summary
+    messages = enhanceConversationContext(messages, conversationTopics, conversationSummary);
 
     // Add detailed context as a separate message if we have significant data
     if (userContext && Object.keys(userContext).length > 0) {
@@ -762,28 +906,57 @@ exports.chat = async (req, res) => {
     const requestSize = JSON.stringify(messages).length;
     console.log('Chat endpoint: Request size:', requestSize, 'bytes');
     
-    if (requestSize > 750000) { // Increased to 750KB limit to allow more context
-      console.warn('Chat endpoint: Request too large, removing oldest messages one by one');
+    if (requestSize > CONTEXT_WINDOW_SIZE) {
+      console.warn('Chat endpoint: Request too large, applying intelligent context management');
       
-      // Remove oldest messages one by one until we're under the limit
+      // Intelligent context management: prioritize recent messages and important context
       let attempts = 0;
-      const maxAttempts = 20; // Prevent infinite loops
+      const maxAttempts = 25; // Increased attempts for better context management
       
-      while (requestSize > 750000 && attempts < maxAttempts && history.length > 2) {
-        // Remove the oldest message (skip system message at index 0)
-        history.shift(); // Remove first (oldest) message
+      while (requestSize > CONTEXT_WINDOW_SIZE && attempts < maxAttempts && messages.length > 3) {
+        // Find the best message to remove (prioritize keeping system messages and recent context)
+        let messageToRemove = -1;
         
-        // Rebuild messages array
-        messages.splice(1, messages.length - 2); // Keep only system and current user message
-        messages.splice(1, 0, ...history.map(truncateMessage));
+        // Look for context messages or old conversation history to remove first
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          
+          // Skip system messages and the current user message
+          if (msg.role === 'system' || i === messages.length - 1) {
+            continue;
+          }
+          
+          // Remove context messages first (they're usually large and less critical for conversation flow)
+          if (msg.role === 'user' && msg.content && 
+              (msg.content.includes('Use this context to answer') || 
+               msg.content.includes('Here is my user\'s first name') ||
+               msg.content.includes('Here are my account transactions'))) {
+            messageToRemove = i;
+            break;
+          }
+          
+          // Remove older conversation history
+          if (msg.role === 'assistant' && i < messages.length - 5) {
+            messageToRemove = i;
+            break;
+          }
+        }
         
-        // Recalculate size
-        const newSize = JSON.stringify(messages).length;
-        console.log(`Chat endpoint: Removed oldest message, new size: ${newSize} bytes (attempt ${attempts + 1})`);
+        if (messageToRemove === -1) {
+          // Fallback: remove the oldest non-system message
+          for (let i = 1; i < messages.length - 1; i++) {
+            if (messages[i].role !== 'system') {
+              messageToRemove = i;
+              break;
+            }
+          }
+        }
         
-        if (newSize <= 750000) {
-          console.log('Chat endpoint: Successfully reduced size below limit');
-          break;
+        if (messageToRemove !== -1) {
+          messages.splice(messageToRemove, 1);
+          console.log(`Chat endpoint: Removed message at index ${messageToRemove}, new size: ${JSON.stringify(messages).length} bytes (attempt ${attempts + 1})`);
+        } else {
+          break; // No more messages to remove
         }
         
         attempts++;
@@ -860,6 +1033,16 @@ exports.chat = async (req, res) => {
       dataMessage: dataMessage,
       requestSize: requestSize,
       error: result?.error,
+      conversationContext: {
+        topics: conversationTopics,
+        hasSummary: !!conversationSummary,
+        summaryInfo: conversationSummary ? {
+          originalMessageCount: conversationSummary.originalMessageCount,
+          summarizedMessageCount: conversationSummary.summarizedMessageCount,
+          keptRecentCount: conversationSummary.keptRecentCount
+        } : null,
+        enhancedContext: true
+      }
     });
 
   } catch (error) {
@@ -1628,6 +1811,163 @@ exports.repairSession = async (req, res) => {
     }
   } catch (error) {
     console.error('Repair session error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// Add a new endpoint to get conversation insights and context
+exports.getConversationInsights = async (req, res) => {
+  try {
+    console.log('Get conversation insights endpoint called');
+    const sessionKey = buildSessionKey(req);
+    console.log('Get conversation insights: Session key:', sessionKey);
+
+    try {
+      const historyData = await redis.get(sessionKey);
+      if (!historyData) {
+        return res.json({
+          success: true,
+          message: 'No conversation history found',
+          sessionKey: sessionKey,
+          insights: {
+            messageCount: 0,
+            topics: [],
+            conversationLength: 'No conversation',
+            hasSummary: false,
+            contextQuality: 'No data'
+          }
+        });
+      }
+      
+      const history = JSON.parse(historyData);
+      const sanitizedHistory = sanitizeMessageArray(history);
+      
+      // Extract conversation insights
+      const topics = extractConversationTopics(sanitizedHistory);
+      const userMessages = sanitizedHistory.filter(msg => msg.role === 'user');
+      const assistantMessages = sanitizedHistory.filter(msg => msg.role === 'assistant');
+      
+      // Calculate conversation metrics
+      const totalMessages = userMessages.length + assistantMessages.length;
+      const avgUserMessageLength = userMessages.length > 0 ? 
+        userMessages.reduce((sum, msg) => sum + (msg.content?.length || 0), 0) / userMessages.length : 0;
+      const avgAssistantMessageLength = assistantMessages.length > 0 ? 
+        assistantMessages.reduce((sum, msg) => sum + (msg.content?.length || 0), 0) / assistantMessages.length : 0;
+      
+      // Determine context quality
+      let contextQuality = 'Good';
+      if (totalMessages < 3) contextQuality = 'Limited';
+      else if (totalMessages > 20) contextQuality = 'Extensive';
+      else if (topics.length < 2) contextQuality = 'Focused';
+      
+      // Estimate conversation duration (assuming 1-2 minutes per exchange)
+      const estimatedDuration = Math.round(totalMessages * 1.5);
+      
+      console.log('Get conversation insights: Retrieved insights for', totalMessages, 'messages');
+      
+      res.json({
+        success: true,
+        message: 'Conversation insights retrieved successfully',
+        sessionKey: sessionKey,
+        insights: {
+          messageCount: totalMessages,
+          userMessageCount: userMessages.length,
+          assistantMessageCount: assistantMessages.length,
+          topics: topics,
+          conversationLength: totalMessages > 0 ? `${estimatedDuration} minutes` : 'No conversation',
+          hasSummary: totalMessages > CONVERSATION_SUMMARY_THRESHOLD,
+          contextQuality: contextQuality,
+          avgUserMessageLength: Math.round(avgUserMessageLength),
+          avgAssistantMessageLength: Math.round(avgAssistantMessageLength),
+          needsSummarization: totalMessages > CONVERSATION_SUMMARY_THRESHOLD,
+          topicDiversity: topics.length,
+          conversationFlow: topics.length > 3 ? 'Multi-topic' : topics.length > 1 ? 'Focused' : 'Single-topic'
+        },
+        recommendations: {
+          shouldSummarize: totalMessages > CONVERSATION_SUMMARY_THRESHOLD,
+          contextOptimization: totalMessages > 15 ? 'Consider conversation summary' : 'Context is optimal',
+          topicContinuity: topics.length > 0 ? `Continue discussing: ${topics.slice(-3).join(', ')}` : 'No specific topics identified'
+        }
+      });
+    } catch (redisError) {
+      console.warn('Get conversation insights: Redis operation failed:', redisError.message);
+      res.status(500).json({ error: 'Failed to retrieve conversation insights', details: redisError.message });
+    }
+  } catch (error) {
+    console.error('Get conversation insights error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// Add a new endpoint to manually trigger conversation summarization
+exports.summarizeConversation = async (req, res) => {
+  try {
+    console.log('Summarize conversation endpoint called');
+    const sessionKey = buildSessionKey(req);
+    console.log('Summarize conversation: Session key:', sessionKey);
+
+    try {
+      const historyData = await redis.get(sessionKey);
+      if (!historyData) {
+        return res.json({
+          success: false,
+          message: 'No conversation history found to summarize',
+          sessionKey: sessionKey
+        });
+      }
+      
+      const history = JSON.parse(historyData);
+      const sanitizedHistory = sanitizeMessageArray(history);
+      
+      // Get current date for context
+      const location = req.body?.location;
+      const currentDate = getCurrentDateInTimezone(location);
+      
+      // Create conversation summary
+      const conversationSummary = await createConversationSummary(sanitizedHistory, currentDate);
+      
+      if (!conversationSummary) {
+        return res.json({
+          success: false,
+          message: 'Not enough conversation history to create a meaningful summary',
+          sessionKey: sessionKey,
+          messageCount: sanitizedHistory.length
+        });
+      }
+      
+      // Update the session with the summarized conversation
+      const updatedHistory = [
+        ...conversationSummary.recentMessages,
+        { role: 'system', content: `[Conversation Summary: ${conversationSummary.summary}]` }
+      ];
+      
+      await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
+      console.log('Summarize conversation: Updated session with summary, new length:', updatedHistory.length);
+      
+      res.json({
+        success: true,
+        message: 'Conversation summarized successfully',
+        sessionKey: sessionKey,
+        summary: {
+          content: conversationSummary.summary,
+          originalMessageCount: conversationSummary.originalMessageCount,
+          summarizedMessageCount: conversationSummary.summarizedMessageCount,
+          keptRecentCount: conversationSummary.keptRecentCount,
+          newHistoryLength: updatedHistory.length
+        },
+        benefits: [
+          'Reduced context window size',
+          'Maintained conversation continuity',
+          'Preserved recent conversation context',
+          'Improved response quality for long conversations'
+        ]
+      });
+    } catch (redisError) {
+      console.warn('Summarize conversation: Redis operation failed:', redisError.message);
+      res.status(500).json({ error: 'Failed to summarize conversation', details: redisError.message });
+    }
+  } catch (error) {
+    console.error('Summarize conversation error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
