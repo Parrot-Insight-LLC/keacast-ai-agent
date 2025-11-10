@@ -514,32 +514,32 @@ exports.chat = async (req, res) => {
     // If no explicit context or we need to preload additional data, use cached context service
     if (!userContext || Object.keys(userContext).length === 0 || !userContext.selectedAccounts) {
       if (userId && token && accountid) {
-        // try {
-        //   console.log('Chat endpoint: Using context cache service for user:', userId, 'account:', accountid);
+        try {
+          console.log('Chat endpoint: Using context cache service for user:', userId, 'account:', accountid);
           
-        //   // Use cached context service - this will return cached data if available, or build and cache fresh data
-        //   userContext = await contextCache.getUserContext(userId, token, accountid, location);
+          // Use cached context service - this will return cached data if available, or build and cache fresh data
+          userContext = await contextCache.getUserContext(userId, token, accountid, location);
           
-        //   // Merge any transactions from request body with cached data
-        //   if (req.body?.transactions && Array.isArray(req.body.transactions)) {
-        //     const bodyTransactions = req.body.transactions;
-        //     const cachedTransactions = userContext.cfTransactions || [];
-        //     userContext.cfTransactions = [...bodyTransactions, ...cachedTransactions];
-        //     console.log('Chat endpoint: Merged request body transactions with cached data - Body:', bodyTransactions.length, 'Cached:', cachedTransactions.length, 'Total:', userContext.cfTransactions.length);
-        //   }
+          // Merge any transactions from request body with cached data
+          if (req.body?.transactions && Array.isArray(req.body.transactions)) {
+            const bodyTransactions = req.body.transactions;
+            const cachedTransactions = userContext.cfTransactions || [];
+            userContext.cfTransactions = [...bodyTransactions, ...cachedTransactions];
+            console.log('Chat endpoint: Merged request body transactions with cached data - Body:', bodyTransactions.length, 'Cached:', cachedTransactions.length, 'Total:', userContext.cfTransactions.length);
+          }
           
-        //   // Update current date to ensure it's fresh
-        //   userContext.currentDate = currentDate;
+          // Update current date to ensure it's fresh
+          userContext.currentDate = currentDate;
           
-        //   if (userContext._cached) {
-        //     console.log('Chat endpoint: Used cached user context (age:', userContext._cacheAge, 'minutes)');
-        //     dataMessage = `Used cached context data (${userContext._cacheAge} minutes old) - no API calls needed!`;
-        //   } else {
-        //     console.log('Chat endpoint: Built fresh user context via cache service');
-        //     dataMessage = 'Built fresh context data and cached for future requests';
-        //   }
+          if (userContext._cached) {
+            console.log('Chat endpoint: Used cached user context (age:', userContext._cacheAge, 'minutes)');
+            dataMessage = `Used cached context data (${userContext._cacheAge} minutes old) - no API calls needed!`;
+          } else {
+            console.log('Chat endpoint: Built fresh user context via cache service');
+            dataMessage = 'Built fresh context data and cached for future requests';
+          }
           
-        // } catch (err) {
+        } catch (err) {
           console.warn('Chat endpoint: Context cache service failed, falling back to direct calls:', err?.message);
           
           // Fallback to original direct API calls
@@ -603,7 +603,7 @@ exports.chat = async (req, res) => {
             console.error('Chat endpoint: Both cache service and fallback failed:', fallbackErr?.message);
             dataMessage = `Error: ${fallbackErr?.message}`;
           }
-        // }
+        }
       } else {
         console.log('Chat endpoint: Skipping preload (missing userId, token, or accountid)');
         dataMessage = 'Chat endpoint: Skipping preload (missing userId, token, or accountid)';
