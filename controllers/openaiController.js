@@ -5,10 +5,12 @@ const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.
 const contextCache = require('../services/contextCache.service'); // <-- use context cache service
 const moment = require('moment');
 const momentTimezone = require('moment-timezone');
+const crypto = require('crypto');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
+const SUMMARIZATION_CACHE_TTL = 1800; // 30 minutes in seconds
 
 function buildSessionKey(req) {
   // Check multiple sources for sessionId in order of preference
@@ -18,6 +20,17 @@ function buildSessionKey(req) {
                    req.user?.id || 
                    'anonymous';
   return `session:${sessionId}`;
+}
+
+function buildSummarizationCacheKey(sessionKey, plaidTransactions, forecastedTransactions, balances) {
+  // Create a hash of the input data to ensure cache is invalidated when data changes
+  const dataString = JSON.stringify({
+    plaidTransactions: plaidTransactions || [],
+    forecastedTransactions: forecastedTransactions || [],
+    balances: balances || []
+  });
+  const dataHash = crypto.createHash('md5').update(dataString).digest('hex');
+  return `summarization:${sessionKey}:${dataHash}`;
 }
 
 function truncateText(text, maxChars) {
@@ -1068,6 +1081,24 @@ exports.summarization = async (req, res) => {
     const { plaidTransactions, forecastedTransactions, balances, userData } = req.body;
     
     const sessionKey = buildSessionKey(req);
+    const cacheKey = buildSummarizationCacheKey(sessionKey, plaidTransactions, forecastedTransactions, balances);
+
+    // Check cache first
+    try {
+      const cachedResult = await redis.get(cacheKey);
+      if (cachedResult) {
+        console.log('Summarization: Returning cached result');
+        const cachedData = JSON.parse(cachedResult);
+        return res.json({ 
+          summary: cachedData.summary, 
+          raw: cachedData.raw, 
+          cached: true,
+          note: 'This summary was retrieved from cache (30 minute TTL)'
+        });
+      }
+    } catch (cacheError) {
+      console.warn('Summarization: Cache read failed, proceeding with fresh generation:', cacheError.message);
+    }
 
     // Load history from Redis (read-only, will not update)
     let history = [];
@@ -1163,6 +1194,22 @@ exports.summarization = async (req, res) => {
     const finalText = result.content || '';
     const rawText = result.raw;
 
+    // Cache the result for 30 minutes
+    if (!result?.error && finalText) {
+      try {
+        const cacheData = {
+          summary: finalText,
+          raw: rawText,
+          timestamp: new Date().toISOString()
+        };
+        await redis.set(cacheKey, JSON.stringify(cacheData), 'EX', SUMMARIZATION_CACHE_TTL);
+        console.log('Summarization: Cached result for 30 minutes');
+      } catch (cacheError) {
+        console.warn('Summarization: Failed to cache result:', cacheError.message);
+        // Continue even if caching fails
+      }
+    }
+
     // NOTE: This function does NOT update the message history in Redis
     // It is read-only and only provides a summary without affecting conversation state
 
@@ -1170,6 +1217,7 @@ exports.summarization = async (req, res) => {
       summary: finalText, 
       raw: rawText, 
       error: result?.error,
+      cached: false,
       note: 'This summary was generated without updating conversation history'
     });
 
