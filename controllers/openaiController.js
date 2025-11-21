@@ -1060,6 +1060,129 @@ exports.analyzeTransactions = async (req, res) => {
 };
 
 // ----------------------------
+// 📊 Summarization endpoint (read-only, does not update history)
+// ----------------------------
+exports.summarization = async (req, res) => {
+  try {
+    console.log('Summarization endpoint called');
+    const { plaidTransactions, forecastedTransactions, balances, userData } = req.body;
+    
+    console.log('Summarization: Processing', transactions?.length || 0, 'transactions');
+    const sessionKey = buildSessionKey(req);
+
+    // Load history from Redis (read-only, will not update)
+    let history = [];
+    try {
+      const historyData = await redis.get(sessionKey);
+      history = historyData ? JSON.parse(historyData) : [];
+      console.log('Summarization: Loaded history length:', history.length);
+    } catch (redisError) {
+      console.warn('Summarization: Redis history load failed:', redisError.message);
+      history = [];
+    }
+
+    const { token, userId, authHeader } = extractAuthFromRequest(req);
+    let userContext = extractContextFromBody(req) || {};
+
+    const systemPrompt = `You are the Keacast Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Your purpose is to help users gain clarity, confidence, and foresight into their cash flow habits. You combine real-time transactions with forecasting to help users plan ahead, avoid surprises, and make better financial decisions.
+
+    Generate a concise (a couple of sentences) summary of the user's financial situation based on their transaction history, account balances, forecasted transactions, and chat conversation. The summary should include:
+    - Overall financial health assessment
+    - Total income and total spending patterns
+    - Forecasted income and spending trends
+    - Forecasted disposable income for the next 30 days
+    - Key financial patterns and habits identified
+    - Notable transactions (high-value, unusual, or recurring)
+    - Areas of concern or opportunities for improvement
+    - Actionable recommendations for financial wellness
+    - Always use dollar amounts when providing financial information.
+    - Always use the word "disposable" when referring to disposable income.
+    - Always use the word "forecasted" when referring to forecasted income and spending.  
+    - if referring to an expense or expense transaction always use the word "expense" and not "transaction".
+    - if referring to an income or income transaction always use the word "income" and not "transaction".
+    - if referring to an expense always use (-) to symbolize negative amounts.  
+    - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
+    - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
+    - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
+    - Use tables when displaying data in a structured way.
+
+    Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast's strengths: forecasting, reconciliation, and visualization.
+
+    IMPORTANT: Always respond with markdown formatting. Use headers, bullet points, bold text, and other markdown elements to make your responses clear and well-structured.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...sanitizeMessageArray(history),
+      { role: 'user', content: `Here is my user's first name:
+      ${JSON.stringify(userData?.firstname || '', null, 2)}
+      Here is my user's last name:
+      ${JSON.stringify(userData?.lastname || '', null, 2)}
+      Here is my user's email:
+      ${JSON.stringify(userData?.email || '', null, 2)}
+      
+      Here are the latest transactions:\n${JSON.stringify(transactions || [])}
+      
+      Please provide a concise (a couple of sentences) summary of my financial situation based on my transaction history, account balances, forecasted transactions, and our conversation.` }
+    ];
+
+    console.log('Summarization: Calling OpenAI (tools enabled) with', messages.length, 'messages');
+
+    // Use the new executeToolCalls function for tool execution
+    const ctx = { userId, authHeader };
+    let result;
+    try {
+      const directResponse = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'none' });
+      const choice = directResponse?.choices?.[0];
+      result = { content: choice?.message?.content || '', raw: directResponse };
+    } catch (directError) {
+      console.log('Summarization: All attempts failed, returning error message');
+      result = { content: '## ❌ Error\n\n**I apologize, but I encountered an error while generating your financial summary. Please try again.**', raw: null, error: directError };
+    }
+
+    const finalText = result.content || '';
+    const rawText = result.raw;
+
+    // NOTE: This function does NOT update the message history in Redis
+    // It is read-only and only provides a summary without affecting conversation state
+
+    res.json({ 
+      summary: finalText, 
+      raw: rawText, 
+      error: result?.error,
+      note: 'This summary was generated without updating conversation history'
+    });
+
+  } catch (error) {
+    console.error('Summarization error:', error);
+    console.error('Error stack:', error.stack);
+    
+    // Handle specific error types
+    if (error.code === 'ECONNREFUSED') {
+      return res.status(503).json({ error: 'Service temporarily unavailable - Redis connection failed' });
+    }
+    if (error.response?.status === 401) {
+      return res.status(401).json({ error: 'Azure OpenAI authentication failed' });
+    }
+    if (error.response?.status === 400) {
+      return res.status(400).json({ 
+        error: 'Azure OpenAI request failed', 
+        details: error.response?.data?.error?.message || 'Invalid request format',
+        suggestion: 'Check API configuration and request format'
+      });
+    }
+    if (error.response?.status === 429) {
+      return res.status(429).json({ error: 'Rate limit exceeded' });
+    }
+    
+    // Generic error for other cases
+    res.status(500).json({ 
+      error: 'Internal server error',
+      details: error.message || 'Unknown error occurred'
+    });
+  }
+};
+
+// ----------------------------
 // 🏷️ Auto-categorization endpoint
 // ----------------------------
 exports.autoCategorizeTransaction = async (req, res) => {
