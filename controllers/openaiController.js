@@ -1119,6 +1119,7 @@ exports.summarization = async (req, res) => {
     - "Quick heads up, [FirstName]: Your balance is projected to drop to -$150 in 8 days based on your forecasted transactions. Might want to plan ahead for that!"
 
     **Important:**
+    - Limit your response to a couple of sentences max (2-3 sentences) and do not exceed 300 characters.
     - Always use the user's first name
     - Keep responses very concise and scannable
     - Focus on actionable insights and interesting tidbits
