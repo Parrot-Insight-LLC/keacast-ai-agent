@@ -80,7 +80,8 @@ app.get('/', (req, res) => {
         summarize: 'POST /api/agent/summarize',
         chat: 'POST /api/agent/chat',
         clearHistory: 'DELETE /api/agent/clear-history',
-        testRedis: 'GET /api/agent/test-redis'
+        testRedis: 'GET /api/agent/test-redis',
+        summarization: 'POST /api/agent/summarization'
       },
       cache: {
         invalidateUser: 'DELETE /api/cache/user/:userId',
