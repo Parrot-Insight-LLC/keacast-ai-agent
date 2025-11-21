@@ -1081,33 +1081,29 @@ exports.summarization = async (req, res) => {
     }
 
     const { token, userId, authHeader } = extractAuthFromRequest(req);
-    let userContext = extractContextFromBody(req) || {};
 
     const systemPrompt = `You are the Keacast Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Your purpose is to help users gain clarity, confidence, and foresight into their cash flow habits. You combine real-time transactions with forecasting to help users plan ahead, avoid surprises, and make better financial decisions.
 
-    Generate a concise (a couple of sentences) summary of the user's financial situation based on their transaction history, account balances, forecasted transactions, and chat conversation. The summary should include:
-    - Overall financial health assessment
-    - Total income and total spending patterns
-    - Forecasted income and spending trends
+    Generate a concise but informative summary (2-4 sentences) of the user's financial situation based on their transaction history, account balances, forecasted transactions, and chat conversation. Focus on the most important insights:
+    - Overall financial health and current status
+    - Key income and spending patterns
     - Forecasted disposable income for the next 30 days
-    - Key financial patterns and habits identified
-    - Notable transactions (high-value, unusual, or recurring)
-    - Areas of concern or opportunities for improvement
-    - Actionable recommendations for financial wellness
-    - Always use dollar amounts when providing financial information.
-    - Always use the word "disposable" when referring to disposable income.
-    - Always use the word "forecasted" when referring to forecasted income and spending.  
-    - if referring to an expense or expense transaction always use the word "expense" and not "transaction".
-    - if referring to an income or income transaction always use the word "income" and not "transaction".
-    - if referring to an expense always use (-) to symbolize negative amounts.  
+    - Any notable concerns or opportunities
+
+    Formatting guidelines:
+    - Always use dollar amounts when providing financial information
+    - Always use the word "disposable" when referring to disposable income
+    - Always use the word "forecasted" when referring to forecasted income and spending
+    - If referring to an expense or expense transaction always use the word "expense" and not "transaction"
+    - If referring to an income or income transaction always use the word "income" and not "transaction"
+    - If referring to an expense always use (-) to symbolize negative amounts
     - Only use ($) when displaying amounts ex: $100, -$100, $1000.00, -$500.00, etc.
-    - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., dont use (-) for any other purpose.
-    - Use bullet points, numbered lists, bold text, italic text, and other markdown elements when listing transactions, suggestions, balances, etc.
-    - Use tables when displaying data in a structured way.
+    - Only use (-) for negative amounts ex: -$100, -$1000.00, -$500.00, etc., don't use (-) for any other purpose
+    - Use markdown formatting (bold text, bullet points) to make key information stand out
 
     Tone: clear, empathetic, professional, supportive, and future-focused. Always frame insights around Keacast's strengths: forecasting, reconciliation, and visualization.
 
-    IMPORTANT: Always respond with markdown formatting. Use headers, bullet points, bold text, and other markdown elements to make your responses clear and well-structured.`;
+    IMPORTANT: Keep the summary concise (2-4 sentences) but informative. Use markdown formatting for emphasis.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -1123,20 +1119,20 @@ exports.summarization = async (req, res) => {
       Here are the forecasted transactions:\n${JSON.stringify(forecastedTransactions || [])}
       Here are the account balances:\n${JSON.stringify(balances || [])}
       
-      Please provide a concise (a couple of sentences) summary of my financial situation based on my transaction history, account balances, forecasted transactions, and our conversation.` }
+      Please provide a concise (2-4 sentences) summary of my financial situation based on my transaction history, account balances, forecasted transactions, and our conversation.` }
     ];
 
-    console.log('Summarization: Calling OpenAI (tools enabled) with', messages.length, 'messages');
+    console.log('Summarization: Calling OpenAI with', messages.length, 'messages');
 
-    // Use the new executeToolCalls function for tool execution
-    const ctx = { userId, authHeader };
     let result;
     try {
-      const directResponse = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'none',
-        temperature: 0.1, // Low temperature for consistent categorization
-        max_tokens: 30, // Even shorter response, just the category name
-        timeout: 10000 // 10 second timeout
-       });
+      const directResponse = await queryAzureOpenAI(messages, { 
+        tools: functionSchemas, 
+        tool_choice: 'none',
+        temperature: 0.3, // Moderate temperature for natural but consistent summaries
+        max_tokens: 250, // Allow enough tokens for a concise but informative summary (2-4 sentences)
+        timeout: 15000 // 15 second timeout for summary generation
+      });
       const choice = directResponse?.choices?.[0];
       result = { content: choice?.message?.content || '', raw: directResponse };
     } catch (directError) {
