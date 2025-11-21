@@ -113,4 +113,6 @@ router.get('/summary/:userId/:accountId', async (req, res) => {
   }
 });
 
+router.post('/summarization', summarization);
+
 module.exports = router;
