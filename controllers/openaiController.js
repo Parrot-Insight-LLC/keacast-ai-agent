@@ -1067,7 +1067,6 @@ exports.summarization = async (req, res) => {
     console.log('Summarization endpoint called');
     const { plaidTransactions, forecastedTransactions, balances, userData } = req.body;
     
-    console.log('Summarization: Processing', transactions?.length || 0, 'transactions');
     const sessionKey = buildSessionKey(req);
 
     // Load history from Redis (read-only, will not update)
@@ -1120,7 +1119,9 @@ exports.summarization = async (req, res) => {
       Here is my user's email:
       ${JSON.stringify(userData?.email || '', null, 2)}
       
-      Here are the latest transactions:\n${JSON.stringify(transactions || [])}
+      Here are the latest transactions:\n${JSON.stringify(plaidTransactions || [])}
+      Here are the forecasted transactions:\n${JSON.stringify(forecastedTransactions || [])}
+      Here are the account balances:\n${JSON.stringify(balances || [])}
       
       Please provide a concise (a couple of sentences) summary of my financial situation based on my transaction history, account balances, forecasted transactions, and our conversation.` }
     ];
