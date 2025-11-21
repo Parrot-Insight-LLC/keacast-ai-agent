@@ -1132,7 +1132,11 @@ exports.summarization = async (req, res) => {
     const ctx = { userId, authHeader };
     let result;
     try {
-      const directResponse = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'none' });
+      const directResponse = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'none',
+        temperature: 0.1, // Low temperature for consistent categorization
+        max_tokens: 30, // Even shorter response, just the category name
+        timeout: 10000 // 10 second timeout
+       });
       const choice = directResponse?.choices?.[0];
       result = { content: choice?.message?.content || '', raw: directResponse };
     } catch (directError) {

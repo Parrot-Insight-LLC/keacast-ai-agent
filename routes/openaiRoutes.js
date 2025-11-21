@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction } = require('../controllers/openaiController');
+const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction, summarization } = require('../controllers/openaiController');
 const {redisTest} = require('../controllers/openaiController');
 
 // Chat and analysis endpoints
