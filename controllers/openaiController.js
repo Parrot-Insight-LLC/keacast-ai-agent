@@ -1528,7 +1528,12 @@ Rules:
 // the same merchant repeats constantly during reconcile sessions and we don't
 // need to round-trip OpenAI for every duplicate.
 const AUTOCATEGORIZE_CACHE_TTL = 60 * 60 * 24 * 7; // 7 days
-const AUTOCATEGORIZE_HISTORY_LIMIT = 12;           // tightened from 50/200
+// Total cap on items handed to the LLM after pickRelevantHistory ranks by
+// merchant > Plaid PFC > legacy category. Bumped from 12 → 100 to give the
+// model richer context for ambiguous merchants. Each item is compacted
+// (description trimmed to 80 chars) so 100 items lands in the ballpark of
+// ~3–4K prompt tokens — well within the deployment's context budget.
+const AUTOCATEGORIZE_HISTORY_LIMIT = 100;
 const AUTOCATEGORIZE_TIMEOUT_MS = 10000;
 
 // Always returns a non-empty string. Used at every site that produces
