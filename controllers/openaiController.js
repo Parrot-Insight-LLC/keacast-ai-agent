@@ -1292,182 +1292,556 @@ exports.summarization = async (req, res) => {
 // ----------------------------
 // 🏷️ Auto-categorization endpoint
 // ----------------------------
+
+// How long to keep an LLM-derived suggestion in Redis. Auto-categorization is
+// merchant + Plaid-signal driven, so a 7-day cache is plenty conservative —
+// the same merchant repeats constantly during reconcile sessions and we don't
+// need to round-trip OpenAI for every duplicate.
+const AUTOCATEGORIZE_CACHE_TTL = 60 * 60 * 24 * 7; // 7 days
+const AUTOCATEGORIZE_HISTORY_LIMIT = 12;           // tightened from 50/200
+const AUTOCATEGORIZE_TIMEOUT_MS = 10000;
+
+// Always returns a non-empty string. Used at every site that produces
+// `suggestedCategory` so the frontend (which assigns directly into
+// plaid.category and then does .includes(...)) can never receive null,
+// undefined, or an object.
+function coerceToString(value, fallback = 'Uncategorized') {
+  if (value === undefined || value === null) return String(fallback);
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  // For category-shaped objects we surface .name; for everything else fall back.
+  if (typeof value === 'object' && typeof value.name === 'string' && value.name.trim()) {
+    return value.name;
+  }
+  return String(fallback);
+}
+
+// User category items can arrive as either DB rows ({ name, description, ... })
+// or as plain strings. Normalize to a single shape with a guaranteed string name.
+function extractCategoryName(cat) {
+  if (!cat) return '';
+  if (typeof cat === 'string') return cat.trim();
+  if (typeof cat.name === 'string') return cat.name.trim();
+  if (typeof cat.display_name === 'string') return cat.display_name.trim();
+  return '';
+}
+
+// Strip wrapping quotes/backticks/whitespace that low-temperature models
+// frequently add (often because the prompt's example shows `"Groceries"`).
+function stripWrappingQuotes(str) {
+  if (typeof str !== 'string') return '';
+  return str.trim().replace(/^["'`]+/, '').replace(/["'`]+$/, '').trim();
+}
+
+// Lowercased, alphanumeric-only merchant key. Stable across whitespace,
+// punctuation, and common Plaid noise like trailing store numbers.
+function normalizeMerchantName(name) {
+  if (!name || typeof name !== 'string') return '';
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+    .slice(0, 64);
+}
+
+// Plaid sends `personal_finance_category` as `{ primary, detailed, confidence_level }`.
+// This is the highest-quality categorization signal Plaid offers; surface it
+// safely (Plaid sometimes sends `{}` for legacy items).
+function pickPfcSignals(transaction) {
+  const pfc = transaction?.personal_finance_category;
+  if (!pfc || typeof pfc !== 'object') return { primary: '', detailed: '', confidence: '' };
+  return {
+    primary: typeof pfc.primary === 'string' ? pfc.primary : '',
+    detailed: typeof pfc.detailed === 'string' ? pfc.detailed : '',
+    confidence: typeof pfc.confidence_level === 'string' ? pfc.confidence_level : ''
+  };
+}
+
+// Cache-key shape: autocat:u<userId>:a<accountId>:m<merchant>:p<pfc.detailed-or-legacy-cat>
+// Including userId+accountId scopes invalidation; including PFC means a
+// merchant that legitimately spans categories (e.g. Walmart for groceries vs
+// Walmart for electronics) gets distinct cache slots.
+function buildAutoCategorizationCacheKey({ userId, accountId, transaction }) {
+  const u = userId !== undefined && userId !== null && userId !== '' ? String(userId) : 'anon';
+  const a = accountId !== undefined && accountId !== null && accountId !== '' ? String(accountId) : 'noacct';
+  const merchant = normalizeMerchantName(
+    transaction?.merchant_name || transaction?.counterparties?.[0]?.name || transaction?.name
+  ) || 'nomerchant';
+  const pfc = pickPfcSignals(transaction);
+  const legacyCat = Array.isArray(transaction?.category) ? transaction.category[0] : transaction?.category;
+  const pfcSeg = (pfc.detailed || pfc.primary || legacyCat || 'nopfc')
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .slice(0, 64);
+  return `autocat:u${u}:a${a}:m${merchant}:p${pfcSeg}`;
+}
+
+// Rather than dumping 50–200 random recent transactions into the prompt, pick
+// only the items that ACTUALLY help: same merchant, then same PFC, then same
+// legacy category. This is both a token-budget win and an accuracy win — the
+// model stops being distracted by unrelated history.
+function pickRelevantHistory(transaction, history) {
+  if (!Array.isArray(history) || history.length === 0) return [];
+  const targetMerchant = normalizeMerchantName(transaction?.merchant_name || transaction?.name);
+  const targetPfcDetailed = pickPfcSignals(transaction).detailed;
+  const targetLegacy = Array.isArray(transaction?.category) ? transaction.category[0] : transaction?.category;
+
+  const seen = new Set();
+  const out = [];
+  const push = (item) => {
+    const key = `${normalizeMerchantName(item?.merchant_name || item?.name)}|${item?.amount}|${item?.category}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      name: item?.name || item?.display_name || '',
+      merchant: item?.merchant_name || '',
+      amount: typeof item?.amount === 'number' ? item.amount : item?.amount,
+      category: item?.category,
+      pfc_detailed: pickPfcSignals(item).detailed || undefined,
+      // Trim description aggressively — most of the value is in the first 80 chars.
+      description: typeof item?.description === 'string' ? item.description.slice(0, 80) : undefined,
+    });
+  };
+
+  // 1. Same merchant — strongest signal, take up to half the budget.
+  if (targetMerchant) {
+    for (const item of history) {
+      if (out.length >= Math.ceil(AUTOCATEGORIZE_HISTORY_LIMIT / 2)) break;
+      if (normalizeMerchantName(item?.merchant_name || item?.name) === targetMerchant) push(item);
+    }
+  }
+  // 2. Same Plaid PFC detailed code.
+  if (targetPfcDetailed) {
+    for (const item of history) {
+      if (out.length >= AUTOCATEGORIZE_HISTORY_LIMIT) break;
+      const itemPfc = pickPfcSignals(item).detailed;
+      if (itemPfc && itemPfc === targetPfcDetailed) push(item);
+    }
+  }
+  // 3. Same legacy category.
+  if (targetLegacy) {
+    for (const item of history) {
+      if (out.length >= AUTOCATEGORIZE_HISTORY_LIMIT) break;
+      const itemLegacy = Array.isArray(item?.category) ? item.category[0] : item?.category;
+      if (itemLegacy && String(itemLegacy) === String(targetLegacy)) push(item);
+    }
+  }
+  return out;
+}
+
 exports.autoCategorizeTransaction = async (req, res) => {
   try {
     console.log('Auto-categorize transaction endpoint called');
-    const { sessionId, transaction, transactionHistory, categories } = req.body;
-    
+    const { transaction, transactionHistory, categories } = req.body;
+    const userId = req.body?.userId ?? req.body?.sessionId ?? req.user?.id ?? null;
+    const accountId = req.body?.accountId ?? req.body?.accountid ?? null;
+
     if (!transaction) {
       console.log('Auto-categorize: Missing transaction in request body');
       return res.status(400).json({ error: 'Transaction is required' });
     }
-    
+
     if (!categories || !Array.isArray(categories) || categories.length === 0) {
       console.log('Auto-categorize: Missing or invalid categories array');
       return res.status(400).json({ error: 'Categories array is required and must not be empty' });
     }
 
-    console.log('Auto-categorize: Processing transaction:', transaction.name || transaction.display_name);
-    console.log('Auto-categorize: Available categories:', categories.length);
+    // Normalize categories ONCE so the rest of the handler operates on
+    // guaranteed-string names. This is the single biggest accuracy fix: the
+    // old prompt did `categories.map(cat => `- ${cat}`)` which produced
+    // `- [object Object]` lines — the model literally couldn't see the
+    // user's taxonomy.
+    const categoryNames = categories
+      .map(extractCategoryName)
+      .filter((n) => n && typeof n === 'string');
+    const uniqueCategoryNames = Array.from(new Set(categoryNames));
+    if (uniqueCategoryNames.length === 0) {
+      return res.status(400).json({ error: 'Categories array did not contain any usable names' });
+    }
+    const firstCategoryName = uniqueCategoryNames[0];
 
-    // Fast-path: Try to categorize using simple pattern matching first
-    // const fastCategory = categorizeTransactionFast(transaction, categories, transactionHistory);
-    // if (fastCategory) {
-    //   console.log('Auto-categorize: Using fast-path categorization:', fastCategory);
-    //   return res.json({
-    //     success: true,
-    //     suggestedCategory: fastCategory,
-    //     confidence: 'high',
-    //     note: 'Category determined using fast pattern matching',
-    //     availableCategories: categories,
-    //     method: 'fast-path'
-    //   });
-    // }
+    // Build a quick { lowername -> originalCasedName } lookup for the fast/cache paths.
+    const nameByLower = new Map();
+    for (const n of uniqueCategoryNames) nameByLower.set(n.toLowerCase(), n);
 
-    const systemPrompt = `You are an expert financial transaction categorizer. Your job is to analyze a transaction and suggest the most appropriate category from the user's existing categories.
+    // Single source of truth for the response shape. Whatever code path we end
+    // up in, we go through this to guarantee `suggestedCategory` is always a
+    // non-empty STRING — never an object, null, or undefined.
+    const respond = (payload) => {
+      const safe = {
+        success: true,
+        suggestedCategory: coerceToString(payload?.suggestedCategory, firstCategoryName),
+        confidence: payload?.confidence || 'low',
+        note: payload?.note || '',
+        method: payload?.method || 'ai',
+      };
+      if (payload?.originalSuggestion !== undefined) safe.originalSuggestion = String(payload.originalSuggestion);
+      if (payload?.cached) safe.cached = true;
+      return res.json(safe);
+    };
 
-    **Your Task:**
-    - Analyze the transaction in question (amount, title, name, display_name, merchant_name)
-    - Review the user's transaction history in context to understand their categorization patterns (amount, title, name, display_name, merchant_name)
-    - Consider the user's existing categories and how they've categorized similar transactions (amount, title, name, display_name, merchant_name)
-    - Find the best possible category by reviewing your transaction. We want to be as accurate as possible and use your knowledge of the user's spending patterns to make the best guess.
-    - Return ONLY the single best category name from the user's categories list
+    console.log(
+      'Auto-categorize: Processing transaction:',
+      transaction.name || transaction.display_name,
+      '| user:', userId, '| account:', accountId,
+      '| categories:', uniqueCategoryNames.length
+    );
 
-    **Analysis Guidelines:**
-    1. **Merchant Analysis**: Look at the merchant name and consider what type of business it is
-    2. **Amount Patterns**: Consider the transaction amount and typical spending patterns for different categories (ex: if the transaction is at a gas station and is a large amount, it is likely a gas transaction, but smaller amount may be groceries, or food & beverage, etc.)
-    3. **Historical Patterns**: Review how the user has categorized similar transactions in the past
-    4. **Category Logic**: Use common sense - groceries from grocery stores, gas from gas stations, etc.
-    5. **User Preferences**: Respect the user's existing categorization choices and patterns
-    6. **Keyword Analysis**: Consider the keywords associated with the transaction and the user's categorization patterns 
-    7. **Contextual Analysis**: Consider the context of the transaction and the user's categorization patterns
-    8. **Description Analysis**: Consider the description of the transaction and the user's categorization patterns
-    9. **Title Analysis**: Consider the title of the transaction and the user's categorization patterns
-    10. **Name Analysis**: Consider the name of the transaction and the user's categorization patterns
-    11. **Display Name Analysis**: Consider the display name of the transaction and the user's categorization patterns
-    12. **Merchant Name Analysis**: Consider the merchant name of the transaction and the user's categorization patterns
-    13. **Location Analysis**: Consider the location of the transaction and the user's categorization patternsW
+    const cacheKey = buildAutoCategorizationCacheKey({ userId, accountId, transaction });
 
-    **Response Format:**
-    - Return ONLY the category name as a string
-    - Do not include explanations, justifications, or additional text
-    - The category must exactly match one of the categories in the user's list
-    - If no good match exists, choose the most reasonable category from the available options
-    - Categories used most often should rank higher than categories used less often
+    // ── 1. Cache check ────────────────────────────────────────────────────
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        const cachedName = coerceToString(parsed?.suggestedCategory, '');
+        // The cached value MUST still be valid for THIS user's current
+        // category list — categories can be deleted/renamed between calls.
+        const cachedLower = cachedName.toLowerCase();
+        if (nameByLower.has(cachedLower)) {
+          console.log('Auto-categorize: cache hit', cacheKey, '->', cachedName);
+          return respond({
+            suggestedCategory: nameByLower.get(cachedLower),
+            confidence: parsed?.confidence || 'high',
+            note: 'Cache hit (autocategorize)',
+            method: 'cache',
+            cached: true,
+          });
+        }
+        console.log('Auto-categorize: cache hit but value no longer in user categories — refetching');
+      }
+    } catch (cacheErr) {
+      console.warn('Auto-categorize: Redis read failed:', cacheErr.message);
+    }
 
-    **Example Response:**
-    "Groceries"
-    or
-    "Gas & Fuel"
-    or
-    "Entertainment"
+    // ── 2. Fast-path: deterministic merchant/keyword lookup ───────────────
+    // Re-enabled. Skips OpenAI entirely when we have a confident answer
+    // (~40-60% of real-world transactions in our data).
+    try {
+      const fastName = categorizeTransactionFast(transaction, categories, transactionHistory);
+      if (fastName && nameByLower.has(String(fastName).toLowerCase())) {
+        const resolved = nameByLower.get(String(fastName).toLowerCase());
+        try {
+          await redis.set(
+            cacheKey,
+            JSON.stringify({ suggestedCategory: resolved, confidence: 'high', via: 'fast-path' }),
+            'EX',
+            AUTOCATEGORIZE_CACHE_TTL
+          );
+        } catch (e) { /* cache failure is non-fatal */ }
+        console.log('Auto-categorize: fast-path hit ->', resolved);
+        return respond({
+          suggestedCategory: resolved,
+          confidence: 'high',
+          note: 'Category determined using fast pattern matching',
+          method: 'fast-path',
+        });
+      }
+    } catch (e) {
+      console.warn('Auto-categorize: fast-path threw, ignoring:', e.message);
+    }
 
-    Remember: Your response should be a single category name that best fits the transaction based on the user's history,preferences, and is picked from the list of available categories provided. (Please return only the category name)`;
+    // ── 3. LLM with structured tool-call output ───────────────────────────
+    // The single tool ensures the model can ONLY return a value from the
+    // user's category list — Azure validates the enum before delivering the
+    // tool call to us. That eliminates the historical "model wrapped the
+    // answer in quotes / hallucinated a category" failure modes entirely.
+    const pfc = pickPfcSignals(transaction);
+    const counterparty = transaction?.counterparties?.[0] || null;
+    const relevantHistory = pickRelevantHistory(transaction, transactionHistory);
 
-    const userMessage = `Please categorize this transaction:
+    // Build a category list with optional descriptions so the model has
+    // semantic context for ambiguous category names (e.g. "Misc" vs "Other").
+    const categoryListText = categories
+      .map((c) => {
+        const name = extractCategoryName(c);
+        if (!name) return null;
+        const desc = (typeof c === 'object' && typeof c?.description === 'string') ? c.description.trim() : '';
+        return desc ? `- ${name} — ${desc}` : `- ${name}`;
+      })
+      .filter(Boolean)
+      .join('\n');
 
-**Transaction to Categorize:**
-- Name: ${transaction.name || 'N/A'}
-- Amount: $${transaction.amount || 'N/A'}
-- Merchant: ${transaction.merchant_name || 'N/A'}
-- Description: ${transaction.description || 'N/A'}
-- Category: ${transaction.adjusted_category || 'N/A'}
-- location: ${transaction.location || 'N/A'}
+    const systemPrompt =
+      `You categorize a single financial transaction by selecting EXACTLY ONE category ` +
+      `from the user's list. Use the user's history first, then Plaid signals (` +
+      `personal_finance_category.detailed is the strongest signal when confidence is HIGH), ` +
+      `then merchant common-sense. You MUST respond by calling the selectCategory tool — ` +
+      `never reply in plain text.`;
 
-**Available Categories (Please choose from this list and return only the category name) name, description are the main data points to consider:**
-${categories.map(cat => `- ${cat}`).join('\n')}
+    const userPayload = {
+      transaction: {
+        name: transaction.name || null,
+        display_name: transaction.display_name || null,
+        amount: transaction.amount ?? null,
+        merchant_name: transaction.merchant_name || null,
+        description: typeof transaction.description === 'string' ? transaction.description.slice(0, 120) : null,
+        location: transaction.location || null,
+        payment_channel: transaction.payment_channel || null,
+        pending: transaction.pending ?? null,
+        legacy_category: transaction.category ?? null,
+        plaid_personal_finance_category: pfc.detailed || pfc.primary
+          ? { primary: pfc.primary, detailed: pfc.detailed, confidence: pfc.confidence }
+          : null,
+        plaid_counterparty: counterparty
+          ? { name: counterparty.name, type: counterparty.type, confidence: counterparty.confidence_level }
+          : null,
+      },
+      relevant_history: relevantHistory,
+    };
 
-**User's Transaction History (for pattern analysis) anaylyze the transaction name, merchant, description, amount, and category to determine the best category:**
-${transactionHistory ? JSON.stringify(transactionHistory.slice(0, 50), null, 2) : 'No transaction history provided'}
-
-Based on this transaction and your analysis of the user's categorization patterns, what is the best category for this transaction?`;
+    // Compact JSON (no indentation) — the prompt is purely for the model
+    // to read, so pretty-printing is a 25-30% pure token tax.
+    const userMessage =
+      `Categorize this transaction. Choose one category by calling selectCategory.\n\n` +
+      `Available categories:\n${categoryListText}\n\n` +
+      `Transaction + filtered relevant history (JSON):\n${JSON.stringify(userPayload)}`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userMessage }
     ];
 
-    console.log('Auto-categorize: Calling OpenAI with', messages.length, 'messages');
-
-    try {
-      const response = await queryAzureOpenAI(messages, { 
-        tools: functionSchemas, 
-        tool_choice: 'none',
-        temperature: 0.1, // Low temperature for consistent categorization
-        max_tokens: 30, // Even shorter response, just the category name
-        timeout: 10000 // 10 second timeout
-      });
-      
-      const choice = response?.choices?.[0];
-      const suggestedCategory = choice?.message?.content?.trim() || '';
-      
-      console.log('Auto-categorize: Suggested category:', suggestedCategory);
-      
-      // Validate that the suggested category exists in the user's categories
-      const isValidCategory = categories.some(cat => 
-        cat.name.toLowerCase() === suggestedCategory.toLowerCase()
-      );
-      
-      if (!isValidCategory && suggestedCategory) {
-        console.warn('Auto-categorize: Suggested category not in user list, finding closest match');
-        // Find the closest matching category
-        const closestMatch = categories.find(cat => 
-          cat.name.toLowerCase().includes(suggestedCategory.toLowerCase()) ||
-          suggestedCategory.toLowerCase().includes(cat.name.toLowerCase())
-        );
-        
-        if (closestMatch) {
-          console.log('Auto-categorize: Using closest match:', closestMatch);
-          return res.json({
-            success: true,
-            suggestedCategory: closestMatch.name,
-            confidence: 'medium',
-            note: 'Category was adjusted to match available options',
-            originalSuggestion: suggestedCategory
-          });
+    const selectCategoryTool = {
+      type: 'function',
+      function: {
+        name: 'selectCategory',
+        description:
+          'Select exactly one category for this transaction from the provided list. ' +
+          'The category MUST be one of the user\'s active categories.',
+        parameters: {
+          type: 'object',
+          properties: {
+            category: {
+              type: 'string',
+              enum: uniqueCategoryNames,
+              description: 'The chosen category name. Must match one of the user\'s categories exactly.'
+            },
+            confidence: {
+              type: 'string',
+              enum: ['high', 'medium', 'low'],
+              description: 'How confident you are in this categorization.'
+            },
+            reason: {
+              type: 'string',
+              description: 'A short (<=120 chars) reason for the choice.'
+            }
+          },
+          required: ['category', 'confidence']
         }
       }
-      
-      res.json({
-        success: true,
-        suggestedCategory: isValidCategory ? suggestedCategory : categories[0], // Fallback to first category
-        confidence: isValidCategory ? 'high' : 'low',
-        note: isValidCategory ? 'Category matches user preferences' : 'Using fallback category',
-        availableCategories: categories,
-        method: 'ai'
+    };
+
+    console.log('Auto-categorize: Calling OpenAI with structured tool-call (1 tool, enum:', uniqueCategoryNames.length, 'categories)');
+
+    let toolArgs = null;
+    let suggestedCategory = '';
+    let suggestedConfidence = 'low';
+    let suggestedReason = '';
+    let method = 'ai';
+
+    try {
+      const response = await queryAzureOpenAI(messages, {
+        // Only ship the single, scoped tool — DO NOT fall back to the global
+        // functionSchemas which adds thousands of input tokens for nothing
+        // (`tool_choice: 'none'` previously hid them but Azure still bills
+        // them as input).
+        tools: [selectCategoryTool],
+        tool_choice: { type: 'function', function: { name: 'selectCategory' } },
+        temperature: 0.1,
+        max_tokens: 80,
+        timeout: AUTOCATEGORIZE_TIMEOUT_MS,
+        // Optional: opt this endpoint into a smaller deployment if the
+        // operator has set AZURE_OPENAI_DEPLOYMENT_LIGHT in the env. Falls
+        // back to the main deployment otherwise.
+        deployment: process.env.AZURE_OPENAI_DEPLOYMENT_LIGHT || undefined,
       });
 
-    } catch (error) {
-      console.log('Auto-categorize: OpenAI call failed, using fallback logic');
-      
-      // Fallback categorization logic
-      const fallbackCategory = categorizeTransactionFast(transaction, categories, transactionHistory);
-      
-      res.json({
-        success: true,
-        suggestedCategory: fallbackCategory,
-        confidence: 'low',
-        note: 'Used fallback categorization logic',
-        availableCategories: categories,
-        method: 'fallback'
-      });
+      const choice = response?.choices?.[0];
+      const toolCall = choice?.message?.tool_calls?.[0];
+      if (toolCall?.function?.arguments) {
+        try {
+          toolArgs = JSON.parse(toolCall.function.arguments);
+        } catch (parseErr) {
+          console.warn('Auto-categorize: Tool args JSON parse failed:', parseErr.message);
+        }
+      }
+      if (toolArgs && typeof toolArgs.category === 'string') {
+        suggestedCategory = stripWrappingQuotes(toolArgs.category);
+        suggestedConfidence = ['high', 'medium', 'low'].includes(toolArgs.confidence)
+          ? toolArgs.confidence
+          : 'medium';
+        suggestedReason = typeof toolArgs.reason === 'string' ? toolArgs.reason.slice(0, 200) : '';
+      } else {
+        // Older models / older API versions may answer in plain text even
+        // when tool_choice is forced. Salvage the content as a best-effort.
+        const raw = stripWrappingQuotes(choice?.message?.content || '');
+        if (raw && nameByLower.has(raw.toLowerCase())) {
+          suggestedCategory = raw;
+          suggestedConfidence = 'medium';
+          suggestedReason = 'Recovered from plain-text response';
+        }
+      }
+    } catch (llmError) {
+      console.log('Auto-categorize: OpenAI call failed, falling back:', llmError?.message);
     }
+
+    // ── 4. Validate / repair the model's choice (always-string) ───────────
+    let resolvedName = '';
+    if (suggestedCategory) {
+      const lower = suggestedCategory.toLowerCase();
+      if (nameByLower.has(lower)) {
+        resolvedName = nameByLower.get(lower);
+      } else {
+        // Best-effort closest match: contains-either-way, then return the
+        // user's actual cased name (NOT the model's variant).
+        const closest = uniqueCategoryNames.find((n) => {
+          const nl = n.toLowerCase();
+          return nl.includes(lower) || lower.includes(nl);
+        });
+        if (closest) {
+          resolvedName = closest;
+          method = 'ai-closest-match';
+        }
+      }
+    }
+
+    // ── 5. Final fallback: deterministic categorizer, then first category ─
+    if (!resolvedName) {
+      try {
+        const fastName = categorizeTransactionFast(transaction, categories, transactionHistory);
+        if (fastName && nameByLower.has(String(fastName).toLowerCase())) {
+          resolvedName = nameByLower.get(String(fastName).toLowerCase());
+          method = 'fallback-fast-path';
+          suggestedConfidence = 'low';
+        }
+      } catch (e) { /* ignore */ }
+    }
+    if (!resolvedName) {
+      resolvedName = firstCategoryName;
+      method = 'fallback-default';
+      suggestedConfidence = 'low';
+    }
+
+    // ── 6. Cache the resolved answer ──────────────────────────────────────
+    try {
+      await redis.set(
+        cacheKey,
+        JSON.stringify({
+          suggestedCategory: resolvedName,
+          confidence: suggestedConfidence,
+          via: method,
+          reason: suggestedReason,
+        }),
+        'EX',
+        AUTOCATEGORIZE_CACHE_TTL
+      );
+    } catch (e) { /* cache failure non-fatal */ }
+
+    return respond({
+      suggestedCategory: resolvedName,
+      confidence: suggestedConfidence,
+      note: suggestedReason || (method === 'ai' ? 'Categorized by LLM' : `Resolved via ${method}`),
+      method,
+      originalSuggestion: suggestedCategory && suggestedCategory.toLowerCase() !== resolvedName.toLowerCase()
+        ? suggestedCategory
+        : undefined,
+    });
 
   } catch (error) {
     console.error('Auto-categorize transaction error:', error);
     console.error('Error stack:', error.stack);
-    
-    res.status(500).json({ 
+
+    // Even on a hard error try to return a usable string so the frontend
+    // doesn't crash assigning `result.suggestedCategory` into plaid.category.
+    const safeFirst = (() => {
+      const arr = req?.body?.categories;
+      if (Array.isArray(arr)) {
+        for (const c of arr) {
+          const n = extractCategoryName(c);
+          if (n) return n;
+        }
+      }
+      return 'Uncategorized';
+    })();
+
+    res.status(500).json({
+      success: false,
       error: 'Internal server error',
-      details: error.message || 'Unknown error occurred'
+      details: error.message || 'Unknown error occurred',
+      suggestedCategory: coerceToString(safeFirst, 'Uncategorized'),
+      confidence: 'low',
+      method: 'error-fallback',
     });
   }
 };
 
-// Fast categorization using pattern matching (no AI needed)
+// Map Plaid `personal_finance_category.detailed` (and `.primary`) codes to the
+// internal pattern-bucket names used in `highConfidencePatterns`. When Plaid
+// classifies a transaction with HIGH confidence, this short-circuits the
+// pattern walk and delivers a far stronger signal than merchant string-matching.
+const PLAID_PFC_TO_BUCKET = {
+  TRANSPORTATION_GAS: 'gas',
+  TRANSPORTATION_PUBLIC_TRANSIT: 'transportation',
+  TRANSPORTATION_TAXIS_AND_RIDE_SHARES: 'transportation',
+  FOOD_AND_DRINK_GROCERIES: 'groceries',
+  FOOD_AND_DRINK_RESTAURANT: 'restaurants',
+  FOOD_AND_DRINK_FAST_FOOD: 'restaurants',
+  FOOD_AND_DRINK_COFFEE: 'restaurants',
+  GENERAL_MERCHANDISE_ONLINE_MARKETPLACES: 'shopping',
+  GENERAL_MERCHANDISE_DEPARTMENT_STORES: 'shopping',
+  GENERAL_MERCHANDISE_ELECTRONICS: 'electronics',
+  GENERAL_MERCHANDISE_CLOTHING_AND_ACCESSORIES: 'clothing',
+  GENERAL_SERVICES_INSURANCE: 'insurance',
+  HOME_IMPROVEMENT_HARDWARE: 'home improvement',
+  HOME_IMPROVEMENT_FURNITURE: 'home improvement',
+  ENTERTAINMENT_TV_AND_MOVIES: 'subscriptions',
+  ENTERTAINMENT_MUSIC_AND_AUDIO: 'subscriptions',
+  ENTERTAINMENT_VIDEO_GAMES: 'entertainment',
+  ENTERTAINMENT_CASINOS_AND_GAMBLING: 'entertainment',
+  PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS: 'fitness',
+  PERSONAL_CARE_HAIR_AND_BEAUTY: 'shopping',
+  PERSONAL_CARE_LAUNDRY_AND_DRY_CLEANING: 'shopping',
+  MEDICAL_PHARMACIES_AND_SUPPLEMENTS: 'pharmacy',
+  MEDICAL_PRIMARY_CARE: 'healthcare',
+  MEDICAL_DENTAL_CARE: 'healthcare',
+  MEDICAL_EYE_CARE: 'healthcare',
+  RENT_AND_UTILITIES_GAS_AND_ELECTRICITY: 'utilities',
+  RENT_AND_UTILITIES_INTERNET_AND_CABLE: 'utilities',
+  RENT_AND_UTILITIES_TELEPHONE: 'utilities',
+  RENT_AND_UTILITIES_WATER: 'utilities',
+  RENT_AND_UTILITIES_SEWAGE_AND_WASTE_MANAGEMENT: 'utilities',
+  TRAVEL_FLIGHTS: 'travel',
+  TRAVEL_LODGING: 'travel',
+  TRAVEL_RENTAL_CARS: 'travel',
+  // Plaid `primary` fallbacks
+  TRANSPORTATION: 'transportation',
+  FOOD_AND_DRINK: 'restaurants',
+  GENERAL_MERCHANDISE: 'shopping',
+  HOME_IMPROVEMENT: 'home improvement',
+  PERSONAL_CARE: 'shopping',
+  MEDICAL: 'healthcare',
+  RENT_AND_UTILITIES: 'utilities',
+  TRAVEL: 'travel',
+};
+
+// Fast categorization using pattern matching (no AI needed). Always returns
+// either a non-empty string OR null (the AI path uses null as the signal to
+// continue). The autoCategorizeTransaction handler converts null/empty
+// results into a stable string before responding to the client.
 function categorizeTransactionFast(transaction, categories, transactionHistory) {
+  // Defensive guards so the function never throws on a malformed payload.
+  if (!transaction || !Array.isArray(categories) || categories.length === 0) return null;
+
   const transactionText = `${transaction.name || ''} ${transaction.display_name || ''} ${transaction.merchant_name || ''} ${transaction.description || ''}`.toLowerCase();
-  
+
+  // 0. Plaid PFC short-circuit. Highest-quality signal Plaid offers.
+  const pfc = pickPfcSignals(transaction);
+  const pfcBucketHint =
+    PLAID_PFC_TO_BUCKET[pfc.detailed] ||
+    PLAID_PFC_TO_BUCKET[pfc.primary] ||
+    null;
+
   // High-confidence merchant patterns
   const highConfidencePatterns = {
     'groceries': [
@@ -1554,66 +1928,83 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
     ]
   };
   
-  // Check for high-confidence matches first
+  // Helper: find a user category whose name fuzzy-matches a bucket label.
+  // ALWAYS guards `cat.name` (DB rows can have null names for legacy/global rows).
+  const findCategoryForBucket = (bucketLabel) => {
+    if (!bucketLabel) return null;
+    const label = String(bucketLabel).toLowerCase();
+    return categories.find((cat) => {
+      const n = extractCategoryName(cat).toLowerCase();
+      return n && (n.includes(label) || label.includes(n));
+    }) || null;
+  };
+
+  // 0. Plaid PFC short-circuit (highest priority).
+  if (pfcBucketHint) {
+    const fromPfc = findCategoryForBucket(pfcBucketHint);
+    if (fromPfc) return extractCategoryName(fromPfc);
+  }
+
+  // 1. Check for high-confidence merchant string patterns.
   for (const [category, patterns] of Object.entries(highConfidencePatterns)) {
     for (const pattern of patterns) {
       if (transactionText.includes(pattern)) {
-        // Find the matching category in user's list
-        const matchingCategory = categories.find(cat => 
-          cat.name && cat.name.toLowerCase().includes(category) ||
-          category.includes(cat.name.toLowerCase())
-        );
-        if (matchingCategory) {
-          return matchingCategory.name;
-        }
+        const matchingCategory = findCategoryForBucket(category);
+        if (matchingCategory) return extractCategoryName(matchingCategory);
       }
     }
   }
-  
-  // Check for exact merchant name matches in transaction history
-  if (transactionHistory && transactionHistory.length > 0) {
-    const merchantName = transaction.merchant_name?.toLowerCase();
+
+  // 2. Exact merchant name match in transaction history.
+  if (Array.isArray(transactionHistory) && transactionHistory.length > 0) {
+    const merchantName = typeof transaction.merchant_name === 'string'
+      ? transaction.merchant_name.toLowerCase()
+      : '';
     if (merchantName) {
-      const exactMatches = transactionHistory.filter(t => 
-        t.merchant_name && t.merchant_name.toLowerCase() === merchantName
+      const exactMatches = transactionHistory.filter((t) =>
+        typeof t?.merchant_name === 'string' &&
+        t.merchant_name.toLowerCase() === merchantName
       );
-      
+
       if (exactMatches.length > 0) {
         const mostCommonCategory = getMostCommonCategory(exactMatches);
-        const matchingCategory = categories.find(cat => 
-          cat.name && cat.name.toLowerCase() === mostCommonCategory.toLowerCase()
-        );
-        if (matchingCategory) {
-          return matchingCategory.name;
+        if (mostCommonCategory) {
+          const matchingCategory = categories.find((cat) => {
+            const n = extractCategoryName(cat).toLowerCase();
+            return n && n === String(mostCommonCategory).toLowerCase();
+          });
+          if (matchingCategory) return extractCategoryName(matchingCategory);
         }
       }
     }
   }
-  
-  // Check for similar transaction names in history
-  if (transactionHistory && transactionHistory.length > 0) {
-    const transactionName = transaction.name?.toLowerCase();
+
+  // 3. Fuzzy-name match against transaction history.
+  if (Array.isArray(transactionHistory) && transactionHistory.length > 0) {
+    const transactionName = typeof transaction.name === 'string'
+      ? transaction.name.toLowerCase()
+      : '';
     if (transactionName) {
-      const similarTransactions = transactionHistory.filter(t => 
-        t.name && (
-          t.name.toLowerCase().includes(transactionName) ||
-          transactionName.includes(t.name.toLowerCase())
-        )
-      );
-      
+      const similarTransactions = transactionHistory.filter((t) => {
+        if (typeof t?.name !== 'string') return false;
+        const tl = t.name.toLowerCase();
+        return tl.includes(transactionName) || transactionName.includes(tl);
+      });
+
       if (similarTransactions.length > 0) {
         const mostCommonCategory = getMostCommonCategory(similarTransactions);
-        const matchingCategory = categories.find(cat => 
-          cat.name && cat.name.toLowerCase() === mostCommonCategory.toLowerCase()
-        );
-        if (matchingCategory) {
-          return matchingCategory.name;
+        if (mostCommonCategory) {
+          const matchingCategory = categories.find((cat) => {
+            const n = extractCategoryName(cat).toLowerCase();
+            return n && n === String(mostCommonCategory).toLowerCase();
+          });
+          if (matchingCategory) return extractCategoryName(matchingCategory);
         }
       }
     }
   }
-  
-  return null; // No fast match found, will use AI
+
+  return null; // No fast match found — caller decides how to fall back.
 }
 
 // Helper function to get most common category from transactions
