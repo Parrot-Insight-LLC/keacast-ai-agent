@@ -1692,56 +1692,173 @@ function buildAutoCategorizationCacheKey({ userId, accountId, transaction }) {
   return `autocat:u${u}:a${a}:m${merchant}:p${pfcSeg}`;
 }
 
+// Single source of truth for "what merchant is this transaction?" — the
+// frontend / Plaid both populate these fields inconsistently across providers
+// (Plaid sets `merchant_name`, MX often only sets `name`, manual entries
+// sometimes only set `display_name`). Resolving in this order means a
+// hand-entered "Costco gas" still pulls the same history bucket as the
+// Plaid-named "COSTCO GAS #421".
+function getMerchantKey(item) {
+  if (!item || typeof item !== 'object') return '';
+  return normalizeMerchantName(
+    item.merchant_name || item.display_name || item.name
+  );
+}
+
+function getLegacyCategory(item) {
+  if (!item || typeof item !== 'object') return '';
+  const cat = Array.isArray(item.category) ? item.category[0] : item.category;
+  return cat ? String(cat) : '';
+}
+
+function getNumericAmount(item) {
+  const n = typeof item?.amount === 'number' ? item.amount : Number(item?.amount);
+  return Number.isFinite(n) ? n : null;
+}
+
+// "Did the user pay roughly the same dollar amount?" — used as a strong
+// matching signal alongside merchant. Tolerance is generous (±25%) plus a
+// $5 floor so $9.99 vs $11.49 still matches. Sign must match (we never want
+// to confuse a refund for a charge or vice versa).
+function amountWithinBucket(target, candidate, pct = 0.25, floor = 5) {
+  if (!Number.isFinite(target) || !Number.isFinite(candidate)) return false;
+  if (Math.sign(target) !== Math.sign(candidate)) return false;
+  const tol = Math.max(Math.abs(target) * pct, floor);
+  return Math.abs(target - candidate) <= tol;
+}
+
+// Build a tiny, high-signal summary of how the user has historically
+// categorized transactions from the SAME merchant. This is the single most
+// useful hint for the LLM — far more compact than dumping a dozen history
+// rows and far more directly answers the question "what does this user
+// usually do here?".
+//
+// Returns null when there's no merchant or no history matches.
+function summarizeMerchantHistory(transaction, history) {
+  const target = getMerchantKey(transaction);
+  if (!target || !Array.isArray(history) || history.length === 0) return null;
+
+  const matches = history.filter((it) => getMerchantKey(it) === target);
+  if (matches.length === 0) return null;
+
+  // Tally categories with O(n) scan.
+  const counts = new Map();
+  const amounts = [];
+  for (const m of matches) {
+    const cat = getLegacyCategory(m);
+    if (cat) counts.set(cat, (counts.get(cat) || 0) + 1);
+    const amt = getNumericAmount(m);
+    if (amt !== null) amounts.push(amt);
+  }
+
+  let topCategory = '';
+  let topCount = 0;
+  for (const [cat, count] of counts.entries()) {
+    if (count > topCount) {
+      topCount = count;
+      topCategory = cat;
+    }
+  }
+
+  // Sort amounts and grab a few for the LLM to see typical price points.
+  amounts.sort((a, b) => a - b);
+  const sampleAmounts = amounts.length <= 3
+    ? amounts
+    : [amounts[0], amounts[Math.floor(amounts.length / 2)], amounts[amounts.length - 1]];
+
+  const targetAmt = getNumericAmount(transaction);
+  const inTypicalRange = targetAmt !== null && amounts.length > 0
+    ? amounts.some((a) => amountWithinBucket(targetAmt, a))
+    : null;
+
+  return {
+    merchant_key: target,
+    total_seen: matches.length,
+    top_category: topCategory || null,
+    top_category_count: topCount || 0,
+    unanimous: !!topCategory && topCount === matches.length,
+    sample_amounts: sampleAmounts,
+    target_amount_in_typical_range: inTypicalRange,
+  };
+}
+
 // Rather than dumping 50–200 random recent transactions into the prompt, pick
-// only the items that ACTUALLY help: same merchant, then same PFC, then same
-// legacy category. This is both a token-budget win and an accuracy win — the
-// model stops being distracted by unrelated history.
+// only the items that ACTUALLY help. Ranking order (highest signal first):
+//   1. Same merchant + amount-within-bucket  ← the user's strongest pattern
+//   2. Same merchant (any amount)
+//   3. Same Plaid PFC detailed code
+//   4. Same legacy category
+// Each pass runs against the same dedup `seen` set so we never count an item
+// twice and the order in `out` reflects the ranking — that's what the LLM
+// reads top-down.
 function pickRelevantHistory(transaction, history) {
   if (!Array.isArray(history) || history.length === 0) return [];
-  const targetMerchant = normalizeMerchantName(transaction?.merchant_name || transaction?.name);
+
+  const targetMerchant = getMerchantKey(transaction);
   const targetPfcDetailed = pickPfcSignals(transaction).detailed;
-  const targetLegacy = Array.isArray(transaction?.category) ? transaction.category[0] : transaction?.category;
+  const targetLegacy = getLegacyCategory(transaction);
+  const targetAmount = getNumericAmount(transaction);
 
   const seen = new Set();
   const out = [];
-  const push = (item) => {
-    const key = `${normalizeMerchantName(item?.merchant_name || item?.name)}|${item?.amount}|${item?.category}`;
+  const push = (item, matchedOn) => {
+    const key = `${getMerchantKey(item)}|${item?.amount}|${getLegacyCategory(item)}`;
     if (seen.has(key)) return;
     seen.add(key);
     out.push({
       name: item?.name || item?.display_name || '',
+      display_name: item?.display_name || undefined,
       merchant: item?.merchant_name || '',
-      amount: typeof item?.amount === 'number' ? item.amount : item?.amount,
-      category: item?.category,
+      amount: getNumericAmount(item),
+      category: getLegacyCategory(item) || undefined,
       pfc_detailed: pickPfcSignals(item).detailed || undefined,
       // Trim description aggressively — most of the value is in the first 80 chars.
       description: typeof item?.description === 'string' ? item.description.slice(0, 80) : undefined,
+      matched_on: matchedOn,
     });
   };
 
-  // 1. Same merchant — strongest signal, take up to half the budget.
-  if (targetMerchant) {
+  // 1. Same merchant + amount-within-bucket — the highest-signal combination.
+  //    Capped at ~30% of the total budget so we don't drown out other passes.
+  if (targetMerchant && targetAmount !== null) {
+    const cap = Math.max(3, Math.ceil(AUTOCATEGORIZE_HISTORY_LIMIT * 0.3));
     for (const item of history) {
-      if (out.length >= Math.ceil(AUTOCATEGORIZE_HISTORY_LIMIT / 2)) break;
-      if (normalizeMerchantName(item?.merchant_name || item?.name) === targetMerchant) push(item);
+      if (out.length >= cap) break;
+      if (
+        getMerchantKey(item) === targetMerchant &&
+        amountWithinBucket(targetAmount, getNumericAmount(item))
+      ) {
+        push(item, 'merchant+amount');
+      }
     }
   }
-  // 2. Same Plaid PFC detailed code.
+
+  // 2. Same merchant (any amount) — still strong, take up to half the budget.
+  if (targetMerchant) {
+    const cap = Math.max(out.length + 3, Math.ceil(AUTOCATEGORIZE_HISTORY_LIMIT * 0.5));
+    for (const item of history) {
+      if (out.length >= cap) break;
+      if (getMerchantKey(item) === targetMerchant) push(item, 'merchant');
+    }
+  }
+
+  // 3. Same Plaid PFC detailed code.
   if (targetPfcDetailed) {
     for (const item of history) {
       if (out.length >= AUTOCATEGORIZE_HISTORY_LIMIT) break;
       const itemPfc = pickPfcSignals(item).detailed;
-      if (itemPfc && itemPfc === targetPfcDetailed) push(item);
+      if (itemPfc && itemPfc === targetPfcDetailed) push(item, 'pfc');
     }
   }
-  // 3. Same legacy category.
+
+  // 4. Same legacy category.
   if (targetLegacy) {
     for (const item of history) {
       if (out.length >= AUTOCATEGORIZE_HISTORY_LIMIT) break;
-      const itemLegacy = Array.isArray(item?.category) ? item.category[0] : item?.category;
-      if (itemLegacy && String(itemLegacy) === String(targetLegacy)) push(item);
+      if (getLegacyCategory(item) === targetLegacy) push(item, 'category');
     }
   }
+
   return out;
 }
 
@@ -1878,12 +1995,22 @@ exports.autoCategorizeTransaction = async (req, res) => {
       .filter(Boolean)
       .join('\n');
 
+    const merchantSummary = summarizeMerchantHistory(transaction, transactionHistory);
+
     const systemPrompt =
       `You categorize a single financial transaction by selecting EXACTLY ONE category ` +
-      `from the user's list. Use the user's history first, then Plaid signals (` +
-      `personal_finance_category.detailed is the strongest signal when confidence is HIGH), ` +
-      `then merchant common-sense. You MUST respond by calling the selectCategory tool — ` +
-      `never reply in plain text.`;
+      `from the user's list. ALWAYS apply these signals in this strict priority order:\n` +
+      `1. merchant_history_summary — if total_seen ≥ 3 and the top category dominates (≥70%) ` +
+      `and target_amount_in_typical_range is true or null, use top_category. The user has ` +
+      `already told you what they want for this merchant.\n` +
+      `2. relevant_history rows where matched_on = "merchant+amount" — same merchant + similar ` +
+      `amount almost always means the same category.\n` +
+      `3. relevant_history rows where matched_on = "merchant" — same merchant, any amount.\n` +
+      `4. transaction.merchant_name → transaction.display_name → transaction.name common sense.\n` +
+      `5. plaid_personal_finance_category (detailed > primary) when its confidence is HIGH.\n` +
+      `6. relevant_history rows matched on pfc/category as weaker tiebreakers.\n` +
+      `Only fall back to general world knowledge when 1-6 give nothing useful.\n` +
+      `You MUST respond by calling the selectCategory tool — never reply in plain text.`;
 
     const userPayload = {
       transaction: {
@@ -1903,6 +2030,10 @@ exports.autoCategorizeTransaction = async (req, res) => {
           ? { name: counterparty.name, type: counterparty.type, confidence: counterparty.confidence_level }
           : null,
       },
+      // High-signal precomputed digest of how this user has historically
+      // categorized this exact merchant. The model should treat this as
+      // near-authoritative when total_seen ≥ 3 and the top category dominates.
+      merchant_history_summary: merchantSummary,
       relevant_history: relevantHistory,
     };
 
@@ -2150,6 +2281,34 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
   if (!transaction || !Array.isArray(categories) || categories.length === 0) return null;
 
   const transactionText = `${transaction.name || ''} ${transaction.display_name || ''} ${transaction.merchant_name || ''} ${transaction.description || ''}`.toLowerCase();
+
+  // Helper: find a user category by case-insensitive name match.
+  const findUserCategoryByName = (name) => {
+    if (!name) return null;
+    const target = String(name).toLowerCase();
+    return categories.find((cat) => extractCategoryName(cat).toLowerCase() === target) || null;
+  };
+
+  // -1. Authoritative user-history short-circuit. If the user has categorized
+  //     this same merchant 3+ times AND ≥70% of those rows agree on a single
+  //     category AND the target amount is in the typical range for that
+  //     merchant, we trust the user's prior choice. This is the strongest
+  //     possible signal — it directly mirrors what the user already does.
+  const merchantSummary = summarizeMerchantHistory(transaction, transactionHistory);
+  if (
+    merchantSummary &&
+    merchantSummary.total_seen >= 3 &&
+    merchantSummary.top_category &&
+    merchantSummary.top_category_count >= 3 &&
+    merchantSummary.top_category_count / merchantSummary.total_seen >= 0.7 &&
+    // amount_in_typical_range is `null` when target amount is missing — treat
+    // null as "no objection" rather than "fail" so we don't punish manual
+    // entries lacking a clean numeric amount.
+    merchantSummary.target_amount_in_typical_range !== false
+  ) {
+    const matched = findUserCategoryByName(merchantSummary.top_category);
+    if (matched) return extractCategoryName(matched);
+  }
 
   // 0. Plaid PFC short-circuit. Highest-quality signal Plaid offers.
   const pfc = pickPfcSignals(transaction);
