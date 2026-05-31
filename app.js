@@ -86,6 +86,9 @@ app.get('/', (req, res) => {
       cache: {
         invalidateUser: 'DELETE /api/cache/user/:userId',
         invalidateAccount: 'DELETE /api/cache/user/:userId/account/:accountId',
+        flushSummarization: 'DELETE /api/cache/flush/summarization (admin)',
+        flushAutoCategorize: 'DELETE /api/cache/flush/autocategorize (admin)',
+        flushAllLLM: 'DELETE /api/cache/flush/all (admin)',
         warmUp: 'POST /api/cache/warmup/:userId/account/:accountId',
         stats: 'GET /api/cache/stats/:userId',
         health: 'GET /api/cache/health'
