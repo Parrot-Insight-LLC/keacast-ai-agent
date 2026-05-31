@@ -64,7 +64,10 @@ function buildSummarizationCacheKey(sessionKey, accountId, plaidTransactions, fo
 // stays readable and so we can unit-test (or swap them out) easily.
 
 const SELECTED_ACCOUNT_TOOL_TTL = 300;   // 5 min Redis cache for the tool-layer fetch
-const SELECTED_ACCOUNT_TOOL_TIMEOUT_MS = 12000; // give the upstream API 12s before we fall back
+// /account/selected is heavy (live Plaid + multi-table joins + chart compute),
+// routinely 8–15s on cold accounts. 25s gives us reasonable headroom while
+// still surfacing a clear timeout instead of hanging forever.
+const SELECTED_ACCOUNT_TOOL_TIMEOUT_MS = 25000;
 
 function selectedAccountToolCacheKey(userId, accountId) {
   const u = normalizeAccountIdForCacheKey(userId);
@@ -1312,6 +1315,7 @@ exports.summarization = async (req, res) => {
     const accountId = req.body?.accountId ?? req.body?.accountid ?? null;
     const userDataFromBody = req.body?.userData;
     const clientDate = req.body?.clientDate || moment().format('YYYY-MM-DD');
+    const accountSnapshot = req.body?.accountSnapshot;
     const fallbackBody = {
       plaidTransactions: req.body?.plaidTransactions,
       forecastedTransactions: req.body?.forecastedTransactions,
@@ -1321,19 +1325,42 @@ exports.summarization = async (req, res) => {
     const sessionKey = buildSessionKey(req);
     const { token, userId, authHeader } = extractAuthFromRequest(req);
 
-    // ── Phase 2: Fetch the canonical account blob via the tool layer ──────
-    // This single call returns balance/available, savings (precomputed),
-    // futureNegativeBalances (precomputed), recents, upcoming, breakdown,
-    // plaidTransactions, etc. — i.e. EVERYTHING this endpoint needs to build
-    // a tight, accurate prompt without the frontend shipping us megabytes of
-    // raw transaction JSON.
+    // ── Phase 2: Resolve the account blob ────────────────────────────────
+    // Resolution order (fastest → slowest):
+    //   1. accountSnapshot in the request body — the frontend already
+    //      rendered the dashboard so it has every precomputed field
+    //      (balance/available/savings/futureNegativeBalances/recents/etc.).
+    //      Sending a 1–2 KB snapshot is ~50× faster than re-fetching.
+    //   2. Tool-layer fetch — for callers (older clients, server-to-server
+    //      jobs) that don't pre-populate a snapshot. /account/selected is
+    //      heavy so we cache the response for 5 minutes.
+    //   3. Legacy req.body arrays — last-resort minimum-viable context.
     let selectedAccount = null;
-    if (userId && token && accountId) {
+    let selectedAccountSource = 'none';
+
+    if (
+      accountSnapshot &&
+      typeof accountSnapshot === 'object' &&
+      (accountSnapshot.accountid !== undefined || typeof accountSnapshot.balance === 'number')
+    ) {
+      selectedAccount = accountSnapshot;
+      selectedAccountSource = 'snapshot';
+      console.log(
+        'Summarization: Using accountSnapshot from request body — recents:',
+        Array.isArray(accountSnapshot.recents) ? accountSnapshot.recents.length : 0,
+        'upcoming:',
+        Array.isArray(accountSnapshot.upcoming) ? accountSnapshot.upcoming.length : 0,
+        'savings:', !!accountSnapshot.savings
+      );
+    }
+
+    if (!selectedAccount && userId && token && accountId) {
       const toolCacheKey = selectedAccountToolCacheKey(userId, accountId);
       try {
         const cached = await redis.get(toolCacheKey);
         if (cached) {
           selectedAccount = JSON.parse(cached);
+          selectedAccountSource = 'tool-cache';
           console.log('Summarization: Using cached selected-account blob (5min TTL) for account', accountId);
         }
       } catch (e) {
@@ -1343,6 +1370,7 @@ exports.summarization = async (req, res) => {
       if (!selectedAccount) {
         try {
           console.log('Summarization: Fetching selected account via tool layer for', userId, accountId);
+          const t0 = Date.now();
           selectedAccount = await functionMap.getSelectedAccount({
             userId,
             accountId,
@@ -1350,6 +1378,8 @@ exports.summarization = async (req, res) => {
             body: { clientDate },
             timeoutMs: SELECTED_ACCOUNT_TOOL_TIMEOUT_MS,
           });
+          console.log('Summarization: Tool-layer fetch completed in', Date.now() - t0, 'ms');
+          selectedAccountSource = 'tool-fresh';
           if (selectedAccount && typeof selectedAccount === 'object') {
             try {
               await redis.set(toolCacheKey, JSON.stringify(selectedAccount), 'EX', SELECTED_ACCOUNT_TOOL_TTL);
@@ -1358,12 +1388,29 @@ exports.summarization = async (req, res) => {
             }
           }
         } catch (toolErr) {
-          console.warn('Summarization: Tool-layer fetch failed, falling back to request-body context:', toolErr.message);
+          // Surface enough detail to actually diagnose this in production logs:
+          // status code, response body snippet, and whether axios timed out.
+          const status = toolErr?.response?.status;
+          const data = toolErr?.response?.data;
+          console.warn(
+            'Summarization: Tool-layer fetch failed —',
+            'code:', toolErr?.code,
+            'status:', status,
+            'message:', toolErr?.message,
+            'body:', typeof data === 'string' ? data.slice(0, 200) : JSON.stringify(data || {}).slice(0, 200)
+          );
           selectedAccount = null;
         }
       }
-    } else {
-      console.log('Summarization: Missing userId/token/accountId — skipping tool-layer fetch and using request body.');
+    }
+
+    if (!selectedAccount) {
+      console.log(
+        'Summarization: No accountSnapshot or tool-layer data — falling back to legacy req.body arrays.',
+        'plaid:', Array.isArray(fallbackBody.plaidTransactions) ? fallbackBody.plaidTransactions.length : 0,
+        'forecast:', Array.isArray(fallbackBody.forecastedTransactions) ? fallbackBody.forecastedTransactions.length : 0,
+        'balances:', Array.isArray(fallbackBody.balances) ? fallbackBody.balances.length : 0
+      );
     }
 
     // ── Phase 3: Build cache key from a stable account fingerprint ────────
@@ -1484,9 +1531,7 @@ Rules:
       raw: rawText,
       error: result?.error,
       cached: false,
-      note: selectedAccount
-        ? 'Summary generated server-side from selected-account context'
-        : 'Summary generated from request-body fallback (tool layer unavailable)'
+      note: `Summary generated (source: ${selectedAccountSource})`
     });
 
   } catch (error) {
