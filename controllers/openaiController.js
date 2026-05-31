@@ -22,7 +22,23 @@ function buildSessionKey(req) {
   return `session:${sessionId}`;
 }
 
-function buildSummarizationCacheKey(sessionKey, plaidTransactions, forecastedTransactions, balances) {
+// Normalize an incoming accountId into a stable, redis-safe cache segment.
+// Accepts numbers / numeric strings / null / undefined. Anything else falls back
+// to the literal "none" bucket so legacy callers (no accountId on the request)
+// still get a working — but clearly distinct — cache slot.
+function normalizeAccountIdForCacheKey(accountId) {
+  if (accountId === undefined || accountId === null || accountId === '') {
+    return 'none';
+  }
+  // Coerce to string and strip anything that could break a redis key.
+  const str = String(accountId).trim();
+  if (!str) return 'none';
+  // Only allow [A-Za-z0-9_-]; replace anything else with '_'. accountids in
+  // Keacast are integers today, but this guards against unexpected payloads.
+  return str.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+}
+
+function buildSummarizationCacheKey(sessionKey, accountId, plaidTransactions, forecastedTransactions, balances) {
   // Create a hash of the input data to ensure cache is invalidated when data changes
   const dataString = JSON.stringify({
     plaidTransactions: plaidTransactions || [],
@@ -30,7 +46,16 @@ function buildSummarizationCacheKey(sessionKey, plaidTransactions, forecastedTra
     balances: balances || []
   });
   const dataHash = crypto.createHash('md5').update(dataString).digest('hex');
-  return `summarization:${sessionKey}:${dataHash}`;
+  const accountSegment = normalizeAccountIdForCacheKey(accountId);
+  // Key shape: summarization:<sessionKey>:account:<accountId>:<dataHash>
+  // The explicit "account:<id>" segment lets us:
+  //   1. Guarantee that switching accounts NEVER reuses another account's summary,
+  //      even when the data hashes happen to overlap.
+  //   2. Wildcard-delete every cached summary for one account
+  //      (`summarization:<sessionKey>:account:<id>:*`) when its data changes
+  //      (e.g. after a reconcile / Plaid refresh) without nuking the other
+  //      accounts' caches.
+  return `summarization:${sessionKey}:account:${accountSegment}:${dataHash}`;
 }
 
 function truncateText(text, maxChars) {
@@ -1079,15 +1104,28 @@ exports.summarization = async (req, res) => {
   try {
     console.log('Summarization endpoint called');
     const { plaidTransactions, forecastedTransactions, balances, userData } = req.body;
-    
+
+    // The frontend sends `accountId` (camelCase) — see profile.component.ts ->
+    // openaiService.summarization(...). We also accept lowercase `accountid`
+    // to stay consistent with the chat endpoint above, just in case any other
+    // caller follows that convention.
+    const accountId = req.body?.accountId ?? req.body?.accountid ?? null;
+
     const sessionKey = buildSessionKey(req);
-    const cacheKey = buildSummarizationCacheKey(sessionKey, plaidTransactions, forecastedTransactions, balances);
+    const cacheKey = buildSummarizationCacheKey(
+      sessionKey,
+      accountId,
+      plaidTransactions,
+      forecastedTransactions,
+      balances
+    );
+    console.log('Summarization: cache key:', cacheKey, '(accountId:', accountId, ')');
 
     // Check cache first
     try {
       const cachedResult = await redis.get(cacheKey);
       if (cachedResult) {
-        console.log('Summarization: Returning cached result');
+        console.log('Summarization: Returning cached result for account', accountId);
         const cachedData = JSON.parse(cachedResult);
         return res.json({ 
           summary: cachedData.summary, 
@@ -1203,7 +1241,7 @@ exports.summarization = async (req, res) => {
           timestamp: new Date().toISOString()
         };
         await redis.set(cacheKey, JSON.stringify(cacheData), 'EX', SUMMARIZATION_CACHE_TTL);
-        console.log('Summarization: Cached result for 30 minutes');
+        console.log('Summarization: Cached result for 30 minutes (account:', accountId, ')');
       } catch (cacheError) {
         console.warn('Summarization: Failed to cache result:', cacheError.message);
         // Continue even if caching fails
