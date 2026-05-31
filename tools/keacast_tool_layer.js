@@ -66,6 +66,21 @@ async function getSelectedKeacastAccounts({ userId, token, body }) {
   return response.data;
 }
 
+// Single-account, fully-enriched fetch (returns the same blob the frontend
+// uses for the dashboard: balance/available, savings (precomputed),
+// futureNegativeBalances (precomputed), categories, balances, upcoming,
+// recents, breakdown, plaidTransactions, plaidRecurrings, computedBalances...).
+//
+// Use this when an LLM endpoint needs ground-truth context for ONE selected
+// account without paying the multi-account cost of getSelectedKeacastAccounts.
+async function getSelectedAccount({ userId, accountId, token, body, timeoutMs }) {
+  const url = `${BASE_URL}/account/selected/${userId}/${accountId}`;
+  const config = AUTH_HEADER(token);
+  if (Number.isFinite(timeoutMs)) config.timeout = timeoutMs;
+  const response = await axios.post(url, body || {}, config);
+  return response.data;
+}
+
 async function getBalances({ accountId, userId, token, body }) {
   const url = `${BASE_URL}/balances/getall/${accountId}/${moment().format('YYYY-MM-DD')}`;
   const response = await axios.get(url, AUTH_HEADER(token));
@@ -96,6 +111,7 @@ const functionMap = {
   getShoppingList,
   getUserData,
   getSelectedKeacastAccounts,
+  getSelectedAccount,
   getBalances,
   createTransaction,
   deleteTransaction
@@ -110,6 +126,7 @@ module.exports = {
   getShoppingList,
   getUserData,
   getSelectedKeacastAccounts,
+  getSelectedAccount,
   getBalances,
   createTransaction,
   deleteTransaction,

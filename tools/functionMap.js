@@ -16,7 +16,7 @@ const {
   getUpcomingByAccountAndRangeCount,
   getTransactionSummary
 } = require('../services/transactions.service');
-const { getUserData, getSelectedKeacastAccounts, getBalances, createTransaction, deleteTransaction } = require('./keacast_tool_layer');
+const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction } = require('./keacast_tool_layer');
 
 // Smart data loading strategy to prevent memory issues
 const SMART_LIMITS = {
@@ -208,6 +208,12 @@ const functionMap = {
   async getSelectedKeacastAccounts(args, ctx) {
     const { userId, token, body } = args;
     const result = await getSelectedKeacastAccounts({ userId, token, body });
+    return result;
+  },
+
+  async getSelectedAccount(args, ctx) {
+    const { userId, accountId, token, body, timeoutMs } = args;
+    const result = await getSelectedAccount({ userId, accountId, token, body, timeoutMs });
     return result;
   },
 

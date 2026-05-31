@@ -58,6 +58,204 @@ function buildSummarizationCacheKey(sessionKey, accountId, plaidTransactions, fo
   return `summarization:${sessionKey}:account:${accountSegment}:${dataHash}`;
 }
 
+// ─── Summarization helpers ──────────────────────────────────────────────────
+// These power the slim, server-side-fetched flow inside exports.summarization.
+// They are intentionally tiny and side-effect-free so the prompt builder
+// stays readable and so we can unit-test (or swap them out) easily.
+
+const SELECTED_ACCOUNT_TOOL_TTL = 300;   // 5 min Redis cache for the tool-layer fetch
+const SELECTED_ACCOUNT_TOOL_TIMEOUT_MS = 12000; // give the upstream API 12s before we fall back
+
+function selectedAccountToolCacheKey(userId, accountId) {
+  const u = normalizeAccountIdForCacheKey(userId);
+  const a = normalizeAccountIdForCacheKey(accountId);
+  return `summarization:tool:selectedaccount:${u}:${a}`;
+}
+
+// Build a cheap, stable fingerprint for the cache key when we have the
+// fully-fetched account blob. We deliberately AVOID hashing whole transaction
+// arrays — Plaid timestamps + balance refresh time are sufficient invalidation
+// signals and keep the key construction O(1) instead of O(n).
+function buildAccountFingerprint(account) {
+  if (!account || typeof account !== 'object') return null;
+  const len = (v) => (Array.isArray(v) ? v.length : 0);
+  const round = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) / 100 : v ?? '');
+  return [
+    account.accountid ?? '',
+    round(account.balance),
+    round(account.available),
+    round(account.current),
+    account.plaid_latest ?? '',
+    account.updated_at ?? '',
+    len(account.recents),
+    len(account.upcoming),
+    len(account.cfTransactions),
+    len(account.plaidTransactions),
+    len(account.futureNegativeBalances),
+  ].join('|');
+}
+
+function buildSummarizationCacheKeyFromFingerprint(sessionKey, accountId, fingerprint) {
+  const fp = typeof fingerprint === 'string' && fingerprint.length > 0
+    ? fingerprint
+    : 'no-fingerprint';
+  const fpHash = crypto.createHash('md5').update(fp).digest('hex');
+  const accountSegment = normalizeAccountIdForCacheKey(accountId);
+  return `summarization:${sessionKey}:account:${accountSegment}:${fpHash}`;
+}
+
+function coerceFirstName(userData, fallbackUser) {
+  const candidates = [
+    userData?.firstname,
+    userData?.firstName,
+    userData?.first_name,
+    fallbackUser?.firstname,
+    fallbackUser?.firstName,
+    fallbackUser?.first_name,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim().split(/\s+/)[0];
+  }
+  return 'there';
+}
+
+function fmtMoney(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '$0';
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  // Round to whole dollars unless small (< $10) where cents matter.
+  const formatted = abs < 10 ? abs.toFixed(2) : Math.round(abs).toString();
+  return `${sign}$${formatted}`;
+}
+
+function shortDate(value) {
+  if (!value) return '';
+  // Accept either Plaid `date` or Keacast `start` (both YYYY-MM-DD strings).
+  const m = moment(value);
+  return m.isValid() ? m.format('MMM D') : '';
+}
+
+// Compact one transaction into "Name|±$amt|Date" — ~30-50 chars per line.
+function compactTxnLine(t) {
+  if (!t || typeof t !== 'object') return null;
+  const name = (t.merchant_name || t.name || t.category || 'Transaction').toString().slice(0, 28);
+  const amt = typeof t.amount === 'number' ? t.amount : Number(t.amount);
+  if (!Number.isFinite(amt)) return null;
+  const date = shortDate(t.date || t.start || t.authorized_date);
+  return `${name}|${fmtMoney(amt)}${date ? '|' + date : ''}`;
+}
+
+// Pull the most recent N flat transactions out of `recents` (which can be
+// either a flat array OR a [{date, transactions:[...]}, ...] grouped-by-day
+// array depending on which controller served the response) and/or
+// plaidTransactions, sorted newest-first.
+function pickRecentTransactions(account, limit = 6) {
+  if (!account || typeof account !== 'object') return [];
+  const flat = [];
+  const recents = Array.isArray(account.recents) ? account.recents : [];
+  for (const r of recents) {
+    if (!r) continue;
+    if (Array.isArray(r.transactions)) {
+      for (const t of r.transactions) flat.push(t);
+    } else if (typeof r === 'object') {
+      flat.push(r);
+    }
+  }
+  if (flat.length === 0 && Array.isArray(account.plaidTransactions)) {
+    for (const t of account.plaidTransactions) flat.push(t);
+  }
+  flat.sort((a, b) => {
+    const da = moment(a?.date || a?.start || a?.authorized_date || 0).valueOf();
+    const db = moment(b?.date || b?.start || b?.authorized_date || 0).valueOf();
+    return db - da;
+  });
+  return flat.slice(0, limit).map(compactTxnLine).filter(Boolean);
+}
+
+function pickUpcomingTransactions(account, limit = 5) {
+  if (!account || typeof account !== 'object') return [];
+  const upcoming = Array.isArray(account.upcoming) ? account.upcoming : [];
+  // Already sorted by `start` ascending in the controller; trust it.
+  return upcoming.slice(0, limit).map(compactTxnLine).filter(Boolean);
+}
+
+function pickNegativeBalancePreviews(account, limit = 2) {
+  if (!account || typeof account !== 'object') return [];
+  const arr = Array.isArray(account.futureNegativeBalances) ? account.futureNegativeBalances : [];
+  return arr.slice(0, limit).map(b => {
+    const amt = fmtMoney(typeof b?.amount === 'number' ? b.amount : Number(b?.amount));
+    const when = b?.daysUntil || shortDate(b?.date) || '';
+    return `${amt}${when ? ' ' + when : ''}`;
+  }).filter(Boolean);
+}
+
+// Build the compact, deterministic user-payload string handed to the LLM.
+// Replaces the old `JSON.stringify(plaidTransactions)` dump (often 5-15 KB)
+// with a ~600-1200 char structured brief built from precomputed signals on
+// the account blob. This is the single biggest token-reduction lever.
+function buildSummarizationUserContent(account, firstName, fallback) {
+  const lines = [`Hi the user is ${firstName}.`];
+
+  if (account && typeof account === 'object') {
+    const name = account.accountname || account.bank_account_name || account.institution_name || 'their account';
+    const type = account.account_type || account.type || '';
+    const balance = fmtMoney(typeof account.balance === 'number' ? account.balance : Number(account.balance));
+    const available = fmtMoney(typeof account.available === 'number' ? account.available : Number(account.available));
+    lines.push(`Account: ${name}${type ? ` (${type})` : ''} — balance ${balance}, available ${available}.`);
+
+    if (typeof account.credit_limit === 'number' && account.credit_limit > 0) {
+      lines.push(`Credit limit ${fmtMoney(account.credit_limit)}.`);
+    }
+
+    const sav = account.savings;
+    if (sav && typeof sav === 'object') {
+      const inc = fmtMoney(sav.totalIncome);
+      const exp = fmtMoney(sav.totalExpenses);
+      const net = fmtMoney(sav.netCashFlow);
+      const pot = fmtMoney(sav.savingsPotential);
+      const pct = typeof sav.savingsPercentage === 'number' ? `${sav.savingsPercentage}%` : '';
+      lines.push(`Cash flow: income ${inc}, expenses ${exp}, net ${net}; savings potential ${pot}${pct ? ' (' + pct + ')' : ''}.`);
+    }
+
+    const negs = pickNegativeBalancePreviews(account);
+    if (negs.length > 0) {
+      lines.push(`Upcoming negative-balance days: ${negs.join('; ')}.`);
+    }
+
+    const recent = pickRecentTransactions(account, 6);
+    if (recent.length > 0) {
+      lines.push(`Recent: ${recent.join('; ')}.`);
+    }
+
+    const upc = pickUpcomingTransactions(account, 5);
+    if (upc.length > 0) {
+      lines.push(`Next 14d: ${upc.join('; ')}.`);
+    }
+
+    if (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number') {
+      const upInc = fmtMoney(account.upcomingIncomeTotal || 0);
+      const upExp = fmtMoney(account.upcomingExpenseTotal || 0);
+      lines.push(`Next 14d totals: income ${upInc}, expenses ${upExp}.`);
+    }
+  } else if (fallback) {
+    // Tool layer unavailable — fall back to whatever the frontend sent so we
+    // still produce a summary instead of erroring out. Compact it heavily.
+    const plaid = Array.isArray(fallback.plaidTransactions) ? fallback.plaidTransactions.slice(0, 6) : [];
+    const fc = Array.isArray(fallback.forecastedTransactions) ? fallback.forecastedTransactions.slice(0, 5) : [];
+    if (plaid.length) lines.push(`Recent: ${plaid.map(compactTxnLine).filter(Boolean).join('; ')}.`);
+    if (fc.length) lines.push(`Next 14d: ${fc.map(compactTxnLine).filter(Boolean).join('; ')}.`);
+    if (Array.isArray(fallback.balances) && fallback.balances.length > 0) {
+      const last = fallback.balances[fallback.balances.length - 1];
+      if (last && typeof last.amount !== 'undefined') {
+        lines.push(`Latest projected balance: ${fmtMoney(Number(last.amount))} on ${shortDate(last.date)}.`);
+      }
+    }
+  }
+
+  lines.push('Write 2-3 short, casual sentences (≤300 chars). Use the precomputed numbers verbatim.');
+  return lines.join('\n');
+}
+
 function truncateText(text, maxChars) {
   if (text === undefined || text === null) return '';
   const str = String(text).trim();
@@ -1103,33 +1301,98 @@ exports.analyzeTransactions = async (req, res) => {
 exports.summarization = async (req, res) => {
   try {
     console.log('Summarization endpoint called');
-    const { plaidTransactions, forecastedTransactions, balances, userData } = req.body;
 
+    // ── Phase 1: Parse identity + optional fallback payload ───────────────
     // The frontend sends `accountId` (camelCase) — see profile.component.ts ->
     // openaiService.summarization(...). We also accept lowercase `accountid`
     // to stay consistent with the chat endpoint above, just in case any other
-    // caller follows that convention.
+    // caller follows that convention. The bulky transaction/balance arrays
+    // remain accepted purely as a graceful fallback for older clients (the
+    // backend now self-serves them via the keacast tool layer).
     const accountId = req.body?.accountId ?? req.body?.accountid ?? null;
+    const userDataFromBody = req.body?.userData;
+    const clientDate = req.body?.clientDate || moment().format('YYYY-MM-DD');
+    const fallbackBody = {
+      plaidTransactions: req.body?.plaidTransactions,
+      forecastedTransactions: req.body?.forecastedTransactions,
+      balances: req.body?.balances,
+    };
 
     const sessionKey = buildSessionKey(req);
-    const cacheKey = buildSummarizationCacheKey(
-      sessionKey,
-      accountId,
-      plaidTransactions,
-      forecastedTransactions,
-      balances
-    );
-    console.log('Summarization: cache key:', cacheKey, '(accountId:', accountId, ')');
+    const { token, userId, authHeader } = extractAuthFromRequest(req);
 
-    // Check cache first
+    // ── Phase 2: Fetch the canonical account blob via the tool layer ──────
+    // This single call returns balance/available, savings (precomputed),
+    // futureNegativeBalances (precomputed), recents, upcoming, breakdown,
+    // plaidTransactions, etc. — i.e. EVERYTHING this endpoint needs to build
+    // a tight, accurate prompt without the frontend shipping us megabytes of
+    // raw transaction JSON.
+    let selectedAccount = null;
+    if (userId && token && accountId) {
+      const toolCacheKey = selectedAccountToolCacheKey(userId, accountId);
+      try {
+        const cached = await redis.get(toolCacheKey);
+        if (cached) {
+          selectedAccount = JSON.parse(cached);
+          console.log('Summarization: Using cached selected-account blob (5min TTL) for account', accountId);
+        }
+      } catch (e) {
+        console.warn('Summarization: Tool-layer cache read failed:', e.message);
+      }
+
+      if (!selectedAccount) {
+        try {
+          console.log('Summarization: Fetching selected account via tool layer for', userId, accountId);
+          selectedAccount = await functionMap.getSelectedAccount({
+            userId,
+            accountId,
+            token,
+            body: { clientDate },
+            timeoutMs: SELECTED_ACCOUNT_TOOL_TIMEOUT_MS,
+          });
+          if (selectedAccount && typeof selectedAccount === 'object') {
+            try {
+              await redis.set(toolCacheKey, JSON.stringify(selectedAccount), 'EX', SELECTED_ACCOUNT_TOOL_TTL);
+            } catch (e) {
+              console.warn('Summarization: Tool-layer cache write failed:', e.message);
+            }
+          }
+        } catch (toolErr) {
+          console.warn('Summarization: Tool-layer fetch failed, falling back to request-body context:', toolErr.message);
+          selectedAccount = null;
+        }
+      }
+    } else {
+      console.log('Summarization: Missing userId/token/accountId — skipping tool-layer fetch and using request body.');
+    }
+
+    // ── Phase 3: Build cache key from a stable account fingerprint ────────
+    // When we have a real account blob, the fingerprint is O(1) (no array
+    // hashing). When we don't, fall back to the legacy data-hash shape so
+    // older clients that ship the arrays still get a stable cache slot.
+    const fingerprint = selectedAccount
+      ? buildAccountFingerprint(selectedAccount)
+      : null;
+    const cacheKey = fingerprint
+      ? buildSummarizationCacheKeyFromFingerprint(sessionKey, accountId, fingerprint)
+      : buildSummarizationCacheKey(
+          sessionKey,
+          accountId,
+          fallbackBody.plaidTransactions,
+          fallbackBody.forecastedTransactions,
+          fallbackBody.balances
+        );
+    console.log('Summarization: cache key:', cacheKey, '(accountId:', accountId, ', fingerprint:', fingerprint ? 'server' : 'legacy', ')');
+
+    // ── Phase 4: Cache check ──────────────────────────────────────────────
     try {
       const cachedResult = await redis.get(cacheKey);
       if (cachedResult) {
         console.log('Summarization: Returning cached result for account', accountId);
         const cachedData = JSON.parse(cachedResult);
-        return res.json({ 
-          summary: cachedData.summary, 
-          raw: cachedData.raw, 
+        return res.json({
+          summary: cachedData.summary,
+          raw: cachedData.raw,
           cached: true,
           note: 'This summary was retrieved from cache (30 minute TTL)'
         });
@@ -1138,101 +1401,66 @@ exports.summarization = async (req, res) => {
       console.warn('Summarization: Cache read failed, proceeding with fresh generation:', cacheError.message);
     }
 
-    // Load history from Redis (read-only, will not update)
-    let history = [];
-    try {
-      const historyData = await redis.get(sessionKey);
-      history = historyData ? JSON.parse(historyData) : [];
-      console.log('Summarization: Loaded history length:', history.length);
-    } catch (redisError) {
-      console.warn('Summarization: Redis history load failed:', redisError.message);
-      history = [];
-    }
+    // ── Phase 5: Build a tight prompt from precomputed signals ───────────
+    // System prompt is ~1/3 the size of the prior version. We removed the
+    // bullet-list of guidance and inline examples — the user content already
+    // hands the model fully-formatted numbers, so its only job is wording.
+    const firstName = coerceFirstName(userDataFromBody, selectedAccount?.user || null);
+    const userContent = buildSummarizationUserContent(selectedAccount, firstName, fallbackBody);
 
-    const { token, userId, authHeader } = extractAuthFromRequest(req);
+    const systemPrompt = `You are Kea, the Keacast assistant — a casual, supportive financial buddy.
+Write 2–3 short sentences (≤300 chars total) addressing the user by FIRST NAME.
+Goal: help them feel informed and slightly excited to plan ahead.
 
-    const systemPrompt = `You are the Kea assistant, a friendly and insightful financial companion from Keacast. You help users understand their financial status by analyzing their recent transaction history and upcoming forecasted transactions.
-
-    **Your Role:**
-    - Use an informal, conversational communication style
-    - Always address the user by their first name only (use the first name provided in the user data)
-    - Provide short, very concise summaries with interesting tidbits and insights
-    - Focus on recent transaction patterns and upcoming forecasted financial events
-    - Highlight actionable insights that might spark curiosity or prompt further planning
-
-    **Data You Have Access To:**
-    - **plaidTransactions**: The user's latest transaction history (recent past transactions)
-    - **forecastedTransactions**: Future forecasted transactions (upcoming expenses and income)
-    - **balances**: A mixture of historical balances and future projected balances
-
-    **What to Include in Your Response:**
-    - Quick insights about recent spending patterns
-    - Upcoming forecasted transactions and their impact
-    - Specific numbers and timeframes (e.g., "In the next 2 weeks you have $X forecasted toward 5 specific categories")
-    - Balance projections and warnings (e.g., "Your balance will go negative in 5 days so be sure to account for that")
-    - Interesting patterns or trends that might catch their attention
-    - Brief mentions that encourage them to chat more or plan further ahead
-
-    **Communication Style:**
-    - Keep it short and punchy (2-3 sentences max)
-    - Use casual, friendly language
-    - Include specific numbers, dates, and categories when relevant
-    - Make it feel like a quick check-in from a helpful friend
-    - Use dollar amounts with $ symbol (e.g., $100, -$50)
-    - Use "forecasted" when referring to future transactions
-    - Use "expense" for expenses, "income" for income
-
-    **Examples of Good Responses:**
-    - "Hey [FirstName]! In the next 2 weeks you have $450 forecasted toward 5 specific categories. Your balance will go negative in 5 days, so be sure to account for that."
-    - "[FirstName], you've spent $200 on groceries this week - that's 30% more than usual. You also have $300 in forecasted expenses coming up in the next 10 days."
-    - "Quick heads up, [FirstName]: Your balance is projected to drop to -$150 in 8 days based on your forecasted transactions. Might want to plan ahead for that!"
-
-    **Important:**
-    - Limit your response to a couple of sentences max (2-3 sentences) and do not exceed 300 characters.
-    - Always use the user's first name
-    - Keep responses very concise and scannable
-    - Focus on actionable insights and interesting tidbits
-    - Make it engaging enough that they'll want to ask follow-up questions in chat`;
+Rules:
+- Use the precomputed numbers verbatim. Do not recompute, estimate, or invent figures.
+- Always include at least one concrete dollar amount and either a date or a day-count.
+- Use $ for amounts, "-" for negatives. Round to whole dollars unless < $10.
+- If "Upcoming negative-balance days" is present, surface the soonest one as a heads-up.
+- If next-14d expenses are notable vs available balance, mention the contrast.
+- Tone: casual, warm, forward-looking. No headings, no bullet lists, no markdown other than light emphasis.
+- Output plain prose only. End after 3 sentences max.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
-      ...sanitizeMessageArray(history),
-      { role: 'user', content: `User's first name: ${userData?.firstname || 'User'}
-
-      Here are the latest transactions (plaidTransactions - recent transaction history):
-      ${JSON.stringify(plaidTransactions || [])}
-      
-      Here are the forecasted transactions (upcoming future transactions):
-      ${JSON.stringify(forecastedTransactions || [])}
-      
-      Here are the account balances (historical and future projected balances):
-      ${JSON.stringify(balances || [])}
-      
-      Based on this data, provide a short, informal summary with interesting tidbits about their recent and upcoming financial status. Address them by their first name and keep it concise and engaging.` }
+      // NOTE: history intentionally NOT injected. This endpoint is documented
+      // as read-only / non-mutating, so polluting the prompt with prior chat
+      // turns wastes tokens AND can derail the strict format above.
+      { role: 'user', content: userContent }
     ];
 
-    console.log('Summarization: Calling OpenAI with', messages.length, 'messages');
+    console.log('Summarization: prompt sizes — system:', systemPrompt.length, 'chars, user:', userContent.length, 'chars');
 
+    // ── Phase 6: LLM call ────────────────────────────────────────────────
+    // - tool_choice 'none' + tools: [] keeps the request body lean (no
+    //   function schemas attached, ~2-4KB saved per request).
+    // - AZURE_OPENAI_DEPLOYMENT_LIGHT lets ops point this endpoint at a
+    //   smaller/cheaper model; falls back to the global deployment.
     let result;
     try {
-      const directResponse = await queryAzureOpenAI(messages, { 
-        tools: functionSchemas, 
+      const directResponse = await queryAzureOpenAI(messages, {
+        tools: [],
         tool_choice: 'none',
-        temperature: 0.3, // Moderate temperature for natural but consistent summaries
-        max_tokens: 250, // Allow enough tokens for a concise but informative summary (2-4 sentences)
-        timeout: 15000 // 15 second timeout for summary generation
+        temperature: 0.4,
+        max_tokens: 180,
+        timeout: 15000,
+        deployment: process.env.AZURE_OPENAI_DEPLOYMENT_LIGHT || undefined,
       });
       const choice = directResponse?.choices?.[0];
       result = { content: choice?.message?.content || '', raw: directResponse };
     } catch (directError) {
-      console.log('Summarization: All attempts failed, returning error message');
-      result = { content: '## ❌ Error\n\n**I apologize, but I encountered an error while generating your financial summary. Please try again.**', raw: null, error: directError };
+      console.log('Summarization: LLM call failed, returning error message:', directError?.message);
+      result = {
+        content: `Hey ${firstName}, I couldn't pull together a fresh summary right now — give it another shot in a minute.`,
+        raw: null,
+        error: directError
+      };
     }
 
     const finalText = result.content || '';
     const rawText = result.raw;
 
-    // Cache the result for 30 minutes
+    // ── Phase 7: Cache the result ────────────────────────────────────────
     if (!result?.error && finalText) {
       try {
         const cacheData = {
@@ -1248,15 +1476,17 @@ exports.summarization = async (req, res) => {
       }
     }
 
-    // NOTE: This function does NOT update the message history in Redis
-    // It is read-only and only provides a summary without affecting conversation state
+    // NOTE: This function does NOT update the message history in Redis.
+    // It is read-only and only provides a summary without affecting conversation state.
 
-    res.json({ 
-      summary: finalText, 
-      raw: rawText, 
+    res.json({
+      summary: finalText,
+      raw: rawText,
       error: result?.error,
       cached: false,
-      note: 'This summary was generated without updating conversation history'
+      note: selectedAccount
+        ? 'Summary generated server-side from selected-account context'
+        : 'Summary generated from request-body fallback (tool layer unavailable)'
     });
 
   } catch (error) {
