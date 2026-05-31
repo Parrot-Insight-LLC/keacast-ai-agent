@@ -196,57 +196,85 @@ function pickNegativeBalancePreviews(account, limit = 2) {
 // Replaces the old `JSON.stringify(plaidTransactions)` dump (often 5-15 KB)
 // with a ~600-1200 char structured brief built from precomputed signals on
 // the account blob. This is the single biggest token-reduction lever.
-function buildSummarizationUserContent(account, firstName, fallback) {
-  const lines = [`Hi the user is ${firstName}.`];
+//
+// IMPORTANT: every dollar amount in this payload MUST carry an explicit time
+// window so the LLM has zero room to confabulate one. A previous version
+// surfaced raw `savings.totalExpenses` without a label — the model then
+// invented "due by May 31" because that's the end of the current month, even
+// though no specific date appeared in the data. Every label below now spells
+// out its window verbatim.
+function buildSummarizationUserContent(account, firstName, fallback, opts = {}) {
+  const today = opts.today || moment().format('YYYY-MM-DD');
+  const monthLabel = moment(today, 'YYYY-MM-DD').format('MMMM');
+  const monthEnd = moment(today, 'YYYY-MM-DD').endOf('month').format('MMM D');
+
+  const lines = [
+    `Today: ${today}.`,
+    `User first name: ${firstName}.`,
+  ];
 
   if (account && typeof account === 'object') {
     const name = account.accountname || account.bank_account_name || account.institution_name || 'their account';
     const type = account.account_type || account.type || '';
     const balance = fmtMoney(typeof account.balance === 'number' ? account.balance : Number(account.balance));
     const available = fmtMoney(typeof account.available === 'number' ? account.available : Number(account.available));
-    lines.push(`Account: ${name}${type ? ` (${type})` : ''} — balance ${balance}, available ${available}.`);
+    lines.push(`Account: ${name}${type ? ` (${type})` : ''} — current balance ${balance}, available ${available}.`);
 
     if (typeof account.credit_limit === 'number' && account.credit_limit > 0) {
       lines.push(`Credit limit ${fmtMoney(account.credit_limit)}.`);
     }
 
+    // savings.totalIncome / totalExpenses are scoped to "all current-month
+    // F/RF forecasts where match_id IS NULL". On accounts where the user is
+    // behind on reconciliation, this can be a much larger number than what
+    // they actually owe today (because already-spent-but-unreconciled
+    // forecasts pile up). Empirically the LLM tends to wrap that figure in
+    // urgent phrasing ("$X due by month-end") that misleads the user, so we
+    // intentionally drop totalIncome / totalExpenses / netCashFlow and rely
+    // on the cleaner "next 14 days" totals + the explicit transaction lists
+    // below. We keep savingsPotential because it's unambiguous: it is the
+    // minimum projected balance over the rest of the month given current
+    // commitments.
     const sav = account.savings;
     if (sav && typeof sav === 'object') {
-      const inc = fmtMoney(sav.totalIncome);
-      const exp = fmtMoney(sav.totalExpenses);
-      const net = fmtMoney(sav.netCashFlow);
-      const pot = fmtMoney(sav.savingsPotential);
-      const pct = typeof sav.savingsPercentage === 'number' ? `${sav.savingsPercentage}%` : '';
-      lines.push(`Cash flow: income ${inc}, expenses ${exp}, net ${net}; savings potential ${pot}${pct ? ' (' + pct + ')' : ''}.`);
+      const pot = typeof sav.savingsPotential === 'number' ? sav.savingsPotential : Number(sav.savingsPotential);
+      const pct = typeof sav.savingsPercentage === 'number' ? sav.savingsPercentage : null;
+      if (Number.isFinite(pot) && pot > 0) {
+        lines.push(
+          `Lowest projected balance through end of ${monthLabel} (${monthEnd}): ${fmtMoney(pot)}${pct !== null ? ` (${pct}% of available)` : ''}.`
+        );
+      }
+    }
+
+    // Next-14-day totals are precomputed by the controller and have an
+    // unambiguous window. This is the primary short-horizon cash-flow signal.
+    if (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number') {
+      const upInc = fmtMoney(Math.abs(account.upcomingIncomeTotal || 0));
+      const upExp = fmtMoney(Math.abs(account.upcomingExpenseTotal || 0));
+      lines.push(`Next 14 days totals: income ${upInc}, expenses ${upExp}.`);
     }
 
     const negs = pickNegativeBalancePreviews(account);
     if (negs.length > 0) {
-      lines.push(`Upcoming negative-balance days: ${negs.join('; ')}.`);
+      lines.push(`Future days the projected balance goes negative: ${negs.join('; ')}.`);
     }
 
     const recent = pickRecentTransactions(account, 6);
     if (recent.length > 0) {
-      lines.push(`Recent: ${recent.join('; ')}.`);
+      lines.push(`Recent posted (last ~30 days): ${recent.join('; ')}.`);
     }
 
     const upc = pickUpcomingTransactions(account, 5);
     if (upc.length > 0) {
-      lines.push(`Next 14d: ${upc.join('; ')}.`);
-    }
-
-    if (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number') {
-      const upInc = fmtMoney(account.upcomingIncomeTotal || 0);
-      const upExp = fmtMoney(account.upcomingExpenseTotal || 0);
-      lines.push(`Next 14d totals: income ${upInc}, expenses ${upExp}.`);
+      lines.push(`Upcoming forecasted (next 14 days): ${upc.join('; ')}.`);
     }
   } else if (fallback) {
     // Tool layer unavailable — fall back to whatever the frontend sent so we
     // still produce a summary instead of erroring out. Compact it heavily.
     const plaid = Array.isArray(fallback.plaidTransactions) ? fallback.plaidTransactions.slice(0, 6) : [];
     const fc = Array.isArray(fallback.forecastedTransactions) ? fallback.forecastedTransactions.slice(0, 5) : [];
-    if (plaid.length) lines.push(`Recent: ${plaid.map(compactTxnLine).filter(Boolean).join('; ')}.`);
-    if (fc.length) lines.push(`Next 14d: ${fc.map(compactTxnLine).filter(Boolean).join('; ')}.`);
+    if (plaid.length) lines.push(`Recent posted: ${plaid.map(compactTxnLine).filter(Boolean).join('; ')}.`);
+    if (fc.length) lines.push(`Upcoming forecasted: ${fc.map(compactTxnLine).filter(Boolean).join('; ')}.`);
     if (Array.isArray(fallback.balances) && fallback.balances.length > 0) {
       const last = fallback.balances[fallback.balances.length - 1];
       if (last && typeof last.amount !== 'undefined') {
@@ -255,7 +283,8 @@ function buildSummarizationUserContent(account, firstName, fallback) {
     }
   }
 
-  lines.push('Write 2-3 short, casual sentences (≤300 chars). Use the precomputed numbers verbatim.');
+  lines.push('');
+  lines.push('Write 2-3 short, casual sentences (≤300 chars). Use the labels above verbatim.');
   return lines.join('\n');
 }
 
@@ -1453,20 +1482,24 @@ exports.summarization = async (req, res) => {
     // bullet-list of guidance and inline examples — the user content already
     // hands the model fully-formatted numbers, so its only job is wording.
     const firstName = coerceFirstName(userDataFromBody, selectedAccount?.user || null);
-    const userContent = buildSummarizationUserContent(selectedAccount, firstName, fallbackBody);
+    const userContent = buildSummarizationUserContent(selectedAccount, firstName, fallbackBody, { today: clientDate });
 
     const systemPrompt = `You are Kea, the Keacast assistant — a casual, supportive financial buddy.
 Write 2–3 short sentences (≤300 chars total) addressing the user by FIRST NAME.
 Goal: help them feel informed and slightly excited to plan ahead.
 
-Rules:
-- Use the precomputed numbers verbatim. Do not recompute, estimate, or invent figures.
-- Always include at least one concrete dollar amount and either a date or a day-count.
-- Use $ for amounts, "-" for negatives. Round to whole dollars unless < $10.
-- If "Upcoming negative-balance days" is present, surface the soonest one as a heads-up.
-- If next-14d expenses are notable vs available balance, mention the contrast.
-- Tone: casual, warm, forward-looking. No headings, no bullet lists, no markdown other than light emphasis.
-- Output plain prose only. End after 3 sentences max.`;
+HARD RULES — the user already saw this data, they will catch any drift:
+1. Every dollar amount you mention must appear verbatim in the data block. Do not add, subtract, average, or aggregate amounts.
+2. Every date or time window you mention must appear verbatim in the data block. NEVER infer "by month-end", "by Friday", "this weekend", or any deadline that isn't explicitly written. If you mention timing, copy a label from the data word-for-word ("next 14 days", "today", "Jun 12", "end of May", "last 30 days").
+3. Pair each amount with the same label it has in the data. Do NOT translate "Next 14 days totals: expenses $X" into "$X due by [some date]". Do NOT translate "Lowest projected balance through end of May" into a deadline.
+4. Only call something "no income" if the relevant labelled income figure literally shows $0. Otherwise stay neutral on income.
+5. If "Future days the projected balance goes negative" is present, mention the soonest entry verbatim — that is the strongest heads-up signal.
+
+STYLE:
+- Casual, warm, forward-looking. Plain prose. No headings, no bullets, no markdown beyond light emphasis.
+- Use $ for amounts, leading "-" for negatives. Round to whole dollars unless < $10.
+- Always include at least one concrete amount + one verbatim date or window from the data.
+- End after 3 sentences max.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -1488,7 +1521,10 @@ Rules:
       const directResponse = await queryAzureOpenAI(messages, {
         tools: [],
         tool_choice: 'none',
-        temperature: 0.4,
+        // Lower temperature than typical chat: we want the model to stick
+        // closely to the labels in the data block rather than improvise
+        // creative phrasings like "due by May 31" out of a generic figure.
+        temperature: 0.25,
         max_tokens: 180,
         timeout: 15000,
         deployment: process.env.AZURE_OPENAI_DEPLOYMENT_LIGHT || undefined,
