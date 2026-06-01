@@ -1350,7 +1350,7 @@ exports.summarization = async (req, res) => {
       forecastedTransactions: req.body?.forecastedTransactions,
       balances: req.body?.balances,
     };
-
+    
     const sessionKey = buildSessionKey(req);
     const { token, userId, authHeader } = extractAuthFromRequest(req);
 
@@ -1466,9 +1466,9 @@ exports.summarization = async (req, res) => {
       if (cachedResult) {
         console.log('Summarization: Returning cached result for account', accountId);
         const cachedData = JSON.parse(cachedResult);
-        return res.json({
-          summary: cachedData.summary,
-          raw: cachedData.raw,
+        return res.json({ 
+          summary: cachedData.summary, 
+          raw: cachedData.raw, 
           cached: true,
           note: 'This summary was retrieved from cache (30 minute TTL)'
         });
@@ -1499,7 +1499,7 @@ STYLE:
 - Casual, warm, forward-looking. Plain prose. No headings, no bullets, no markdown beyond light emphasis.
 - Use $ for amounts, leading "-" for negatives. Round to whole dollars unless < $10.
 - Always include at least one concrete amount + one verbatim date or window from the data.
-- End after 3 sentences max.`;
+- If you can't convey the message in 3 sentences, its okay to do it in 5-6 sentences.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -1518,7 +1518,7 @@ STYLE:
     //   smaller/cheaper model; falls back to the global deployment.
     let result;
     try {
-      const directResponse = await queryAzureOpenAI(messages, {
+      const directResponse = await queryAzureOpenAI(messages, { 
         tools: [],
         tool_choice: 'none',
         // Lower temperature than typical chat: we want the model to stick
@@ -1562,9 +1562,9 @@ STYLE:
     // NOTE: This function does NOT update the message history in Redis.
     // It is read-only and only provides a summary without affecting conversation state.
 
-    res.json({
-      summary: finalText,
-      raw: rawText,
+    res.json({ 
+      summary: finalText, 
+      raw: rawText, 
       error: result?.error,
       cached: false,
       note: `Summary generated (source: ${selectedAccountSource})`
@@ -1868,12 +1868,12 @@ exports.autoCategorizeTransaction = async (req, res) => {
     const { transaction, transactionHistory, categories } = req.body;
     const userId = req.body?.userId ?? req.body?.sessionId ?? req.user?.id ?? null;
     const accountId = req.body?.accountId ?? req.body?.accountid ?? null;
-
+    
     if (!transaction) {
       console.log('Auto-categorize: Missing transaction in request body');
       return res.status(400).json({ error: 'Transaction is required' });
     }
-
+    
     if (!categories || !Array.isArray(categories) || categories.length === 0) {
       console.log('Auto-categorize: Missing or invalid categories array');
       return res.status(400).json({ error: 'Categories array is required and must not be empty' });
@@ -2088,7 +2088,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
     let method = 'ai';
 
     try {
-      const response = await queryAzureOpenAI(messages, {
+      const response = await queryAzureOpenAI(messages, { 
         // Only ship the single, scoped tool — DO NOT fall back to the global
         // functionSchemas which adds thousands of input tokens for nothing
         // (`tool_choice: 'none'` previously hid them but Azure still bills
@@ -2103,7 +2103,7 @@ exports.autoCategorizeTransaction = async (req, res) => {
         // back to the main deployment otherwise.
         deployment: process.env.AZURE_OPENAI_DEPLOYMENT_LIGHT || undefined,
       });
-
+      
       const choice = response?.choices?.[0];
       const toolCall = choice?.message?.tool_calls?.[0];
       if (toolCall?.function?.arguments) {
@@ -2211,8 +2211,8 @@ exports.autoCategorizeTransaction = async (req, res) => {
       }
       return 'Uncategorized';
     })();
-
-    res.status(500).json({
+    
+    res.status(500).json({ 
       success: false,
       error: 'Internal server error',
       details: error.message || 'Unknown error occurred',
@@ -2281,7 +2281,7 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
   if (!transaction || !Array.isArray(categories) || categories.length === 0) return null;
 
   const transactionText = `${transaction.name || ''} ${transaction.display_name || ''} ${transaction.merchant_name || ''} ${transaction.description || ''}`.toLowerCase();
-
+  
   // Helper: find a user category by case-insensitive name match.
   const findUserCategoryByName = (name) => {
     if (!name) return null;
@@ -2316,7 +2316,7 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
     PLAID_PFC_TO_BUCKET[pfc.detailed] ||
     PLAID_PFC_TO_BUCKET[pfc.primary] ||
     null;
-
+  
   // High-confidence merchant patterns
   const highConfidencePatterns = {
     'groceries': [
@@ -2440,7 +2440,7 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
         typeof t?.merchant_name === 'string' &&
         t.merchant_name.toLowerCase() === merchantName
       );
-
+      
       if (exactMatches.length > 0) {
         const mostCommonCategory = getMostCommonCategory(exactMatches);
         if (mostCommonCategory) {
@@ -2465,7 +2465,7 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
         const tl = t.name.toLowerCase();
         return tl.includes(transactionName) || transactionName.includes(tl);
       });
-
+      
       if (similarTransactions.length > 0) {
         const mostCommonCategory = getMostCommonCategory(similarTransactions);
         if (mostCommonCategory) {
