@@ -1998,18 +1998,43 @@ exports.autoCategorizeTransaction = async (req, res) => {
     const merchantSummary = summarizeMerchantHistory(transaction, transactionHistory);
 
     const systemPrompt =
-      `You categorize a single financial transaction by selecting EXACTLY ONE category ` +
-      `from the user's list. ALWAYS apply these signals in this strict priority order:\n` +
-      `1. merchant_history_summary — if total_seen ≥ 3 and the top category dominates (≥70%) ` +
-      `and target_amount_in_typical_range is true or null, use top_category. The user has ` +
-      `already told you what they want for this merchant.\n` +
-      `2. relevant_history rows where matched_on = "merchant+amount" — same merchant + similar ` +
-      `amount almost always means the same category.\n` +
-      `3. relevant_history rows where matched_on = "merchant" — same merchant, any amount.\n` +
-      `4. transaction.merchant_name → transaction.display_name → transaction.name common sense.\n` +
-      `5. plaid_personal_finance_category (detailed > primary) when its confidence is HIGH.\n` +
-      `6. relevant_history rows matched on pfc/category as weaker tiebreakers.\n` +
-      `Only fall back to general world knowledge when 1-6 give nothing useful.\n` +
+      `You are a categorization assistant whose primary job is to mirror this user's ` +
+      `own habits — not to impose a "correct" category, but to stay consistent with ` +
+      `how they have already been categorizing their transactions.\n\n` +
+      `STEP 1 — Compare the transaction to the user's history:\n` +
+      `Before choosing anything, scan relevant_history and merchant_history_summary to ` +
+      `find previously categorized transactions that resemble the current one. ` +
+      `Compare across four dimensions in this order:\n` +
+      `  a. TITLE — compare transaction.name and transaction.display_name against the ` +
+      `name/display_name fields in relevant_history. Exact or near-exact title matches ` +
+      `(e.g. "NETFLIX.COM" vs "NETFLIX") are the strongest individual signal. ` +
+      `Note that minor title variants from the same merchant (e.g. "AMAZON PRIME" vs ` +
+      `"AMAZON MKTP US") can legitimately map to different categories — look for the ` +
+      `closest title match, not just the closest merchant match.\n` +
+      `  b. AMOUNT — compare transaction.amount to the amounts in relevant_history and ` +
+      `merchant_history_summary.sample_amounts. A transaction whose amount falls in the ` +
+      `user's typical range for this merchant (target_amount_in_typical_range = true) ` +
+      `is very likely the same recurring charge.\n` +
+      `  c. FREQUENCY — if merchant_history_summary.total_seen is large (≥ 5) and the ` +
+      `amounts are clustered tightly (small variance in sample_amounts), this is a ` +
+      `recurring/subscription transaction. Subscriptions and recurring bills have ` +
+      `category patterns the user has deliberately set; honour them even when Plaid's ` +
+      `PFC suggests something different. A single irregular large amount is more likely ` +
+      `a one-off purchase and Plaid's PFC becomes a stronger fallback.\n` +
+      `  d. MERCHANT — use merchant_name / merchant_key as a tiebreaker when title and ` +
+      `amount don't narrow it down.\n\n` +
+      `STEP 2 — Apply signals in strict priority order:\n` +
+      `1. merchant_history_summary — if total_seen ≥ 3 and top_category dominates (≥ 70%) ` +
+      `and target_amount_in_typical_range is true or null, use top_category. ` +
+      `The user has already established their convention for this merchant; follow it.\n` +
+      `2. relevant_history matched_on = "merchant+amount" — same merchant + similar amount ` +
+      `is a near-certain repeat of the same transaction type; use that category.\n` +
+      `3. relevant_history matched_on = "merchant" — same merchant any amount; use the ` +
+      `most frequent category seen across those rows.\n` +
+      `4. plaid_personal_finance_category (detailed > primary) when confidence is HIGH ` +
+      `and the history gives no clear signal.\n` +
+      `5. relevant_history matched_on = "pfc" or "category" as weak tiebreakers.\n` +
+      `Only fall back to general world knowledge when steps 1–5 give nothing useful.\n\n` +
       `You MUST respond by calling the selectCategory tool — never reply in plain text.`;
 
     const userPayload = {
