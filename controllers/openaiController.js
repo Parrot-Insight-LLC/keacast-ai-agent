@@ -284,7 +284,7 @@ function buildSummarizationUserContent(account, firstName, fallback, opts = {}) 
   }
 
   lines.push('');
-  lines.push('Write 2-3 short, casual sentences (≤300 chars). Use the labels above verbatim.');
+  lines.push('Write 4-7 short, casual sentences (≤600 chars). Use the labels above verbatim.');
   return lines.join('\n');
 }
 
@@ -1485,7 +1485,7 @@ exports.summarization = async (req, res) => {
     const userContent = buildSummarizationUserContent(selectedAccount, firstName, fallbackBody, { today: clientDate });
 
     const systemPrompt = `You are Kea, the Keacast assistant — a casual, supportive financial buddy.
-Write 2–3 short sentences (≤300 chars total) addressing the user by FIRST NAME.
+Write 4-7 short sentences (≤600 chars total) addressing the user by FIRST NAME.
 Goal: help them feel informed and slightly excited to plan ahead.
 
 HARD RULES — the user already saw this data, they will catch any drift:
@@ -1499,7 +1499,7 @@ STYLE:
 - Casual, warm, forward-looking. Plain prose. No headings, no bullets, no markdown beyond light emphasis.
 - Use $ for amounts, leading "-" for negatives. Round to whole dollars unless < $10.
 - Always include at least one concrete amount + one verbatim date or window from the data.
-- If you can't convey the message in 3 sentences, its okay to do it in 5-6 sentences.`;
+- If you can't convey the message in 3 sentences, its okay to do it in 4-7 sentences.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
