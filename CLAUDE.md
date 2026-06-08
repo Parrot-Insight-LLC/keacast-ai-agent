@@ -5,7 +5,7 @@ Project-level guidance for Claude Code. Inherits the global engineering standard
 what is **specific and real** about this repository.
 
 > IEOS pipeline: model before changing, smallest safe change, state risks. After finishing, route
-> learnings to `Documents\Workflows\memory\` via `institutional-memory.md`.
+> learnings to `Documents\Workflows\memory\` via `Documents\Workflows\08-learning\institutional-memory.md`.
 
 ---
 
