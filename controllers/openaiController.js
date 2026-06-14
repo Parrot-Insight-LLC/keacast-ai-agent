@@ -659,10 +659,45 @@ function createContextSummary(userContext) {
  * - executes requested tools via functionMap[name](args, ctx)
  * - returns the final answer without corrupting the original message array
  */
+// Build a user-facing fallback string from raw tool results. Only used when
+// the follow-up LLM call fails, so the user still gets a confirmation/summary.
+function buildToolFallbackResponse(toolResults) {
+  const txn = toolResults.find(tr => tr.name === 'createTransaction');
+  if (txn) {
+    try {
+      const content = JSON.parse(txn.content);
+      if (content.error) return `## ⚠️ Transaction Not Created\n\n**${content.error}**`;
+      if (content.message && content.message.includes('successfully created')) {
+        let out = `## ✅ Transaction Created Successfully!\n\n**${content.message}**`;
+        if (content.data?.id) out += `\n\n**Transaction ID:** ${content.data.id}`;
+        if (content.data?.groupid) out += `\n\n**Recurring ID:** ${content.data.groupid}`;
+        return out;
+      }
+      return `## Transaction Processed\n\n**${content.message || 'Transaction has been handled.'}**`;
+    } catch {
+      return '## ✅ Transaction Processed\n\n**I have successfully processed your transaction request.**';
+    }
+  }
+  const parts = toolResults.map(tr => {
+    try {
+      const c = JSON.parse(tr.content);
+      if (c && c.error) return `Error in ${tr.name}: ${c.error}`;
+      if (Array.isArray(c)) return `Retrieved ${c.length} items from ${tr.name}`;
+      if (c && Array.isArray(c.transactions)) return `Retrieved ${c.transactions.length} records from ${tr.name}`;
+      if (c && Array.isArray(c.upcoming)) return `Retrieved ${c.upcoming.length} records from ${tr.name}`;
+      return `Retrieved data from ${tr.name}`;
+    } catch {
+      return `Retrieved data from ${tr.name}`;
+    }
+  });
+  return `## Action Completed\n\n**${parts.join('. ')}**`;
+}
+
 async function executeToolCalls(originalMessages, toolCalls, ctx) {
-  // Execute requested tools and collect results
+  // Execute each requested tool and keep one result per tool_call (tagged with
+  // its id) so we can echo a matching `tool` role message back to the model.
   const toolResults = [];
-  
+
   for (const toolCall of toolCalls) {
     const { name, arguments: argsJson } = toolCall.function || {};
     let args = {};
@@ -670,144 +705,82 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 
     const toolFn = functionMap[name];
     if (!toolFn) {
-      toolResults.push({ name, error: `Unknown tool: ${name}` });
+      toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: `Unknown tool: ${name}` }) });
       continue;
     }
 
     try {
       const result = await toolFn(args, ctx);
-      
-      // Truncate tool responses to prevent massive message growth
+
+      // Truncate large payloads so a single fetch can't blow up the context
+      // window (read tools are already paginated upstream).
       let toolContent = JSON.stringify(result ?? {});
-      if (toolContent.length > 13000) { // Increased limit to 13KB for tool responses
+      if (toolContent.length > 13000) {
         toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
         console.log('Tool response truncated from', JSON.stringify(result ?? {}).length, 'to', toolContent.length, 'bytes');
       }
-      
-      toolResults.push({ name, result: result, content: toolContent });
+
+      toolResults.push({ id: toolCall.id, name, content: toolContent });
     } catch (err) {
-      toolResults.push({ name, error: err?.message || 'Tool execution failed' });
+      toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || 'Tool execution failed' }) });
     }
   }
 
-  // Create a clean message array for the final response
-  const cleanMessages = [...originalMessages];
-  
-  // Add a summary of tool results as a user message
-  const toolSummary = toolResults.map(tr => {
-    if (tr.error) return `Error in ${tr.name}: ${tr.error}`;
-    try {
-      const content = JSON.parse(tr.content);
-      if (content.error) return `Error in ${tr.name}: ${content.error}`;
-      
-      // Special handling for createTransaction
-      if (tr.name === 'createTransaction') {
-        if (content.message && content.message.includes('successfully created')) {
-          return `Successfully created transaction: ${content.data?.id ? `ID ${content.data.id}` : 'Transaction created'}. ${content.message}`;
-        } else if (content.error) {
-          return `Failed to create transaction: ${content.error}`;
-        } else {
-          return `Transaction creation completed: ${content.message || 'Transaction processed'}`;
-        }
-      }
-      
-      // Handle other tools
-      if (Array.isArray(content) && content.length > 0) {
-        return `Retrieved ${content.length} items from ${tr.name}`;
-      }
-      return `Successfully retrieved data from ${tr.name}`;
-    } catch {
-      return `Successfully retrieved data from ${tr.name}`;
-    }
-  });
-  
-  cleanMessages.push({
+  // Standard tool-calling protocol: echo the assistant message that requested
+  // the tools, then one `tool` message per call carrying the ACTUAL result
+  // data. This lets the model answer detailed lookups (specific transactions,
+  // balances, categories) from real data instead of a one-line count summary.
+  const assistantToolMessage = { role: 'assistant', content: null, tool_calls: toolCalls };
+  const toolMessages = toolResults.map(tr => ({
+    role: 'tool',
+    tool_call_id: tr.id,
+    content: tr.content
+  }));
+
+  // Small fixed nudge (kept tiny for token economy).
+  const finalNudge = {
     role: 'user',
-    content: `I have executed the following tools: ${toolSummary.join('. ')}. Please provide a comprehensive answer based on this data. If any transactions were created, make sure to clearly confirm the creation to the user with relevant details. IMPORTANT: Always respond with markdown formatting.`
-  });
-  
-  // Get final response from Azure OpenAI
+    content: 'Using the tool results above, answer my previous message directly. If a transaction was created, confirm it with its name, amount, dates and (if recurring) frequency. Respond in markdown and do not mention tools.'
+  };
+
+  let cleanMessages = [...originalMessages, assistantToolMessage, ...toolMessages, finalNudge];
+
+  // Size guard. Naive slicing would orphan `tool` messages from their parent
+  // assistant tool_calls message (Azure 400s on that), so when oversized we
+  // rebuild a minimal but VALID array: system + last user + assistant
+  // tool_calls + tool results + nudge (chat history dropped).
+  let messageSize = JSON.stringify(cleanMessages).length;
+  console.log('Message array size after tool execution:', messageSize, 'bytes');
+  if (messageSize > 750000) {
+    console.log('Tool-result message array too large, rebuilding a minimal valid array');
+    const systemMsg = originalMessages.find(m => m.role === 'system');
+    let lastUserMsg = null;
+    for (let i = originalMessages.length - 1; i >= 0; i--) {
+      if (originalMessages[i].role === 'user') { lastUserMsg = originalMessages[i]; break; }
+    }
+    cleanMessages = [
+      ...(systemMsg ? [systemMsg] : []),
+      ...(lastUserMsg ? [lastUserMsg] : []),
+      assistantToolMessage,
+      ...toolMessages,
+      finalNudge
+    ];
+    messageSize = JSON.stringify(cleanMessages).length;
+    console.log('Rebuilt minimal message array size:', messageSize, 'bytes');
+  }
+
+  // Final response. tool_choice 'none' => no further tool calls; a single round
+  // keeps latency + tokens predictable.
   try {
     console.log('Getting final response after tool execution with', cleanMessages.length, 'messages');
-    
-    // Check message size to prevent rate limiting
-    const messageSize = JSON.stringify(cleanMessages).length;
-    console.log('Message array size:', messageSize, 'bytes');
-    
-    if (messageSize > 750000) {
-      console.log('Message array too large, truncating for final response');
-      // Keep only the most recent messages for the final response
-      const truncatedMessages = cleanMessages.slice(-5); // Keep last 5 messages
-      console.log('Truncated to', truncatedMessages.length, 'messages');
-      const finalResponse = await queryAzureOpenAI(truncatedMessages, { tools: functionSchemas, tool_choice: 'none' });
-      const choice = finalResponse?.choices?.[0];
-      console.log('Final response received:', !!choice?.message?.content, 'Content length:', choice?.message?.content?.length || 0);
-      return { content: choice?.message?.content || '', raw: finalResponse };
-    } else {
-      const finalResponse = await queryAzureOpenAI(cleanMessages, { tools: functionSchemas, tool_choice: 'none' });
-      const choice = finalResponse?.choices?.[0];
-      console.log('Final response received:', !!choice?.message?.content, 'Content length:', choice?.message?.content?.length || 0);
-      return { content: choice?.message?.content || '', raw: finalResponse };
-    }
+    const finalResponse = await queryAzureOpenAI(cleanMessages, { tools: functionSchemas, tool_choice: 'none' });
+    const choice = finalResponse?.choices?.[0];
+    console.log('Final response received:', !!choice?.message?.content, 'Content length:', choice?.message?.content?.length || 0);
+    return { content: choice?.message?.content || '', raw: finalResponse };
   } catch (error) {
     console.log('Final response with tool results failed:', error.message);
     console.log('Error details:', error.response?.data || error);
-    // Return a summary of what we found from the tools
-    const summary = toolResults.map(tr => {
-      if (tr.error) return `Error in ${tr.name}: ${tr.error}`;
-      try {
-        const content = JSON.parse(tr.content);
-        if (content.error) return `Error in ${tr.name}: ${content.error}`;
-        
-        // Special handling for createTransaction
-        if (tr.name === 'createTransaction') {
-          if (content.message && content.message.includes('successfully created')) {
-            return `Successfully created transaction: ${content.data?.id ? `ID ${content.data.id}` : 'Transaction created'}. ${content.message}`;
-          } else if (content.error) {
-            return `Failed to create transaction: ${content.error}`;
-          } else {
-            return `Transaction creation completed: ${content.message || 'Transaction processed'}`;
-          }
-        }
-        
-        // Handle other tools
-        if (Array.isArray(content) && content.length > 0) {
-          return `Found ${content.length} items from ${tr.name}`;
-        }
-        return `Successfully retrieved data from ${tr.name}`;
-      } catch {
-        return `Successfully retrieved data from ${tr.name}`;
-      }
-    });
-    // Create a more user-friendly response based on the tool results
-    let userFriendlyResponse = '';
-    
-    // Check if we have transaction creation results
-    const transactionResults = toolResults.filter(tr => tr.name === 'createTransaction');
-    if (transactionResults.length > 0) {
-      const transactionResult = transactionResults[0];
-      try {
-        const content = JSON.parse(transactionResult.content);
-        if (content.message && content.message.includes('successfully created')) {
-          userFriendlyResponse = `## ✅ Transaction Created Successfully!\n\n**${content.message}**`;
-          if (content.data?.id) {
-            userFriendlyResponse += `\n\n**Transaction ID:** ${content.data.id}`;
-          }
-        } else {
-          userFriendlyResponse = `## Transaction Processed\n\n**${content.message || 'Transaction has been handled.'}**`;
-        }
-      } catch {
-        userFriendlyResponse = '## ✅ Transaction Processed\n\n**I have successfully processed your transaction request.**';
-      }
-    } else {
-      // For other tools, provide a generic success message
-      userFriendlyResponse = `## Action Completed\n\n**${summary.join('. ')}**`;
-    }
-    
-    return { 
-      content: userFriendlyResponse, 
-      raw: null 
-    };
+    return { content: buildToolFallbackResponse(toolResults), raw: null };
   }
 }
 
@@ -989,7 +962,9 @@ exports.chat = async (req, res) => {
     - If users add big one-time transactions, help them see scenarios to understand the impact on their financial situation.
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
-    - When creating transactions using the createTransaction tool, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created. Make sure not to duplicate or repeat anything in your response.
+    - Creating a transaction should feel effortless. Use the createTransaction tool as soon as the user's intent is clear — do NOT interrogate them for every field. Infer title, type, category, start date, and frequency from this conversation and the account context, and let the system defaults handle the rest (one-time, today, time, etc.). The ONLY thing you should ask for is the amount, and only if it's genuinely missing. Pass amount as a positive number with the correct type ('expense' or 'income'); the system applies the sign.
+    - Use the full chat history above as memory: remember amounts, dates, merchants, and goals the user mentioned earlier in this conversation and reuse them when creating or discussing transactions, so the user never has to repeat themselves.
+    - When creating transactions, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created. Make sure not to duplicate or repeat anything in your response.
       - Always return with the transaction_id and if the transaction is recurring then also return the group_id which you can refer to as the recurring_id.
       - When working with dates and times, consider the user's location and timezone to provide accurate date-based responses. Forecasted transactions can not be created on date before the ${currentDate}. The system automatically calculates the correct date based on the user's coordinates.
       - When creating forecasts always consider whether the user has enough in the coming days, weeks, months, or years and warn them about how this may effect their financial state in the future. 
@@ -1065,8 +1040,9 @@ exports.chat = async (req, res) => {
       }
     }
 
-    // Function-calling loop (uses functionMap.js)
-    const ctx = { userId, token, accountId: accountid };
+    // Function-calling loop (uses functionMap.js). currentDate flows through so
+    // createTransaction can default `start` to the user's localized today.
+    const ctx = { userId, token, accountId: accountid, currentDate };
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;

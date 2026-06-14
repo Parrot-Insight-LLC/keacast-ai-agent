@@ -132,116 +132,62 @@
     "type": "function",
     "function": {
       "name": "createTransaction",
-      "description": "Creates financial forecasts or transactions with recurrence patterns. For recurring transactions, the system automatically generates multiple database records based on frequency, start date, and end date. Required inputs are amount, frequency, and start date. If amount, frequency, or start date fields have not been provided prompt the user to provide them. For all other fields (title,type, category, description, location, time, accountId, website, combined_id, monthlyTimeStamp, match_groupid, matchStatus, goal, merchant_name) insert the most relevant data based on the information provided. You can set the end date depending on the details you have recieved as well as the context you have been given of transaction data. Any spending transactions should be created as an expense and any income transactions should be created as an income. We want creating transactions to be as easy as possible for the user and we want to make sure that the user is aware of the financial implications of their actions.",
+      "description": "Create a forecasted income or expense on the user's currently selected account. Make this effortless: the user does NOT have to supply every field. Infer as much as possible from the conversation and account context, and let the system defaults fill the rest. Only ask a follow-up question if the AMOUNT is genuinely unknown. Pass amount as a positive number and set type ('expense' or 'income'); the system applies the correct sign. If you omit them, the system defaults: frequency=2 (one-time), start=today, end=start for one-time or start+1 year for recurring, category/title/description from context, time=12:00. Set frequency only when the user implies recurrence (e.g. 'every month' => 28-31, 'weekly' => 7). Before creating, stay mindful of the user's available balance and warn about any resulting negative forecasted balances.",
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": {
-            "type": "string",
-            "description": "The user ID for the transaction"
-          },
-          "accountId": {
-            "type": "string", 
-            "description": "The account ID for the transaction"
-          },
           "title": {
             "type": "string",
-            "description": "Transaction name"
+            "description": "Short name, e.g. 'Rent' or 'Paycheck'. Inferred from context if omitted."
           },
           "type": {
             "type": "string",
             "enum": ["expense", "income"],
-            "description": "Transaction type - expense or income"
-          },
-          "category": {
-            "type": "string",
-            "description": "Transaction category"
-          },
-          "description": {
-            "type": "string",
-            "description": "Detailed description of the transaction"
-          },
-          "start": {
-            "type": "string",
-            "description": "Start date in ISO format (YYYY-MM-DDTHH:mm:ss.sssZ)"
-          },
-          "end": {
-            "type": "string", 
-            "description": "End date in ISO format (YYYY-MM-DDTHH:mm:ss.sssZ)"
-          },
-          "time": {
-            "type": "string",
-            "description": "Time of day in HH:mm format"
+            "description": "expense for money spent, income for money received."
           },
           "amount": {
             "type": "number",
-            "description": "Transaction amount (negative for expenses, positive for income)"
+            "description": "Positive magnitude of the transaction; the system signs it based on type."
           },
-          "location": {
+          "category": {
             "type": "string",
-            "description": "Location of the transaction"
+            "description": "Best-fit category. Defaults if omitted."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional details. Defaults to the title."
+          },
+          "start": {
+            "type": "string",
+            "description": "Date it occurs/starts (YYYY-MM-DD or ISO). Defaults to today."
+          },
+          "end": {
+            "type": "string",
+            "description": "Recurring only: when recurrence stops (YYYY-MM-DD or ISO). Defaults to start+1 year."
+          },
+          "time": {
+            "type": "string",
+            "description": "Time of day HH:mm. Defaults to 12:00."
           },
           "frequency": {
             "type": "number",
-            "description": "Recurrence code: 1=Daily, 2=Once, 7=Weekly, 14=Bi-Weekly, 15=Semi-Monthly (1st & 15th), 16=Semi-Monthly (15th & end), 28-31=Monthly, 60=Bi-Monthly, 91=Quarterly, 182-183=Semi-Annually, 365-366=Annually"
-          },
-          "display_name": {
-            "type": "string",
-            "description": "Display name for UI"
-          },
-          "isAlreadyGrouped": {
-            "type": "boolean",
-            "default": false,
-            "description": "Whether the transaction is already grouped"
-          },
-          "match_id": {
-            "type": "string",
-            "default": null,
-            "description": "For bank transaction matching"
-          },
-          "website": {
-            "type": "string",
-            "default": null,
-            "description": "URL or logo"
-          },
-          "combined_id": {
-            "type": "string",
-            "default": null,
-            "description": "Combined ID (auto-generated if not provided)"
-          },
-          "monthlyTimeStamp": {
-            "type": "boolean",
-            "default": false,
-            "description": "Whether to use monthly timestamp"
-          },
-          "match_groupid": {
-            "type": "string",
-            "default": null,
-            "description": "Match group ID"
-          },
-          "matchStatus": {
-            "type": "number",
-            "default": 0,
-            "description": "Match status"
-          },
-          "forecast_type": {
-            "type": "string",
-            "enum": ["F", "A", "RF"],
-            "default": "F",
-            "description": "F=Forecast, A=Actual, RF=Recurring Forecast"
-          },
-          "goal": {
-            "type": "number",
-            "default": null,
-            "description": "Goal amount for savings"
+            "description": "Recurrence code: 1=Daily, 2=Once (default), 7=Weekly, 14=Bi-Weekly, 15/16=Semi-Monthly, 28-31=Monthly, 60=Bi-Monthly, 91=Quarterly, 182-183=Semi-Annually, 365-366=Annually."
           },
           "merchant_name": {
             "type": "string",
-            "default": null,
-            "description": "Merchant name"
+            "description": "Merchant, if known."
+          },
+          "location": {
+            "type": "string",
+            "description": "Optional location."
+          },
+          "forecast_type": {
+            "type": "string",
+            "enum": ["F", "RF"],
+            "description": "F=one-off forecast (default), RF=recurring forecast."
           }
         },
-        "required": ["userId", "accountId", "title", "type", "category", "description", "start", "end", "time", "amount", "location", "frequency", "display_name"]
+        "required": ["amount", "type"]
       }
     }
   },

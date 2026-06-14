@@ -17,6 +17,7 @@ const {
   getTransactionSummary
 } = require('../services/transactions.service');
 const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction } = require('./keacast_tool_layer');
+const moment = require('moment');
 
 // Smart data loading strategy to prevent memory issues
 const SMART_LIMITS = {
@@ -25,6 +26,70 @@ const SMART_LIMITS = {
   upcoming: 30,          // Load 30 upcoming transactions at a time
   accounts: 20           // Load 20 accounts at a time
 };
+
+const FREQUENCY_ONCE = 2;
+
+// Build a complete, valid createTransaction payload from whatever sparse
+// fields the LLM supplied. The chat schema only requires `amount` + `type`, so
+// the user can say "add $1200 rent on the 1st every month" and we still produce
+// a fully-formed record. Defaults here mirror the backend's own fallbacks
+// (TransactionsController.createTransaction) so creation never 400s on a thin
+// payload and the user doesn't have to spell out every field.
+function normalizeCreateTransactionInput(args = {}, ctx = {}) {
+  const out = { ...args };
+
+  // Strip server-injected identity fields if the model hallucinated them —
+  // userId/accountId come from ctx (the URL path), never the body.
+  delete out.userId;
+  delete out.accountId;
+
+  // type: trust the model, else infer from the sign, else default to expense.
+  const rawAmount = Number(out.amount);
+  let type = String(out.type || '').toLowerCase();
+  if (type !== 'income' && type !== 'expense') {
+    type = Number.isFinite(rawAmount) && rawAmount > 0 ? 'income' : 'expense';
+  }
+  out.type = type;
+
+  // amount: persist signed (negative = expense, positive = income) so the LLM
+  // can pass a plain magnitude and we still match existing data conventions.
+  if (Number.isFinite(rawAmount)) {
+    out.amount = type === 'expense' ? -Math.abs(rawAmount) : Math.abs(rawAmount);
+  }
+
+  // frequency: default to a one-time entry unless recurrence was specified.
+  let freq = Number(out.frequency);
+  if (!Number.isFinite(freq) || freq <= 0) freq = FREQUENCY_ONCE;
+  out.frequency = freq;
+
+  // start: default to the user's localized "today" (ctx.currentDate), else now.
+  const today = ctx.currentDate && moment(ctx.currentDate).isValid()
+    ? moment(ctx.currentDate)
+    : moment();
+  const start = out.start && moment(out.start).isValid() ? moment(out.start) : today.clone();
+  out.start = start.toISOString();
+
+  // end: one-time => same day; recurring => provided end or a 1-year horizon so
+  // the backend generates a sensible series instead of a single row.
+  if (freq === FREQUENCY_ONCE) {
+    out.end = start.toISOString();
+  } else {
+    const end = out.end && moment(out.end).isValid() ? moment(out.end) : start.clone().add(1, 'year');
+    out.end = end.toISOString();
+  }
+
+  // Human-facing text + misc fields: fill from context with safe fallbacks.
+  const fallbackTitle = String(out.merchant_name || out.category || (type === 'income' ? 'Income' : 'Expense'));
+  if (!out.title || !String(out.title).trim()) out.title = fallbackTitle;
+  if (!out.display_name || !String(out.display_name).trim()) out.display_name = out.title;
+  if (!out.description || !String(out.description).trim()) out.description = out.title;
+  if (!out.category || !String(out.category).trim()) out.category = type === 'income' ? 'Income' : 'Uncategorized';
+  if (!out.time || !String(out.time).trim()) out.time = '12:00';
+  if (out.location == null) out.location = '';
+  if (!out.forecast_type) out.forecast_type = 'F';
+
+  return out;
+}
 
 // Each tool gets (args, ctx), where ctx can include userId, auth, etc.
 const functionMap = {
@@ -225,7 +290,8 @@ const functionMap = {
 
   async createTransaction(args, ctx) {
     const { userId, token, accountId } = ctx;
-    const result = await createTransaction({ userId, accountId, token, body: args });
+    const body = normalizeCreateTransactionInput(args, ctx);
+    const result = await createTransaction({ userId, accountId, token, body });
     return result;
   },
 
