@@ -288,6 +288,82 @@ function buildSummarizationUserContent(account, firstName, fallback, opts = {}) 
   return lines.join('\n');
 }
 
+// Compact, token-minimal context block for the chat endpoint.
+//
+// The previous chat flow dumped up to 250 historical + 250 upcoming + 250
+// forecasted transactions plus full balance arrays as pretty-printed JSON —
+// routinely 50-100 KB (~15-25K tokens) on every single turn. This seeds only a
+// high-signal brief (~1-2 KB) built from the precomputed fields on the
+// getSelectedAccount blob. Anything more specific (a single transaction, a
+// category, a merchant, a date range) is fetched on demand by the
+// function-calling tools, so the model still has full reach without paying the
+// upfront token cost.
+function buildChatAccountContext(account, firstName, currentDate) {
+  const today = currentDate || moment().format('YYYY-MM-DD');
+  const monthLabel = moment(today, 'YYYY-MM-DD').format('MMMM');
+  const monthEnd = moment(today, 'YYYY-MM-DD').endOf('month').format('MMM D');
+
+  const name = account.accountname || account.bank_account_name || account.institution_name || 'their account';
+  const type = account.account_type || account.type || '';
+  const inst = account.institution_name || '';
+  const balance = fmtMoney(typeof account.balance === 'number' ? account.balance : Number(account.balance));
+  const available = fmtMoney(typeof account.available === 'number' ? account.available : Number(account.available));
+
+  const lines = [
+    `Today: ${today}. User first name: ${firstName}.`,
+    `Account: ${name}${type ? ` (${type})` : ''}${inst ? ` @ ${inst}` : ''} — balance ${balance}, available ${available}.`,
+  ];
+
+  if (typeof account.credit_limit === 'number' && account.credit_limit > 0) {
+    lines.push(`Credit limit ${fmtMoney(account.credit_limit)}.`);
+  }
+  if (account.plaid_latest) {
+    lines.push(`Latest activity: ${shortDate(account.plaid_latest)}.`);
+  }
+
+  const sav = account.savings;
+  if (sav && typeof sav === 'object') {
+    const pot = typeof sav.savingsPotential === 'number' ? sav.savingsPotential : Number(sav.savingsPotential);
+    if (Number.isFinite(pot)) {
+      lines.push(`Lowest projected balance through end of ${monthLabel} (${monthEnd}): ${fmtMoney(pot)}.`);
+    }
+  }
+  if (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number') {
+    lines.push(`Next 14 days: income ${fmtMoney(Math.abs(account.upcomingIncomeTotal || 0))}, expenses ${fmtMoney(Math.abs(account.upcomingExpenseTotal || 0))}.`);
+  }
+
+  const negs = pickNegativeBalancePreviews(account, 3);
+  if (negs.length > 0) {
+    lines.push(`Future negative projected balances: ${negs.join('; ')}.`);
+  }
+
+  const recent = pickRecentTransactions(account, 10);
+  if (recent.length > 0) {
+    lines.push(`Recent posted (Name|Amt|Date): ${recent.join('; ')}.`);
+  }
+  const upc = pickUpcomingTransactions(account, 10);
+  if (upc.length > 0) {
+    lines.push(`Upcoming forecasted (Name|Amt|Date): ${upc.join('; ')}.`);
+  }
+
+  lines.push('');
+  lines.push(
+    'This is a high-level brief. For anything not listed above (a specific transaction, category, merchant, or date range), call the available tools to fetch exact data instead of guessing. Use createTransaction to add forecasts and deleteTransaction to remove them.'
+  );
+  return lines.join('\n');
+}
+
+// No-account variant: keep it short and let the (already large) system prompt
+// + FAQ carry the feature explanations.
+function buildChatNoAccountContext(firstName) {
+  return [
+    `User first name: ${firstName}.`,
+    'The user has NOT loaded any accounts yet.',
+    'Explain Keacast\'s purpose and features (calendar-based cash-flow forecasting, reconciliation, recurring detection, scenario planning, category breakdowns) and how to connect accounts via Plaid, then add forecasted transactions and reconcile history.',
+    'Use the FAQ in the system prompt. Encourage listing incomes first, then expenses, so the calendar can reveal cash flow over time.',
+  ].join('\n');
+}
+
 function truncateText(text, maxChars) {
   if (text === undefined || text === null) return '';
   const str = String(text).trim();
@@ -768,8 +844,6 @@ exports.chat = async (req, res) => {
     }
 
     let dataMessage;
-    // Prefer explicit context sent in body
-    let userContext = extractContextFromBody(req) || {};
 
     // Extract location data from request body
     const location = req.body?.location;
@@ -779,157 +853,89 @@ exports.chat = async (req, res) => {
     const currentDate = getCurrentDateInTimezone(location);
     console.log('Using current date:', currentDate);
 
-    // If no explicit context or we need to preload additional data, use cached context service
-    if (!userContext || Object.keys(userContext).length === 0 || !userContext.selectedAccounts) {
-      if (userId && token && accountid) {
-        try {
-          console.log('Chat endpoint: Using context cache service for user:', userId, 'account:', accountid);
-          
-          // Use cached context service - this will return cached data if available, or build and cache fresh data
-          userContext = await contextCache.getUserContext(userId, token, accountid, location);
-          
-          // Merge any transactions from request body with cached data
-          if (req.body?.transactions && Array.isArray(req.body.transactions)) {
-            const bodyTransactions = req.body.transactions;
-            const cachedTransactions = userContext.cfTransactions || [];
-            userContext.cfTransactions = [...bodyTransactions, ...cachedTransactions];
-            console.log('Chat endpoint: Merged request body transactions with cached data - Body:', bodyTransactions.length, 'Cached:', cachedTransactions.length, 'Total:', userContext.cfTransactions.length);
-          }
-          
-          // Update current date to ensure it's fresh
-          userContext.currentDate = currentDate;
-          
-          if (userContext._cached) {
-            console.log('Chat endpoint: Used cached user context (age:', userContext._cacheAge, 'minutes)');
-            dataMessage = `Used cached context data (${userContext._cacheAge} minutes old) - no API calls needed!`;
-          } else {
-            console.log('Chat endpoint: Built fresh user context via cache service');
-            dataMessage = 'Built fresh context data and cached for future requests';
-          }
-          
-        } catch (err) {
-          console.warn('Chat endpoint: Context cache service failed, falling back to direct calls:', err?.message);
-          
-          // Fallback to original direct API calls
-          try {
-            const ctx = { userId, authHeader };
-            
-            // First get user data
-            const userData = await functionMap.getUserData({ userId, token }, ctx);
-            console.log('User data retrieved via fallback:', userData);
+    // ── Resolve the selected-account blob via the tool layer ──────────────
+    // Mirrors exports.summarization: prefer a client-sent accountSnapshot,
+    // otherwise fetch the slim, fully-enriched single-account blob through
+    // functionMap.getSelectedAccount (Redis-cached 5 min). This replaces the
+    // old contextCache / getSelectedKeacastAccounts preload and the multi-KB
+    // JSON dump — specifics are now fetched on demand by the tools below.
+    const accountSnapshot = req.body?.accountSnapshot;
+    let selectedAccount = null;
+    let selectedAccountSource = 'none';
 
-            const upcomingEnd = moment(currentDate).add(14, 'days').format('YYYY-MM-DD');
-            const recentStart = moment(currentDate).subtract(3, 'months').format('YYYY-MM-DD');
-            const recentEnd = moment(currentDate).add(1, 'days').format('YYYY-MM-DD');
-            
-            // Then use user data to get selected accounts
-            const selectedAccounts = await functionMap.getSelectedKeacastAccounts({ 
-              userId, 
-              token, 
-              body: {
-                "currentDate": currentDate,
-                "forecastType": "F",
-                "recentStart": recentStart,
-                "recentEnd": recentEnd,
-                "page": "layout",
-                "position": 0,
-                selectedAccounts: [accountid],
-                upcomingEnd: upcomingEnd,
-                user: userData
-              } 
-            }, ctx);
-            const balances = await functionMap.getBalances({ accountId: selectedAccounts[0].accountid, userId, token }, ctx);
-            const filteredBalances = balances ? balances.forecasted.filter(balance => moment(balance.date).isBetween(moment().subtract(6, 'months'), moment().add(12, 'months'))) : [];
-            console.log('Selected accounts retrieved via fallback:', selectedAccounts);
+    if (
+      accountSnapshot &&
+      typeof accountSnapshot === 'object' &&
+      (accountSnapshot.accountid !== undefined || typeof accountSnapshot.balance === 'number')
+    ) {
+      selectedAccount = accountSnapshot;
+      selectedAccountSource = 'snapshot';
+    }
 
-            // Merge transactions from both sources (request body and selected accounts)
-            const bodyTransactions = userContext.transactions || [];
-            const accountTransactions = selectedAccounts[0]?.cfTransactions || [];
-            const allTransactions = [...bodyTransactions, ...accountTransactions];
-            
-            console.log('Chat endpoint: Fallback merged transactions - Body:', bodyTransactions.length, 'Account:', accountTransactions.length, 'Total:', allTransactions.length);
-            
-            userContext = {
-              userData: userData || {},
-              selectedAccounts: selectedAccounts || [],
-              accounts: [], // keep for backward compatibility
-              categories: selectedAccounts[0]?.categories || userContext.categories || [], // fill if you expose a categories tool in functionMap
-              shoppingList: selectedAccounts[0]?.shoppingList || userContext.shoppingList || [], // fill if you expose a shoppingList tool in functionMap
-              cfTransactions: allTransactions,
-              upcomingTransactions: selectedAccounts[0]?.upcoming || [],
-              possibleRecurringTransactions: selectedAccounts[0]?.plaidRecurrings || [],
-              plaidTransactions: selectedAccounts[0]?.plaidTransactions || [],
-              recentTransactions: selectedAccounts[0]?.recents || [],
-              breakdown: selectedAccounts[0]?.breakdown || [],
-              balances: filteredBalances || selectedAccounts[0]?.balances || [],
-              available: selectedAccounts[0]?.available || [],
-              currentDate: currentDate
-            };
-            console.log('Chat endpoint: Fallback preloaded user context via functionMap.');
-            dataMessage = 'Fallback: Preloaded user context via direct API calls (cache service failed)';
-          } catch (fallbackErr) {
-            console.error('Chat endpoint: Both cache service and fallback failed:', fallbackErr?.message);
-            dataMessage = `Error: ${fallbackErr?.message}`;
-          }
+    if (!selectedAccount && userId && token && accountid) {
+      const toolCacheKey = selectedAccountToolCacheKey(userId, accountid);
+      try {
+        const cached = await redis.get(toolCacheKey);
+        if (cached) {
+          selectedAccount = JSON.parse(cached);
+          selectedAccountSource = 'tool-cache';
+          console.log('Chat endpoint: Using cached selected-account blob for account', accountid);
         }
-      } else {
-        console.log('Chat endpoint: Skipping preload (missing userId, token, or accountid)');
-        dataMessage = 'Chat endpoint: Skipping preload (missing userId, token, or accountid)';
+      } catch (e) {
+        console.warn('Chat endpoint: tool-layer cache read failed:', e.message);
       }
+
+      if (!selectedAccount) {
+        try {
+          const t0 = Date.now();
+          selectedAccount = await functionMap.getSelectedAccount({
+            userId,
+            accountId: accountid,
+            token,
+            body: { clientDate: currentDate },
+            timeoutMs: SELECTED_ACCOUNT_TOOL_TIMEOUT_MS,
+          }, { userId, token, accountId: accountid });
+          console.log('Chat endpoint: tool-layer fetch completed in', Date.now() - t0, 'ms');
+          selectedAccountSource = 'tool-fresh';
+          if (selectedAccount && typeof selectedAccount === 'object') {
+            try {
+              await redis.set(toolCacheKey, JSON.stringify(selectedAccount), 'EX', SELECTED_ACCOUNT_TOOL_TTL);
+            } catch (e) {
+              console.warn('Chat endpoint: tool-layer cache write failed:', e.message);
+            }
+          }
+        } catch (toolErr) {
+          console.warn(
+            'Chat endpoint: tool-layer fetch failed —',
+            'status:', toolErr?.response?.status,
+            'message:', toolErr?.message
+          );
+          selectedAccount = null;
+        }
+      }
+    } else if (!userId || !token || !accountid) {
+      console.log('Chat endpoint: Skipping account preload (missing userId, token, or accountid)');
     }
 
-    // Create a more intelligent context summary
-    const contextSummary = createContextSummary(userContext);
+    const hasAccount = !!(
+      selectedAccount &&
+      typeof selectedAccount === 'object' &&
+      (selectedAccount.accountid !== undefined || typeof selectedAccount.balance === 'number')
+    );
+    dataMessage = hasAccount
+      ? `Loaded account context via ${selectedAccountSource}`
+      : 'No account context (missing account or tool-layer unavailable)';
 
-    // const plaidContext = `Here is my transaction history: ${JSON.stringify(contextSummary.plaidTransactions, null, 2)}`;
-    // const upcomingContext = `Here is my upcoming transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}`;
-    // const forecastedContext = `Here is my forecasted transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}`;
-    let completeContext = '';
-    if (userContext.selectedAccounts) {
-      completeContext = `
-        Use this context to answer the user's question be sure to be aware of the users account balances and do not allow the user to spend more than they have available and if the user has future negative balances then warn them. You can also use the available balance to suggest ways to save money, invest, pay off debt, plan for a vacation, retirement, etc.
-        Here is my user's first name:
-        ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
-        Here is my user's last name:
-        ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
-        Here is my user's email:
-        ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
-        The account name is ${contextSummary.selectedAccounts?.name || ''} ${contextSummary.selectedAccounts?.bank_account_name || ''}.
-        The account type is ${contextSummary.selectedAccounts?.account_type || ''}.
-        The institution name is ${contextSummary.selectedAccounts?.institution_name || ''}.
-        The latest activity was updated on ${contextSummary.selectedAccounts?.plaid_latest || ''}.
-        Here are my account transactions split by historical, upcoming, and forecasted context each transaction has a date, amount, category, name, and description:
-        Historical Transactions: ${JSON.stringify(contextSummary.transactions, null, 2)}
-        Upcoming Transactions: ${JSON.stringify(contextSummary.upcomingTransactions, null, 2)}
-        Forecasted Transactions: ${JSON.stringify(contextSummary.forecastedTransactions, null, 2)}
-        Here is my account available balance:
-        ${JSON.stringify(contextSummary.availableBalance, null, 2)}
-        Here is my account forecasted balance:
-        ${JSON.stringify(contextSummary.forecastedBalance, null, 2)}
-        Here are my account balances (posted, pending and forecasted) with the following details: amount, date, status:
-        ${JSON.stringify(contextSummary.balances, null, 2)}
-    `
-    }
-    
-    if (!userContext.selectedAccounts) {
-      completeContext = `
-        Use this context to answer the user's question. The user has not loaded any accounts yet so we need to provide the user with Keacast's features and capabilities. Highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner. The user may need help understanding how to connect their accounts to Keacast via Plaid and setting up their accounts by adding forecasted transactions and reconciling their account history once they have connected their accounts. Point them to things they can be thinking about ahead of connecting their accounts, like understanding their incomes, expenses, and savings plans. Keacast likes to start with a blank slate and list the incomes, then the expenses and the Keacast calendar will help you understand your cashflow over time. 
-        Here is my user's first name:
-        ${JSON.stringify(contextSummary.userData?.firstname || '', null, 2)}
-        Here is my user's last name:
-        ${JSON.stringify(contextSummary.userData?.lastname || '', null, 2)}
-        Here is my user's email:
-        ${JSON.stringify(contextSummary.userData?.email || '', null, 2)}
-      `
-    }
-    // Here are the possible recurring transactions that have been detected with the following details: name, last_amount, average_amount, date, first_date, category, merchant_name, frequency, and transactions:
-    //     ${JSON.stringify(contextSummary.possibleRecurringTransactions, null, 2)}Here are the user's categories:
-    //     ${JSON.stringify(contextSummary.categories, null, 2)}
-    //     Here is my user's selected accounts with relevant account details like name, account type, balance, available, current, credit limit, forecasted, bank account name, and institution name:
-    //     ${JSON.stringify(contextSummary.selectedAccounts, null, 2)}
-    // const recentContext = `Here is my recent transactions: ${JSON.stringify(contextSummary.recentTransactions, null, 2)}`;
-    // const breakdownContext = `Here is my category spending breakdown: ${JSON.stringify(contextSummary.breakdown, null, 2)}`;
+    // ── Build a compact, token-minimal context block ─────────────────────
+    // Specific lookups (a single transaction, a category, a date range) are
+    // handled on demand by the function-calling tools below, so we only seed a
+    // small high-signal brief instead of dumping hundreds of rows of JSON.
+    const firstName = coerceFirstName(req.body?.userData, selectedAccount?.user || null);
+    const completeContext = hasAccount
+      ? buildChatAccountContext(selectedAccount, firstName, currentDate)
+      : buildChatNoAccountContext(firstName);
     const contextArray = [completeContext];
+    console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
 
     const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting. If the user has not loaded any accounts yet, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner, use the FAQ items to help the user understand how to use Keacast. Always use the FAQ items to help the user understand Keacast and how it can help them, application specific questions and answers should be included.  
     When referencing the FAQ items, don't use the answers word for word, use the questions and answers and create a response that is relevant to the user's question.  
@@ -1007,17 +1013,14 @@ exports.chat = async (req, res) => {
       ...sanitizeMessageArray(history.map(truncateMessage))
     ];
 
-    // Add detailed context as a separate message if we have significant data
-    if (userContext && Object.keys(userContext).length > 0) {
-      for (let i = 0; i < contextArray.length; i++) {
-        if (contextArray[i]) {
-          messages.push({
-            role: 'user',
-            content: contextArray[i]
-          });
-          console.log('Chat endpoint: Added context message with size:', JSON.stringify(contextArray[i]).length, 'bytes');
-          console.log('Chat endpoint: Context includes transactions:', userContext.transactions ? userContext.transactions.length : 0, 'transactions');
-        }
+    // Add the compact context block as a separate user message.
+    for (let i = 0; i < contextArray.length; i++) {
+      if (contextArray[i]) {
+        messages.push({
+          role: 'user',
+          content: contextArray[i]
+        });
+        console.log('Chat endpoint: Added context message with size:', contextArray[i].length, 'chars');
       }
     }
 
@@ -1124,7 +1127,7 @@ exports.chat = async (req, res) => {
     res.json({
       response: finalText,
       memoryUsed: updatedHistory.length,
-      contextLoaded: !!Object.keys(userContext || {}).length,
+      contextLoaded: hasAccount,
       dataMessage: dataMessage,
       requestSize: requestSize,
       error: result?.error,
