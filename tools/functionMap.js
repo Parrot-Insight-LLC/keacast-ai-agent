@@ -53,8 +53,13 @@ function normalizeCreateTransactionInput(args = {}, ctx = {}) {
 
   // amount: persist signed (negative = expense, positive = income) so the LLM
   // can pass a plain magnitude and we still match existing data conventions.
+  // The model is expected to estimate + confirm an amount before calling, so a
+  // non-finite amount here is a safety-net only (default 0 to avoid a NULL
+  // insert / backend crash).
   if (Number.isFinite(rawAmount)) {
     out.amount = type === 'expense' ? -Math.abs(rawAmount) : Math.abs(rawAmount);
+  } else {
+    out.amount = 0;
   }
 
   // frequency: default to a one-time entry unless recurrence was specified.

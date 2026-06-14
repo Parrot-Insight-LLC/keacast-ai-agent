@@ -132,22 +132,22 @@
     "type": "function",
     "function": {
       "name": "createTransaction",
-      "description": "Create a forecasted income or expense on the user's currently selected account. Make this effortless: the user does NOT have to supply every field. Infer as much as possible from the conversation and account context, and let the system defaults fill the rest. Only ask a follow-up question if the AMOUNT is genuinely unknown. Pass amount as a positive number and set type ('expense' or 'income'); the system applies the correct sign. If you omit them, the system defaults: frequency=2 (one-time), start=today, end=start for one-time or start+1 year for recurring, category/title/description from context, time=12:00. Set frequency only when the user implies recurrence (e.g. 'every month' => 28-31, 'weekly' => 7). Before creating, stay mindful of the user's available balance and warn about any resulting negative forecasted balances.",
+      "description": "Create a forecasted income or expense on the user's currently selected account. The user does NOT have to supply ANY field — estimate every value you weren't given (title, amount, type, category, date, frequency) from the conversation, account context, and the user's similar/recurring/recent transactions. CRITICAL: this tool writes real data, so do NOT call it until you have shown the user the full proposed transaction (title, type, amount, start date, frequency if recurring) and they have EXPLICITLY confirmed. On the turn the user first asks, DO NOT call this — propose the estimated details and ask them to confirm or adjust; only call it after they say yes. Pass amount as a positive number and set type ('expense' or 'income'); the system applies the correct sign. Omitted fields default: frequency=2 (one-time), start=today, end=start for one-time or start+1 year for recurring, category/title/description from context, time=12:00. Set frequency only when recurrence is implied (e.g. 'every month' => 28-31, 'weekly' => 7). Always warn about any resulting negative forecasted balances.",
       "parameters": {
         "type": "object",
         "properties": {
           "title": {
             "type": "string",
-            "description": "Short name, e.g. 'Rent' or 'Paycheck'. Inferred from context if omitted."
+            "description": "Short name, e.g. 'Rent' or 'Paycheck'. Estimate from context if not stated."
           },
           "type": {
             "type": "string",
             "enum": ["expense", "income"],
-            "description": "expense for money spent, income for money received."
+            "description": "expense for money spent, income for money received. Estimate from context if not stated."
           },
           "amount": {
             "type": "number",
-            "description": "Positive magnitude of the transaction; the system signs it based on type."
+            "description": "Positive magnitude of the transaction; the system signs it based on type. Estimate from similar/recurring transactions if the user didn't give one."
           },
           "category": {
             "type": "string",
@@ -187,7 +187,7 @@
             "description": "F=one-off forecast (default), RF=recurring forecast."
           }
         },
-        "required": ["amount", "type"]
+        "required": []
       }
     }
   },
