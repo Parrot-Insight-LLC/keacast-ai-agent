@@ -907,7 +907,6 @@ exports.chat = async (req, res) => {
     const completeContext = hasAccount
       ? buildChatAccountContext(selectedAccount, firstName, currentDate)
       : buildChatNoAccountContext(firstName);
-    const contextArray = [completeContext];
     console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
 
     const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting. If the user has not loaded any accounts yet, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner, use the FAQ items to help the user understand how to use Keacast. Always use the FAQ items to help the user understand Keacast and how it can help them, application specific questions and answers should be included.  
@@ -964,6 +963,7 @@ exports.chat = async (req, res) => {
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
     - Creating a transaction should feel effortless. The user does NOT have to provide a title, amount, type, category, date, or frequency. ESTIMATE every field you weren't given from this conversation, the account context, and the user's similar/recurring/recent transactions (e.g. estimate a Netflix expense at their typical streaming amount, a paycheck from their recurring income). Never make the user fill in details just to satisfy the tool.
     - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction (title, type, amount, start date, and frequency if recurring) and they have EXPLICITLY confirmed (e.g. "yes", "go ahead"). On the turn the user first expresses intent, do NOT call the tool — instead reply with the estimated transaction details and ask them to confirm or adjust. Only call createTransaction on a later turn after they confirm. If they tweak a value, restate the updated proposal and confirm again.
+    - CONFIRMATION HANDLING: If your previous assistant message in this conversation proposed a transaction and the user's new message is an affirmative ("yes", "yes please", "yes please create the transaction", "go ahead", "do it", "confirm", "sounds good"), that is the confirmation — immediately call createTransaction using the exact values you proposed (pull them from your previous message in the history). Do NOT start over, do NOT ask what they need help with, and do NOT re-ask for details you already proposed. After it's created, confirm with the details.
     - Use the full chat history above as memory: remember the amounts, dates, merchants, goals, and any transaction you already proposed earlier in this conversation, and reuse them so the user never has to repeat themselves (the confirmation turn relies on this).
     - Carry conversation TOPICS into transactions. When the user asks to "add a transaction" (or "add that", "log it", "put that in my forecast") without naming what it's for, scan back through the recent messages for the most relevant purchase/expense/income topic that was being discussed and treat THAT as the subject. Example: if you were just discussing a carpet replacement and the user then says "add a transaction", understand it's the carpet replacement — set the title/description/category accordingly and estimate the amount from any figure mentioned in that discussion (or a reasonable estimate for that item). Briefly state which topic you linked it to in your confirmation prompt so the user can correct you if you guessed wrong.
     - When creating transactions, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created. Make sure not to duplicate or repeat anything in your response.
@@ -984,22 +984,22 @@ exports.chat = async (req, res) => {
     
     Review the app here: https://keacast.app/ for more context and information.`;
 
+    // Attach the compact context block as BACKGROUND inside the system message
+    // rather than as a per-turn user message. Injecting it as a `user` turn
+    // between the history and the real user message used to derail multi-turn
+    // flows: on a confirmation turn the model saw [assistant: "...confirm?"],
+    // then a system-authored "user" context dump, then "yes please" — and
+    // treated the context dump as a topic change, restarting the conversation.
+    const systemContent = completeContext
+      ? `${baseSystem}\n\n---\nCURRENT CONTEXT (background — NOT a message from the user):\n${completeContext}`
+      : baseSystem;
+
     // Build message array with memory and clean up long messages
     const messages = [
-      { role: 'system', content: baseSystem },
+      { role: 'system', content: systemContent },
       ...sanitizeMessageArray(history.map(truncateMessage))
     ];
-
-    // Add the compact context block as a separate user message.
-    for (let i = 0; i < contextArray.length; i++) {
-      if (contextArray[i]) {
-        messages.push({
-          role: 'user',
-          content: contextArray[i]
-        });
-        console.log('Chat endpoint: Added context message with size:', contextArray[i].length, 'chars');
-      }
-    }
+    console.log('Chat endpoint: system+context size:', systemContent.length, 'chars; history msgs:', messages.length - 1);
 
     // Add the actual user message
     messages.push({ role: 'user', content: message });
