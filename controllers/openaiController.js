@@ -461,6 +461,29 @@ function sanitizeMessageArray(messages) {
   return sanitized;
 }
 
+// Normalize a client-sent chat transcript into [{role, content}] turns.
+// Accepts both the backend shape ({role, content}) and the frontend chat-UI
+// shape ({sender, text}). Keeps only non-empty user/assistant turns and caps
+// to the most recent MAX_MEMORY so the request stays lean.
+function normalizeClientHistory(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const m of raw) {
+    if (!m || typeof m !== 'object') continue;
+    let role = m.role;
+    if (role !== 'user' && role !== 'assistant') {
+      role = m.sender === 'assistant' ? 'assistant' : m.sender === 'user' ? 'user' : null;
+    }
+    const content = typeof m.content === 'string'
+      ? m.content
+      : (typeof m.text === 'string' ? m.text : '');
+    if ((role === 'user' || role === 'assistant') && content && content.trim()) {
+      out.push({ role, content: content.trim() });
+    }
+  }
+  return out.slice(-MAX_MEMORY);
+}
+
 function extractAuthFromRequest(req) {
   const bearerToken = req.headers.authorization?.startsWith('Bearer ')
     ? req.headers.authorization.split(' ')[1]
@@ -816,6 +839,28 @@ exports.chat = async (req, res) => {
       history = [];
     }
 
+    // Prefer the client-sent transcript when provided. It's the exact
+    // conversation the user is looking at, so it can't drift from the UI even
+    // if Redis memory was evicted or unavailable — that drift was causing the
+    // assistant to "forget" what was just discussed (e.g. a proposed carpet
+    // transaction) on the very next (confirmation) turn.
+    const clientHistory = normalizeClientHistory(req.body?.history);
+    if (clientHistory && clientHistory.length > 0) {
+      history = clientHistory;
+      console.log('Chat endpoint: Using client-provided history of', history.length, 'messages');
+    }
+
+    // Dedup: the frontend transcript usually already ends with the message
+    // we're about to process, and we append `message` separately below. Drop a
+    // trailing user echo so the model doesn't see the current question twice.
+    if (
+      history.length &&
+      history[history.length - 1].role === 'user' &&
+      String(history[history.length - 1].content || '').trim() === String(message || '').trim()
+    ) {
+      history = history.slice(0, -1);
+    }
+
     let dataMessage;
 
     // Extract location data from request body
@@ -964,6 +1009,7 @@ exports.chat = async (req, res) => {
     - Creating a transaction should feel effortless. The user does NOT have to provide a title, amount, type, category, date, or frequency. ESTIMATE every field you weren't given from this conversation, the account context, and the user's similar/recurring/recent transactions (e.g. estimate a Netflix expense at their typical streaming amount, a paycheck from their recurring income). Never make the user fill in details just to satisfy the tool.
     - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction (title, type, amount, start date, and frequency if recurring) and they have EXPLICITLY confirmed (e.g. "yes", "go ahead"). On the turn the user first expresses intent, do NOT call the tool — instead reply with the estimated transaction details and ask them to confirm or adjust. Only call createTransaction on a later turn after they confirm. If they tweak a value, restate the updated proposal and confirm again.
     - CONFIRMATION HANDLING: If your previous assistant message in this conversation proposed a transaction and the user's new message is an affirmative ("yes", "yes please", "yes please create the transaction", "go ahead", "do it", "confirm", "sounds good"), that is the confirmation — immediately call createTransaction using the exact values you proposed (pull them from your previous message in the history). Do NOT start over, do NOT ask what they need help with, and do NOT re-ask for details you already proposed. After it's created, confirm with the details.
+    - STAY ON TOPIC: The transaction you create must be the one that was actually being DISCUSSED with the user (e.g. the carpet replacement you just proposed). NEVER substitute an unrelated item that merely appears in the account context or the "Recent posted"/"Upcoming forecasted" lists (e.g. a paycheck). The CURRENT CONTEXT block is reference data only — it is never the thing to create unless the user explicitly asked for it.
     - Use the full chat history above as memory: remember the amounts, dates, merchants, goals, and any transaction you already proposed earlier in this conversation, and reuse them so the user never has to repeat themselves (the confirmation turn relies on this).
     - Carry conversation TOPICS into transactions. When the user asks to "add a transaction" (or "add that", "log it", "put that in my forecast") without naming what it's for, scan back through the recent messages for the most relevant purchase/expense/income topic that was being discussed and treat THAT as the subject. Example: if you were just discussing a carpet replacement and the user then says "add a transaction", understand it's the carpet replacement — set the title/description/category accordingly and estimate the amount from any figure mentioned in that discussion (or a reasonable estimate for that item). Briefly state which topic you linked it to in your confirmation prompt so the user can correct you if you guessed wrong.
     - When creating transactions, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created. Make sure not to duplicate or repeat anything in your response.
