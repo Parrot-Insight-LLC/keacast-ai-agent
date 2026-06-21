@@ -6,6 +6,11 @@ const contextCache = require('../services/contextCache.service'); // <-- use con
 const moment = require('moment');
 const momentTimezone = require('moment-timezone');
 const crypto = require('crypto');
+// Shared vendor/merchant normalization (alias map + brand-root folding), ported
+// from the frontend's vendor-normalize.ts so categorization merges merchant
+// variants ("AMZN Mktp" / "Amazon.com", "COSTCO GAS #421" / "Costco gas") the
+// same way the Sankey / pivot views do — strengthening history matching.
+const { mergeVendorName } = require('../utils/vendorNormalize');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
@@ -1687,12 +1692,21 @@ function stripWrappingQuotes(str) {
 
 // Lowercased, alphanumeric-only merchant key. Stable across whitespace,
 // punctuation, and common Plaid noise like trailing store numbers.
+//
+// Runs the raw name through the shared vendor normalizer FIRST (alias map +
+// brand-root folding) so brand variants collapse to one key before we strip to
+// alphanumerics. e.g. "AMZN Mktp US*2T4...", "Amazon.com", "AMAZON PRIME" all
+// resolve to `amazon`; "COSTCO GAS #421" and "Costco gas" both to `costco`.
+// This is what makes the merchant-history bucket (summarizeMerchantHistory,
+// pickRelevantHistory) and the per-merchant cache slot far stronger.
 function normalizeMerchantName(name) {
   if (!name || typeof name !== 'string') return '';
-  return name
+  const merged = mergeVendorName(name);
+  const key = (merged || name)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '')
     .slice(0, 64);
+  return key;
 }
 
 // Plaid sends `personal_finance_category` as `{ primary, detailed, confidence_level }`.
@@ -2491,16 +2505,14 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
     }
   }
 
-  // 2. Exact merchant name match in transaction history.
+  // 2. Canonical merchant match in transaction history. Uses getMerchantKey
+  //    (alias + brand-root folded) on BOTH sides so brand variants line up —
+  //    "AMZN Mktp" matches a history row named "Amazon.com", and a hand-typed
+  //    "Costco gas" matches "COSTCO GAS #421".
   if (Array.isArray(transactionHistory) && transactionHistory.length > 0) {
-    const merchantName = typeof transaction.merchant_name === 'string'
-      ? transaction.merchant_name.toLowerCase()
-      : '';
-    if (merchantName) {
-      const exactMatches = transactionHistory.filter((t) =>
-        typeof t?.merchant_name === 'string' &&
-        t.merchant_name.toLowerCase() === merchantName
-      );
+    const merchantKey = getMerchantKey(transaction);
+    if (merchantKey) {
+      const exactMatches = transactionHistory.filter((t) => getMerchantKey(t) === merchantKey);
       
       if (exactMatches.length > 0) {
         const mostCommonCategory = getMostCommonCategory(exactMatches);
