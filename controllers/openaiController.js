@@ -1649,9 +1649,13 @@ STYLE:
 // merchant + Plaid-signal driven, so a 7-day cache is plenty conservative —
 // the same merchant repeats constantly during reconcile sessions and we don't
 // need to round-trip OpenAI for every duplicate.
-const AUTOCATEGORIZE_CACHE_TTL = 60 * 60 * 24 * 7; // 7 days
+// Fast-path results (pure deterministic logic — cheap to recompute) expire in
+// 24 h so that user corrections propagate within a day without an explicit
+// cache flush. LLM results (expensive) keep the 7-day TTL.
+const AUTOCATEGORIZE_CACHE_TTL_FAST = 60 * 60 * 24;        // 24 hours
+const AUTOCATEGORIZE_CACHE_TTL      = 60 * 60 * 24 * 7;    // 7 days
 // Total cap on items handed to the LLM after pickRelevantHistory ranks by
-// merchant > Plaid PFC > legacy category. Bumped from 12 → 100 to give the
+// merchant > Plaid PFC > user category. Bumped from 12 → 100 to give the
 // model richer context for ambiguous merchants. Each item is compacted
 // (description trimmed to 80 chars) so 100 items lands in the ballpark of
 // ~3–4K prompt tokens — well within the deployment's context budget.
@@ -1761,6 +1765,22 @@ function getLegacyCategory(item) {
   return cat ? String(cat) : '';
 }
 
+// Returns the user's actual assigned category for a transaction history item.
+// Prefers `adjusted_category` (set by the app after reconciliation / mapping)
+// over `user_category` (explicit rename) over the raw `category` field.
+//
+// This is the field to use whenever you want to learn "what did the user
+// decide this transaction belongs to?" — NOT the raw Plaid legacy category
+// (which is what getLegacyCategory returns and is used only as a Plaid signal).
+function getUserCategory(item) {
+  if (!item || typeof item !== 'object') return '';
+  const uc = item.adjusted_category || item.user_category;
+  if (uc && typeof uc === 'string' && uc.trim()) return uc.trim();
+  // Fallback: if no explicit user-assigned field, use the stored category
+  // string (which for DB-backed transactions IS the user-assigned name).
+  return getLegacyCategory(item);
+}
+
 function getNumericAmount(item) {
   const n = typeof item?.amount === 'number' ? item.amount : Number(item?.amount);
   return Number.isFinite(n) ? n : null;
@@ -1792,10 +1812,13 @@ function summarizeMerchantHistory(transaction, history) {
   if (matches.length === 0) return null;
 
   // Tally categories with O(n) scan.
+  // getUserCategory prefers the user's assigned category (adjusted_category)
+  // over the raw Plaid legacy field so the summary reflects what the user
+  // actually chose, not what Plaid labelled.
   const counts = new Map();
   const amounts = [];
   for (const m of matches) {
-    const cat = getLegacyCategory(m);
+    const cat = getUserCategory(m);
     if (cat) counts.set(cat, (counts.get(cat) || 0) + 1);
     const amt = getNumericAmount(m);
     if (amt !== null) amounts.push(amt);
@@ -1837,7 +1860,7 @@ function summarizeMerchantHistory(transaction, history) {
 //   1. Same merchant + amount-within-bucket  ← the user's strongest pattern
 //   2. Same merchant (any amount)
 //   3. Same Plaid PFC detailed code
-//   4. Same legacy category
+//   4. Same user-assigned category (getUserCategory — the user's actual choice)
 // Each pass runs against the same dedup `seen` set so we never count an item
 // twice and the order in `out` reflects the ranking — that's what the LLM
 // reads top-down.
@@ -1846,13 +1869,16 @@ function pickRelevantHistory(transaction, history) {
 
   const targetMerchant = getMerchantKey(transaction);
   const targetPfcDetailed = pickPfcSignals(transaction).detailed;
-  const targetLegacy = getLegacyCategory(transaction);
+  const targetUserCategory = getUserCategory(transaction);
   const targetAmount = getNumericAmount(transaction);
 
   const seen = new Set();
   const out = [];
   const push = (item, matchedOn) => {
-    const key = `${getMerchantKey(item)}|${item?.amount}|${getLegacyCategory(item)}`;
+    // Dedup key includes user-assigned category so two rows from the same
+    // merchant/amount that the user categorised differently are both kept —
+    // they carry independent signals about category ambiguity.
+    const key = `${getMerchantKey(item)}|${item?.amount}|${getUserCategory(item)}`;
     if (seen.has(key)) return;
     seen.add(key);
     out.push({
@@ -1860,7 +1886,10 @@ function pickRelevantHistory(transaction, history) {
       display_name: item?.display_name || undefined,
       merchant: item?.merchant_name || '',
       amount: getNumericAmount(item),
-      category: getLegacyCategory(item) || undefined,
+      // user_category is what the user actually chose — primary learning signal.
+      user_category: getUserCategory(item) || undefined,
+      // plaid_category is the raw Plaid legacy field — kept as a Plaid signal.
+      plaid_category: getLegacyCategory(item) || undefined,
       pfc_detailed: pickPfcSignals(item).detailed || undefined,
       // Trim description aggressively — most of the value is in the first 80 chars.
       description: typeof item?.description === 'string' ? item.description.slice(0, 80) : undefined,
@@ -1901,11 +1930,13 @@ function pickRelevantHistory(transaction, history) {
     }
   }
 
-  // 4. Same legacy category.
-  if (targetLegacy) {
+  // 4. Same user-assigned category. Uses getUserCategory on both sides so
+  //    this reflects what the user deliberately chose, not the Plaid legacy
+  //    label (which differs from the user's taxonomy and made this pass a no-op).
+  if (targetUserCategory) {
     for (const item of history) {
       if (out.length >= AUTOCATEGORIZE_HISTORY_LIMIT) break;
-      if (getLegacyCategory(item) === targetLegacy) push(item, 'category');
+      if (getUserCategory(item) === targetUserCategory) push(item, 'user_category');
     }
   }
 
@@ -2005,11 +2036,13 @@ exports.autoCategorizeTransaction = async (req, res) => {
       if (fastName && nameByLower.has(String(fastName).toLowerCase())) {
         const resolved = nameByLower.get(String(fastName).toLowerCase());
         try {
+          // Fast-path results use the shorter TTL (24 h) so user corrections
+          // propagate within a day rather than being stuck for a full week.
           await redis.set(
             cacheKey,
             JSON.stringify({ suggestedCategory: resolved, confidence: 'high', via: 'fast-path' }),
             'EX',
-            AUTOCATEGORIZE_CACHE_TTL
+            AUTOCATEGORIZE_CACHE_TTL_FAST
           );
         } catch (e) { /* cache failure is non-fatal */ }
         console.log('Auto-categorize: fast-path hit ->', resolved);
@@ -2077,14 +2110,19 @@ exports.autoCategorizeTransaction = async (req, res) => {
       `1. merchant_history_summary — if total_seen ≥ 3 and top_category dominates (≥ 70%) ` +
       `and target_amount_in_typical_range is true or null, use top_category. ` +
       `The user has already established their convention for this merchant; follow it.\n` +
-      `2. relevant_history matched_on = "merchant+amount" — same merchant + similar amount ` +
-      `is a near-certain repeat of the same transaction type; use that category.\n` +
+      `2. relevant_history matched_on = "merchant+amount" — read the user_category field ` +
+      `(the user's confirmed choice) on those rows; same merchant + similar amount is a ` +
+      `near-certain repeat, so mirror that user_category directly.\n` +
       `3. relevant_history matched_on = "merchant" — same merchant any amount; use the ` +
-      `most frequent category seen across those rows.\n` +
+      `most frequent user_category seen across those rows.\n` +
       `4. plaid_personal_finance_category (detailed > primary) when confidence is HIGH ` +
       `and the history gives no clear signal.\n` +
-      `5. relevant_history matched_on = "pfc" or "category" as weak tiebreakers.\n` +
+      `5. relevant_history matched_on = "pfc" or "user_category" as weak tiebreakers.\n` +
       `Only fall back to general world knowledge when steps 1–5 give nothing useful.\n\n` +
+      `IMPORTANT: each relevant_history item has a user_category field — that is what ` +
+      `the user actually chose for that transaction and is your primary learning signal. ` +
+      `The plaid_category field on history items is Plaid's raw label and may differ ` +
+      `from the user's taxonomy; treat it as a weak corroborating signal only.\n\n` +
       `You MUST respond by calling the selectCategory tool — never reply in plain text.`;
 
     const userPayload = {
@@ -2298,53 +2336,146 @@ exports.autoCategorizeTransaction = async (req, res) => {
   }
 };
 
-// Map Plaid `personal_finance_category.detailed` (and `.primary`) codes to the
-// internal pattern-bucket names used in `highConfidencePatterns`. When Plaid
-// classifies a transaction with HIGH confidence, this short-circuits the
-// pattern walk and delivers a far stronger signal than merchant string-matching.
+// POST /auto-categorize/invalidate
+//
+// Evicts the specific Redis cache slot for a single transaction. Call this
+// from the frontend whenever the user explicitly overrides the suggested
+// category so the next reconcile for the same merchant gets a fresh answer
+// rather than serving the stale cached suggestion for up to 7 days.
+//
+// Body: same shape as /auto-categorize — { transaction, userId, accountId }
+exports.invalidateAutoCategorizationKey = async (req, res) => {
+  try {
+    const { transaction } = req.body;
+    const userId    = req.body?.userId ?? req.body?.sessionId ?? req.user?.id ?? null;
+    const accountId = req.body?.accountId ?? req.body?.accountid ?? null;
+
+    if (!transaction) {
+      return res.status(400).json({ error: 'transaction is required' });
+    }
+
+    const cacheKey = buildAutoCategorizationCacheKey({ userId, accountId, transaction });
+    const deleted  = await redis.del(cacheKey);
+
+    console.log('Auto-categorize: invalidated cache key', cacheKey, '— deleted:', deleted);
+    return res.json({ success: true, invalidated: deleted > 0, key: cacheKey });
+  } catch (err) {
+    console.error('Auto-categorize invalidate error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// Maps Plaid `personal_finance_category.detailed` (and `.primary`) codes
+// directly to the application's seeded category names. Values must match
+// the user's taxonomy exactly (case-insensitive) so findCategoryForBucket
+// can do an exact lookup rather than a fragile fuzzy-includes search.
+//
+// Previously these values used generic English labels ('groceries',
+// 'healthcare', 'shopping') that did NOT match the seeded names ('Groceries',
+// 'Health', 'Retail'), causing the PFC fast-path to return null for a large
+// fraction of transactions even when Plaid had a perfect HIGH-confidence signal.
 const PLAID_PFC_TO_BUCKET = {
-  TRANSPORTATION_GAS: 'gas',
-  TRANSPORTATION_PUBLIC_TRANSIT: 'transportation',
-  TRANSPORTATION_TAXIS_AND_RIDE_SHARES: 'transportation',
-  FOOD_AND_DRINK_GROCERIES: 'groceries',
-  FOOD_AND_DRINK_RESTAURANT: 'restaurants',
-  FOOD_AND_DRINK_FAST_FOOD: 'restaurants',
-  FOOD_AND_DRINK_COFFEE: 'restaurants',
-  GENERAL_MERCHANDISE_ONLINE_MARKETPLACES: 'shopping',
-  GENERAL_MERCHANDISE_DEPARTMENT_STORES: 'shopping',
-  GENERAL_MERCHANDISE_ELECTRONICS: 'electronics',
-  GENERAL_MERCHANDISE_CLOTHING_AND_ACCESSORIES: 'clothing',
-  GENERAL_SERVICES_INSURANCE: 'insurance',
-  HOME_IMPROVEMENT_HARDWARE: 'home improvement',
-  HOME_IMPROVEMENT_FURNITURE: 'home improvement',
-  ENTERTAINMENT_TV_AND_MOVIES: 'subscriptions',
-  ENTERTAINMENT_MUSIC_AND_AUDIO: 'subscriptions',
-  ENTERTAINMENT_VIDEO_GAMES: 'entertainment',
-  ENTERTAINMENT_CASINOS_AND_GAMBLING: 'entertainment',
-  PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS: 'fitness',
-  PERSONAL_CARE_HAIR_AND_BEAUTY: 'shopping',
-  PERSONAL_CARE_LAUNDRY_AND_DRY_CLEANING: 'shopping',
-  MEDICAL_PHARMACIES_AND_SUPPLEMENTS: 'pharmacy',
-  MEDICAL_PRIMARY_CARE: 'healthcare',
-  MEDICAL_DENTAL_CARE: 'healthcare',
-  MEDICAL_EYE_CARE: 'healthcare',
-  RENT_AND_UTILITIES_GAS_AND_ELECTRICITY: 'utilities',
-  RENT_AND_UTILITIES_INTERNET_AND_CABLE: 'utilities',
-  RENT_AND_UTILITIES_TELEPHONE: 'utilities',
-  RENT_AND_UTILITIES_WATER: 'utilities',
-  RENT_AND_UTILITIES_SEWAGE_AND_WASTE_MANAGEMENT: 'utilities',
-  TRAVEL_FLIGHTS: 'travel',
-  TRAVEL_LODGING: 'travel',
-  TRAVEL_RENTAL_CARS: 'travel',
-  // Plaid `primary` fallbacks
-  TRANSPORTATION: 'transportation',
-  FOOD_AND_DRINK: 'restaurants',
-  GENERAL_MERCHANDISE: 'shopping',
-  HOME_IMPROVEMENT: 'home improvement',
-  PERSONAL_CARE: 'shopping',
-  MEDICAL: 'healthcare',
-  RENT_AND_UTILITIES: 'utilities',
-  TRAVEL: 'travel',
+  // ── Food & Drink ────────────────────────────────────────────────────────
+  FOOD_AND_DRINK_GROCERIES:                      'Groceries',
+  FOOD_AND_DRINK_RESTAURANTS:                    'Restaurants',
+  FOOD_AND_DRINK_RESTAURANT:                     'Restaurants',   // older Plaid enum variant
+  FOOD_AND_DRINK_FAST_FOOD:                      'Restaurants',
+  FOOD_AND_DRINK_COFFEE:                         'Restaurants',
+  FOOD_AND_DRINK_BEER_WINE_LIQUOR:               'Food and Beverage',
+  FOOD_AND_DRINK:                                'Food and Beverage',
+
+  // ── General Merchandise ─────────────────────────────────────────────────
+  GENERAL_MERCHANDISE_CLOTHING_AND_ACCESSORIES:  'Clothing',
+  GENERAL_MERCHANDISE_ONLINE_MARKETPLACES:       'Online',
+  GENERAL_MERCHANDISE_PET_SUPPLIES:              'Pets',
+  GENERAL_MERCHANDISE_ELECTRONICS:              'Retail',
+  GENERAL_MERCHANDISE_DEPARTMENT_STORES:         'Retail',
+  GENERAL_MERCHANDISE_DISCOUNT_STORES:           'Retail',
+  GENERAL_MERCHANDISE:                           'Retail',
+
+  // ── General Services ────────────────────────────────────────────────────
+  GENERAL_SERVICES_INSURANCE:                    'Insurance',
+  GENERAL_SERVICES_SUBSCRIPTION:                 'Subscriptions',
+  GENERAL_SERVICES_CHILDCARE:                    'Childcare',
+  GENERAL_SERVICES:                              'Services',
+
+  // ── Home Improvement / Rent & Utilities ─────────────────────────────────
+  HOME_IMPROVEMENT_HARDWARE:                     'Household',
+  HOME_IMPROVEMENT_FURNITURE:                    'Household',
+  HOME_IMPROVEMENT:                              'Household',
+  RENT_AND_UTILITIES_RENT:                       'Household',
+  RENT_AND_UTILITIES_TELEPHONE_SERVICE:          'Phone',
+  RENT_AND_UTILITIES_TELEPHONE:                  'Phone',
+  RENT_AND_UTILITIES_INTERNET_AND_CABLE:         'Online',
+  RENT_AND_UTILITIES_GAS_AND_ELECTRICITY:        'Utilities',
+  RENT_AND_UTILITIES_WATER:                      'Utilities',
+  RENT_AND_UTILITIES_SEWAGE_AND_WASTE_MANAGEMENT:'Utilities',
+  RENT_AND_UTILITIES:                            'Utilities',
+
+  // ── Entertainment ───────────────────────────────────────────────────────
+  ENTERTAINMENT_TV_AND_MOVIES:                   'Subscriptions',
+  ENTERTAINMENT_MUSIC_AND_AUDIO:                 'Subscriptions',
+  ENTERTAINMENT_GYMS_AND_FITNESS_CENTERS:        'Health',
+  ENTERTAINMENT_VIDEO_GAMES:                     'Entertainment',
+  ENTERTAINMENT_CASINOS_AND_GAMBLING:            'Entertainment',
+  ENTERTAINMENT_SPORTING_EVENTS:                 'Entertainment',
+  ENTERTAINMENT:                                 'Entertainment',
+
+  // ── Personal Care ───────────────────────────────────────────────────────
+  PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS:        'Health',
+  PERSONAL_CARE_HAIR_AND_BEAUTY:                 'Personal Care',
+  PERSONAL_CARE_LAUNDRY_AND_DRY_CLEANING:        'Personal Care',
+  PERSONAL_CARE:                                 'Personal Care',
+
+  // ── Medical ─────────────────────────────────────────────────────────────
+  MEDICAL_PHARMACIES_AND_SUPPLEMENTS:            'Health',
+  MEDICAL_PRIMARY_CARE:                          'Health',
+  MEDICAL_DENTAL_CARE:                           'Health',
+  MEDICAL_EYE_CARE:                              'Health',
+  MEDICAL_MENTAL_HEALTH:                         'Health',
+  MEDICAL:                                       'Health',
+
+  // ── Transportation ──────────────────────────────────────────────────────
+  TRANSPORTATION_GAS_STATION:                    'Automotive',
+  TRANSPORTATION_GAS:                            'Automotive',   // older variant
+  TRANSPORTATION_PUBLIC_TRANSIT:                 'Transportation',
+  TRANSPORTATION_TAXIS_AND_RIDE_SHARES:          'Transportation',
+  TRANSPORTATION_PARKING:                        'Transportation',
+  TRANSPORTATION:                                'Transportation',
+
+  // ── Travel ──────────────────────────────────────────────────────────────
+  TRAVEL_FLIGHTS:                                'Travel',
+  TRAVEL_LODGING:                                'Travel',
+  TRAVEL_RENTAL_CARS:                            'Travel',
+  TRAVEL:                                        'Travel',
+
+  // ── Education ───────────────────────────────────────────────────────────
+  EDUCATION:                                     'Education',
+
+  // ── Bank Fees / Tax / Government ────────────────────────────────────────
+  BANK_FEES:                                     'Bank Fees',
+  TAX:                                           'Taxes',
+  GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT:         'Taxes',
+  GOVERNMENT_AND_NON_PROFIT_DONATIONS:           'Charity',
+
+  // ── Loan Payments ───────────────────────────────────────────────────────
+  LOAN_PAYMENTS_MORTGAGE_PAYMENT:                'Mortgage',
+  LOAN_PAYMENTS_CREDIT_CARD_PAYMENT:             'Transfer-Out',
+  LOAN_PAYMENTS:                                 'Loan',
+
+  // ── Transfers ───────────────────────────────────────────────────────────
+  TRANSFER_OUT_SAVINGS:                          'Savings',
+  TRANSFER_OUT_ACCOUNT_TRANSFER:                 'Transfer-Out',
+  TRANSFER_OUT:                                  'Transfer-Out',
+  TRANSFER_IN_ACCOUNT_TRANSFER:                  'Transfer-In',
+  TRANSFER_IN:                                   'Transfer-In',
+
+  // ── Income ──────────────────────────────────────────────────────────────
+  INCOME_WAGES:                                  'Salary',
+  INCOME_DIVIDENDS:                              'Dividend',
+  INCOME_INTEREST_EARNED:                        'Interest',
+  INCOME_TAX_REFUND:                             'Reimbursement',
+  INCOME:                                        'Income',
 };
 
 // Fast categorization using pattern matching (no AI needed). Always returns
@@ -2392,97 +2523,102 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
     PLAID_PFC_TO_BUCKET[pfc.primary] ||
     null;
   
-  // High-confidence merchant patterns
+  // High-confidence merchant string patterns. Keys must be seeded category
+  // names (case-insensitive match) so findCategoryForBucket can do an exact
+  // lookup. Previously these used generic English bucket names ('gas',
+  // 'healthcare', 'shopping') that didn't match the seeded taxonomy ('Automotive',
+  // 'Health', 'Retail'), causing the merchant fast-path to silently miss matches.
   const highConfidencePatterns = {
-    'groceries': [
+    'Groceries': [
       'whole foods', 'trader joe', 'kroger', 'safeway', 'albertsons', 'publix', 'wegmans', 'food lion', 'giant eagle', 'shoprite', 'stop & shop',
       'sprouts', 'fresh market', 'natural grocers', 'earth fare', 'fresh thyme', 'lucky', 'ralphs', 'vons', 'food 4 less', 'winco', 'aldi', 'lidl',
       'heb', 'meijer', 'hy-vee', 'price chopper', 'tops', 'giant', 'martins', 'weis', 'acme', 'shaws', 'hannaford', 'price rite', 'save a lot'
     ],
-    'gas': [
+    'Automotive': [
       'shell', 'exxon', 'chevron', 'bp', 'mobil', 'petro', 'marathon', 'sunoco', 'valero', '76', 'arco', 'phillips 66', 'conoco', 'citgo',
-      'speedway', 'circle k', '7-eleven', 'quik trip', 'kum & go', 'caseys', 'wawa', 'sheet', 'love', 'murphy', 'race trac', 'pilot', 'flying j'
+      'speedway', 'circle k', '7-eleven', 'quik trip', 'kum & go', 'caseys', 'wawa', 'sheet', 'love', 'murphy', 'race trac', 'pilot', 'flying j',
+      'autozone', 'oreilly', 'advance auto', 'napa', 'pep boys', 'firestone', 'goodyear', 'bridgestone', 'michelin', 'jiffy lube',
+      'valvoline', 'quick lube', 'mavis', 'discount tire', 'tire kingdom', 'les schwab', 'big o tires', 'tire rack'
     ],
-    'restaurants': [
+    'Restaurants': [
       'mcdonalds', 'burger king', 'wendys', 'subway', 'dominos', 'pizza hut', 'chipotle', 'panera', 'starbucks', 'dunkin', 'doordash', 'uber eats', 'grubhub',
       'taco bell', 'kfc', 'popeyes', 'chick-fil-a', 'in-n-out', 'five guys', 'shake shack', 'whataburger', 'culvers', 'sonic', 'arbys', 'jack in the box',
       'papa johns', 'little caesars', 'papa murphys', 'blaze pizza', 'mod pizza', 'pizza ranch', 'postmates', 'seamless', 'caviar', 'bite squad'
     ],
-    'utilities': [
+    'Utilities': [
       'pg&e', 'southern california edison', 'conedison', 'duke energy', 'dominion energy', 'exelon', 'nextera', 'firstenergy', 'pacificorp', 'xcel energy',
       'entergy', 'southern company', 'american electric power', 'centerpoint energy', 'comed', 'pepco', 'bge', 'pseg', 'national grid', 'eversource'
     ],
-    'transportation': [
+    'Transportation': [
       'uber', 'lyft', 'taxi', 'amtrak', 'greyhound', 'metropolitan transportation authority', 'chicago transit authority', 'los angeles metro',
       'bay area rapid transit', 'washington metropolitan area transit authority', 'septa', 'mbta', 'nj transit', 'metro-north', 'long island railroad'
     ],
-    'healthcare': [
+    'Health': [
       'cvs', 'walgreens', 'rite aid', 'kroger pharmacy', 'walmart pharmacy', 'costco pharmacy', 'target pharmacy', 'safeway pharmacy',
-      'albertsons pharmacy', 'publix pharmacy', 'wegmans pharmacy', 'giant eagle pharmacy', 'shoprite pharmacy', 'stop & shop pharmacy'
+      'albertsons pharmacy', 'publix pharmacy', 'wegmans pharmacy', 'giant eagle pharmacy', 'shoprite pharmacy', 'stop & shop pharmacy',
+      'planet fitness', 'la fitness', '24 hour fitness', 'equinox', 'lifetime fitness', 'ymca', 'ymwca', 'golds gym', 'crunch', 'snap fitness',
+      'anytime fitness', 'orangetheory', 'crossfit', 'soulcycle', 'peloton'
     ],
-    'insurance': [
+    'Insurance': [
       'geico', 'state farm', 'allstate', 'progressive', 'farmers', 'liberty mutual', 'nationwide', 'american family', 'erie', 'travelers',
       'hartford', 'metlife', 'prudential', 'aflac', 'mutual of omaha', 'new york life', 'northwestern mutual', 'guardian', 'principal'
     ],
-    'subscriptions': [
+    'Subscriptions': [
       'netflix', 'spotify', 'hulu', 'amazon prime', 'disney+', 'hbo max', 'apple tv+', 'youtube premium', 'paramount+', 'peacock', 'discovery+',
       'crunchyroll', 'funimation', 'roku', 'sling tv', 'fubo tv', 'youtube tv', 'hulu live', 'directv stream', 'philo', 'at&t tv'
     ],
-    'shopping': [
-      'amazon', 'walmart', 'target', 'costco', 'best buy', 'home depot', 'lowes', 'michaels', 'joann', 'hobby lobby', 'dicks sporting goods',
-      'academy sports', 'bass pro shops', 'cabelas', 'rei', 'nordstrom', 'macys', 'kohls', 'jcpenney', 'sears', 'belk', 'dillards', 'neiman marcus'
+    'Retail': [
+      'amazon', 'walmart', 'target', 'costco', 'best buy', 'michaels', 'joann', 'hobby lobby', 'dicks sporting goods',
+      'academy sports', 'bass pro shops', 'cabelas', 'rei', 'nordstrom', 'macys', 'kohls', 'jcpenney', 'sears', 'belk', 'dillards', 'neiman marcus',
+      'apple store', 'samsung', 'dell', 'hp', 'lenovo', 'micro center', 'newegg', 'b&h photo', 'adorama'
     ],
-    'entertainment': [
+    'Entertainment': [
       'movie', 'theater', 'cinema', 'amc', 'regal', 'cinemark', 'marcus', 'harkins', 'landmark', 'angelika', 'alamo drafthouse',
       'bowling', 'arcade', 'dave & busters', 'main event', 'topgolf', 'escape room', 'axe throwing', 'paintball', 'laser tag'
     ],
-    'automotive': [
-      'autozone', 'oreilly', 'advance auto', 'napa', 'pep boys', 'firestone', 'goodyear', 'bridgestone', 'michelin', 'jiffy lube',
-      'valvoline', 'quick lube', 'mavis', 'discount tire', 'tire kingdom', 'les schwab', 'big o tires', 'tire rack'
-    ],
-    'home improvement': [
+    'Household': [
       'home depot', 'lowes', 'menards', 'ace hardware', 'true value', 'do it best', '84 lumber', 'beacon roofing', 'abc supply',
       'sherwin williams', 'benjamin moore', 'ppg', 'valspar', 'glidden', 'behr'
     ],
-    'clothing': [
-      'nike', 'adidas', 'under armour', 'old navy', 'gap', 'banana republic', 'athleta', 'lululemon', 'athleta', 'victorias secret',
+    'Clothing': [
+      'nike', 'adidas', 'under armour', 'old navy', 'gap', 'banana republic', 'athleta', 'lululemon', 'victorias secret',
       'pink', 'american eagle', 'aeropostale', 'hollister', 'abercrombie', 'forever 21', 'h&m', 'zara', 'uniqlo', 'asos'
     ],
-    'electronics': [
-      'apple', 'samsung', 'google', 'microsoft', 'dell', 'hp', 'lenovo', 'asus', 'acer', 'lg', 'sony', 'panasonic', 'sharp',
-      'best buy', 'micro center', 'frys', 'newegg', 'b&h photo', 'adorama'
-    ],
-    'pharmacy': [
-      'cvs', 'walgreens', 'rite aid', 'kroger pharmacy', 'walmart pharmacy', 'costco pharmacy', 'target pharmacy', 'safeway pharmacy',
-      'albertsons pharmacy', 'publix pharmacy', 'wegmans pharmacy', 'giant eagle pharmacy', 'shoprite pharmacy', 'stop & shop pharmacy'
-    ],
-    'banking': [
+    'Bank Fees': [
       'chase', 'bank of america', 'wells fargo', 'citibank', 'us bank', 'pnc', 'capital one', 'td bank', 'bb&t', 'suntrust',
       'regions', 'keybank', 'fifth third', 'huntington', 'citizens', 'comerica', 'bmo harris', 'usaa', 'navy federal'
     ],
-    'education': [
-      'university', 'college', 'school', 'tuition', 'textbook', 'campus', 'student', 'blackboard', 'canvas', 'moodle',
+    'Education': [
+      'university', 'college', 'tuition', 'textbook', 'campus', 'blackboard', 'canvas lms', 'moodle',
       'coursera', 'udemy', 'skillshare', 'masterclass', 'khan academy', 'duolingo', 'rosetta stone'
     ],
-    'fitness': [
-      'planet fitness', 'la fitness', '24 hour fitness', 'equinox', 'lifetime', 'ymca', 'ymwca', 'golds gym', 'crunch', 'snap fitness',
-      'anytime fitness', 'orangetheory', 'crossfit', 'barry', 'soulcycle', 'peloton', 'fitbit', 'garmin', 'apple fitness'
+    'Travel': [
+      'airline', 'marriott', 'hilton', 'hyatt', 'ihg', 'wyndham', 'best western', 'motel 6', 'super 8',
+      'expedia', 'booking.com', 'hotels.com', 'airbnb', 'vrbo', 'tripadvisor', 'kayak', 'priceline', 'orbitz', 'travelocity'
     ],
-    'travel': [
-      'airline', 'hotel', 'marriott', 'hilton', 'hyatt', 'ihg', 'choice', 'wyndham', 'best western', 'motel 6', 'super 8',
-      'expedia', 'booking', 'hotels', 'airbnb', 'vrbo', 'tripadvisor', 'kayak', 'priceline', 'orbitz', 'travelocity'
-    ],
-    'online services': [
-      'google', 'microsoft', 'adobe', 'dropbox', 'box', 'slack', 'zoom', 'teams', 'webex', 'gotomeeting', 'asana', 'trello',
+    'Online': [
+      'adobe', 'dropbox', 'box.com', 'slack', 'zoom', 'webex', 'gotomeeting', 'asana', 'trello',
       'notion', 'evernote', 'lastpass', '1password', 'dashlane', 'bitwarden', 'grammarly', 'canva', 'figma'
+    ],
+    'Personal Care': [
+      'great clips', 'sport clips', 'supercuts', 'fantastic sams', 'regis', 'ulta', 'sephora', 'sally beauty'
     ]
   };
   
-  // Helper: find a user category whose name fuzzy-matches a bucket label.
-  // ALWAYS guards `cat.name` (DB rows can have null names for legacy/global rows).
+  // Helper: find a user category whose name matches a bucket label.
+  // First tries an exact case-insensitive match (works when bucket names are
+  // seeded category names), then falls back to includes-either-way for users
+  // who have custom category names that contain the bucket label.
   const findCategoryForBucket = (bucketLabel) => {
     if (!bucketLabel) return null;
     const label = String(bucketLabel).toLowerCase();
+    // Exact match — the primary path now that bucket labels equal seeded names.
+    const exact = categories.find((cat) => {
+      const n = extractCategoryName(cat).toLowerCase();
+      return n && n === label;
+    });
+    if (exact) return exact;
+    // Fuzzy fallback for custom-named categories.
     return categories.find((cat) => {
       const n = extractCategoryName(cat).toLowerCase();
       return n && (n.includes(label) || label.includes(n));
@@ -2555,12 +2691,18 @@ function categorizeTransactionFast(transaction, categories, transactionHistory) 
   return null; // No fast match found — caller decides how to fall back.
 }
 
-// Helper function to get most common category from transactions
+// Returns the most frequently occurring user-assigned category from a list
+// of transaction history items. Uses getUserCategory so it prefers the user's
+// explicit choice (adjusted_category) over the raw Plaid legacy field — this
+// is what makes steps 2 and 3 of categorizeTransactionFast return names that
+// actually exist in the user's category list.
 function getMostCommonCategory(transactions) {
   const categoryCounts = {};
   transactions.forEach(t => {
-    if (t.category) {
-      categoryCounts[t.category] = (categoryCounts[t.category] || 0) + 1;
+    const cat = getUserCategory(t);
+    // Guard: skip empty or array-derived strings that stringify as "a,b,c"
+    if (cat && !cat.includes(',')) {
+      categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
     }
   });
   
