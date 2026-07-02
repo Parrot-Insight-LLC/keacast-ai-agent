@@ -15,7 +15,15 @@ const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
-const SUMMARIZATION_CACHE_TTL = 1800; // 30 minutes in seconds
+// Short TTL: the cache key is now a hash of the exact prompt (see
+// buildSummarizationCacheKeyFromContent), so identical inputs are the only way
+// to hit the cache. A short TTL is a secondary safety net that bounds how long
+// a summary can linger if the underlying data changes in a way the key somehow
+// doesn't capture (and it also naturally expires stale "Today"/month framing).
+const SUMMARIZATION_CACHE_TTL = 300; // 5 minutes in seconds
+// Bump this whenever the prompt/label logic changes so previously-cached
+// summaries built by an older prompt version don't get served.
+const SUMMARIZATION_PROMPT_VERSION = 'v2';
 
 function buildSessionKey(req) {
   // Check multiple sources for sessionId in order of preference
@@ -112,6 +120,24 @@ function buildSummarizationCacheKeyFromFingerprint(sessionKey, accountId, finger
   return `summarization:${sessionKey}:account:${accountSegment}:${fpHash}`;
 }
 
+// Content-addressed cache key: hash the EXACT text handed to the model
+// (system + user prompt). This guarantees the cache is only reused when the
+// generated summary would be byte-for-byte identical — any change in balances,
+// transactions, totals, negative-balance days, the "Today" date, or the prompt
+// wording produces a new key and therefore a fresh summary. This replaces the
+// coarse, length-only account fingerprint that could serve stale summaries
+// when contents changed without changing counts. The key shape keeps the
+// explicit `account:<id>` segment so we can still wildcard-purge one account.
+function buildSummarizationCacheKeyFromContent(sessionKey, accountId, promptText) {
+  const text = typeof promptText === 'string' && promptText.length > 0 ? promptText : 'empty';
+  const hash = crypto
+    .createHash('md5')
+    .update(`${SUMMARIZATION_PROMPT_VERSION}\n${text}`)
+    .digest('hex');
+  const accountSegment = normalizeAccountIdForCacheKey(accountId);
+  return `summarization:${sessionKey}:account:${accountSegment}:${hash}`;
+}
+
 function coerceFirstName(userData, fallbackUser) {
   const candidates = [
     userData?.firstname,
@@ -197,6 +223,77 @@ function pickNegativeBalancePreviews(account, limit = 2) {
   }).filter(Boolean);
 }
 
+// ─── Server-side analytics for the summary ──────────────────────────────────
+// These "do the math" so the LLM only has to phrase precomputed, labelled
+// figures. Sign convention (consistent with compactTxnLine / the prompt's
+// "leading - for negatives" rule): amount < 0 = expense/outflow,
+// amount > 0 = income/inflow.
+
+// Flatten `recents` (flat OR grouped-by-day) into a single transaction array,
+// falling back to plaidTransactions. Mirrors pickRecentTransactions' flattening.
+function flattenRecents(account) {
+  const flat = [];
+  const recents = Array.isArray(account?.recents) ? account.recents : [];
+  for (const r of recents) {
+    if (!r) continue;
+    if (Array.isArray(r.transactions)) {
+      for (const t of r.transactions) flat.push(t);
+    } else if (typeof r === 'object') {
+      flat.push(r);
+    }
+  }
+  if (flat.length === 0 && Array.isArray(account?.plaidTransactions)) {
+    for (const t of account.plaidTransactions) flat.push(t);
+  }
+  return flat;
+}
+
+function txnAmount(t) {
+  const a = typeof t?.amount === 'number' ? t.amount : Number(t?.amount);
+  return Number.isFinite(a) ? a : null;
+}
+
+// Largest single upcoming expense in the next window → "Name -$X on Mon D".
+function pickLargestUpcomingExpense(account) {
+  const upcoming = Array.isArray(account?.upcoming) ? account.upcoming : [];
+  let worst = null;
+  for (const t of upcoming) {
+    const amt = txnAmount(t);
+    if (amt === null || amt >= 0) continue; // expenses only
+    if (!worst || amt < txnAmount(worst)) worst = t;
+  }
+  return worst ? compactTxnLine(worst) : null;
+}
+
+// Soonest upcoming income event → "Name $X on Mon D". `upcoming` is already
+// sorted ascending by start date, so the first positive amount is the nearest.
+function pickNextIncome(account) {
+  const upcoming = Array.isArray(account?.upcoming) ? account.upcoming : [];
+  for (const t of upcoming) {
+    const amt = txnAmount(t);
+    if (amt !== null && amt > 0) return compactTxnLine(t);
+  }
+  return null;
+}
+
+// Top spending merchants over the recent (~30 day) window, aggregated by name.
+// Returns ["Merchant -$X", ...] highest-first, so the model can surface real
+// behavioural patterns without inventing categories or totals.
+function topSpendingMerchants(account, limit = 3) {
+  const flat = flattenRecents(account);
+  const totals = new Map();
+  for (const t of flat) {
+    const amt = txnAmount(t);
+    if (amt === null || amt >= 0) continue; // expenses only (negative)
+    const name = (t.merchant_name || t.name || t.category || 'Other').toString().slice(0, 28);
+    totals.set(name, (totals.get(name) || 0) + Math.abs(amt));
+  }
+  return Array.from(totals.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([name, sum]) => `${name} ${fmtMoney(-sum)}`);
+}
+
 // Build the compact, deterministic user-payload string handed to the LLM.
 // Replaces the old `JSON.stringify(plaidTransactions)` dump (often 5-15 KB)
 // with a ~600-1200 char structured brief built from precomputed signals on
@@ -254,9 +351,12 @@ function buildSummarizationUserContent(account, firstName, fallback, opts = {}) 
     // Next-14-day totals are precomputed by the controller and have an
     // unambiguous window. This is the primary short-horizon cash-flow signal.
     if (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number') {
-      const upInc = fmtMoney(Math.abs(account.upcomingIncomeTotal || 0));
-      const upExp = fmtMoney(Math.abs(account.upcomingExpenseTotal || 0));
-      lines.push(`Next 14 days totals: income ${upInc}, expenses ${upExp}.`);
+      const incAbs = Math.abs(account.upcomingIncomeTotal || 0);
+      const expAbs = Math.abs(account.upcomingExpenseTotal || 0);
+      lines.push(`Next 14 days totals: income ${fmtMoney(incAbs)}, expenses ${fmtMoney(expAbs)}.`);
+      // Net is derived server-side so the model never has to subtract (HARD
+      // RULE #1 forbids it doing math). Labelled with the same explicit window.
+      lines.push(`Next 14 days net cash flow: ${fmtMoney(incAbs - expAbs)}.`);
     }
 
     const negs = pickNegativeBalancePreviews(account);
@@ -264,9 +364,29 @@ function buildSummarizationUserContent(account, firstName, fallback, opts = {}) 
       lines.push(`Future days the projected balance goes negative: ${negs.join('; ')}.`);
     }
 
+    // Nearest income event — "when money is coming in" — pairs naturally with
+    // the negative-balance heads-up above.
+    const nextIncome = pickNextIncome(account);
+    if (nextIncome) {
+      lines.push(`Next expected income: ${nextIncome}.`);
+    }
+
+    // Single biggest upcoming hit so the user sees the largest commitment.
+    const bigExpense = pickLargestUpcomingExpense(account);
+    if (bigExpense) {
+      lines.push(`Largest upcoming expense (next 14 days): ${bigExpense}.`);
+    }
+
     const recent = pickRecentTransactions(account, 6);
     if (recent.length > 0) {
       lines.push(`Recent posted (last ~30 days): ${recent.join('; ')}.`);
+    }
+
+    // Aggregated top merchants → behavioural insight, precomputed so the model
+    // isn't tempted to sum transactions itself.
+    const topSpend = topSpendingMerchants(account, 3);
+    if (topSpend.length > 0) {
+      lines.push(`Top spending (last ~30 days): ${topSpend.join('; ')}.`);
     }
 
     const upc = pickUpcomingTransactions(account, 5);
@@ -1483,64 +1603,36 @@ exports.summarization = async (req, res) => {
       );
     }
 
-    // ── Phase 3: Build cache key from a stable account fingerprint ────────
-    // When we have a real account blob, the fingerprint is O(1) (no array
-    // hashing). When we don't, fall back to the legacy data-hash shape so
-    // older clients that ship the arrays still get a stable cache slot.
-    const fingerprint = selectedAccount
-      ? buildAccountFingerprint(selectedAccount)
-      : null;
-    const cacheKey = fingerprint
-      ? buildSummarizationCacheKeyFromFingerprint(sessionKey, accountId, fingerprint)
-      : buildSummarizationCacheKey(
-          sessionKey,
-          accountId,
-          fallbackBody.plaidTransactions,
-          fallbackBody.forecastedTransactions,
-          fallbackBody.balances
-        );
-    console.log('Summarization: cache key:', cacheKey, '(accountId:', accountId, ', fingerprint:', fingerprint ? 'server' : 'legacy', ')');
-
-    // ── Phase 4: Cache check ──────────────────────────────────────────────
-    try {
-      const cachedResult = await redis.get(cacheKey);
-      if (cachedResult) {
-        console.log('Summarization: Returning cached result for account', accountId);
-        const cachedData = JSON.parse(cachedResult);
-        return res.json({ 
-          summary: cachedData.summary, 
-          raw: cachedData.raw, 
-          cached: true,
-          note: 'This summary was retrieved from cache (30 minute TTL)'
-        });
-      }
-    } catch (cacheError) {
-      console.warn('Summarization: Cache read failed, proceeding with fresh generation:', cacheError.message);
-    }
-
-    // ── Phase 5: Build a tight prompt from precomputed signals ───────────
-    // System prompt is ~1/3 the size of the prior version. We removed the
-    // bullet-list of guidance and inline examples — the user content already
-    // hands the model fully-formatted numbers, so its only job is wording.
+    // ── Phase 3: Build the prompt from precomputed signals ───────────────
+    // Built BEFORE the cache key so the key can be a hash of the exact prompt
+    // text (see Phase 4). The user content hands the model fully-formatted,
+    // labelled numbers (including server-computed net cash flow, next income,
+    // largest upcoming expense, and top spending) so its only job is wording.
     const firstName = coerceFirstName(userDataFromBody, selectedAccount?.user || null);
     const userContent = buildSummarizationUserContent(selectedAccount, firstName, fallbackBody, { today: clientDate });
 
     const systemPrompt = `You are Kea, the Keacast assistant — a casual, supportive financial buddy.
-Write 4-7 short sentences (≤600 chars total) addressing the user by FIRST NAME.
-Goal: help them feel informed and slightly excited to plan ahead.
+Write 5-8 short sentences (≤900 chars total) addressing the user by FIRST NAME.
+Goal: help them feel informed, clear on what's coming, and slightly excited to plan ahead.
 
 HARD RULES — the user already saw this data, they will catch any drift:
-1. Every dollar amount you mention must appear verbatim in the data block. Do not add, subtract, average, or aggregate amounts.
+1. Every dollar amount you mention must appear verbatim in the data block. Do not add, subtract, average, or aggregate amounts — every figure you'd need (including "net cash flow") is already computed and labelled for you.
 2. Every date or time window you mention must appear verbatim in the data block. NEVER infer "by month-end", "by Friday", "this weekend", or any deadline that isn't explicitly written. If you mention timing, copy a label from the data word-for-word ("next 14 days", "today", "Jun 12", "end of May", "last 30 days").
 3. Pair each amount with the same label it has in the data. Do NOT translate "Next 14 days totals: expenses $X" into "$X due by [some date]". Do NOT translate "Lowest projected balance through end of May" into a deadline.
 4. Only call something "no income" if the relevant labelled income figure literally shows $0. Otherwise stay neutral on income.
-5. If "Future days the projected balance goes negative" is present, mention the soonest entry verbatim — that is the strongest heads-up signal.
+5. If "Future days the projected balance goes negative" is present, lead with the soonest entry verbatim — that is the strongest heads-up signal — and, when present, pair it with "Next expected income" so they know when relief arrives.
+
+WHAT TO COVER (only when the matching label is present — skip silently otherwise):
+- The short-term outlook: current/available balance and the "Next 14 days" income, expenses, and net cash flow.
+- Any upcoming negative-balance day (soonest first) and the next expected income.
+- The largest upcoming expense so they can brace for it.
+- One brief, grounded observation about "Top spending (last ~30 days)" if present.
+- End with ONE concrete, encouraging next step that references a labelled amount/date verbatim (e.g. staying above the lowest projected balance, or covering the largest upcoming expense before it hits).
 
 STYLE:
 - Casual, warm, forward-looking. Plain prose. No headings, no bullets, no markdown beyond light emphasis.
 - Use $ for amounts, leading "-" for negatives. Round to whole dollars unless < $10.
-- Always include at least one concrete amount + one verbatim date or window from the data.
-- If you can't convey the message in 3 sentences, its okay to do it in 4-7 sentences.`;
+- Always include at least one concrete amount + one verbatim date or window from the data.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -1551,6 +1643,35 @@ STYLE:
     ];
 
     console.log('Summarization: prompt sizes — system:', systemPrompt.length, 'chars, user:', userContent.length, 'chars');
+
+    // ── Phase 4: Content-addressed cache key + check ─────────────────────
+    // The key hashes the EXACT prompt (system + user), so the cache is reused
+    // only when the generated summary would be identical. Any change in the
+    // data, the "Today" date, or the prompt wording yields a new key — this is
+    // what eliminates the stale-summary problem the old length-only account
+    // fingerprint caused.
+    const cacheKey = buildSummarizationCacheKeyFromContent(
+      sessionKey,
+      accountId,
+      `${systemPrompt}\n---\n${userContent}`
+    );
+    console.log('Summarization: cache key:', cacheKey, '(accountId:', accountId, ', source:', selectedAccountSource, ')');
+
+    try {
+      const cachedResult = await redis.get(cacheKey);
+      if (cachedResult) {
+        console.log('Summarization: Returning cached result for account', accountId);
+        const cachedData = JSON.parse(cachedResult);
+        return res.json({
+          summary: cachedData.summary,
+          raw: cachedData.raw,
+          cached: true,
+          note: 'This summary was retrieved from cache (5 minute TTL, content-addressed)'
+        });
+      }
+    } catch (cacheError) {
+      console.warn('Summarization: Cache read failed, proceeding with fresh generation:', cacheError.message);
+    }
 
     // ── Phase 6: LLM call ────────────────────────────────────────────────
     // - tool_choice 'none' + tools: [] keeps the request body lean (no
@@ -1566,7 +1687,8 @@ STYLE:
         // closely to the labels in the data block rather than improvise
         // creative phrasings like "due by May 31" out of a generic figure.
         temperature: 0.25,
-        max_tokens: 180,
+        // ~900 char budget → allow headroom for the richer 5-8 sentence brief.
+        max_tokens: 320,
         timeout: 15000,
         deployment: process.env.AZURE_OPENAI_DEPLOYMENT_LIGHT || undefined,
       });
@@ -1593,7 +1715,7 @@ STYLE:
           timestamp: new Date().toISOString()
         };
         await redis.set(cacheKey, JSON.stringify(cacheData), 'EX', SUMMARIZATION_CACHE_TTL);
-        console.log('Summarization: Cached result for 30 minutes (account:', accountId, ')');
+        console.log('Summarization: Cached result for', SUMMARIZATION_CACHE_TTL, 'seconds (account:', accountId, ')');
       } catch (cacheError) {
         console.warn('Summarization: Failed to cache result:', cacheError.message);
         // Continue even if caching fails
