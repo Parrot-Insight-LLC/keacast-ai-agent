@@ -187,6 +187,15 @@ function fmtMoney(n) {
   return `${sign}$${formatted}`;
 }
 
+// Strip thousands-separator commas from $-amounts in model-generated prose so
+// currency renders as $1000 instead of $1,000. Only touches numbers that are
+// $-prefixed AND actually comma-grouped, so plain numbers, years, and lists are
+// left untouched.
+function stripCurrencyCommas(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(/\$-?\d{1,3}(?:,\d{3})+(?:\.\d+)?/g, (m) => m.replace(/,/g, ''));
+}
+
 function shortDate(value) {
   if (!value) return '';
   // Accept either Plaid `date` or Keacast `start` (both YYYY-MM-DD strings).
@@ -927,6 +936,17 @@ function computeDraftMissingFields(draft) {
   return missing;
 }
 
+// True when the draft has all core slots filled (i.e. it represents a complete,
+// proposable transaction). Used to arm the write gate off draft state rather
+// than relying solely on the model remembering to set pendingConfirmation.
+function isDraftProposable(draft) {
+  if (!draft || typeof draft !== 'object') return false;
+  const hasSlots = Object.keys(draft).some(
+    (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== ''
+  );
+  return hasSlots && computeDraftMissingFields(draft).length === 0;
+}
+
 // Stable signature for a draft/create payload so a multi-round loop (or a retry)
 // can't create the same transaction twice within one turn.
 function draftSignature(obj) {
@@ -942,6 +962,54 @@ function draftSignature(obj) {
   return parts.join('|');
 }
 
+// Extract the user's available category NAMES from the selected-account blob.
+// Accepts category objects ({name|category|title}) or plain strings.
+function extractCategoryNames(account) {
+  if (!account || typeof account !== 'object') return [];
+  const raw = Array.isArray(account.categories) ? account.categories : [];
+  const names = [];
+  for (const c of raw) {
+    if (typeof c === 'string') { if (c.trim()) names.push(c.trim()); }
+    else if (c && typeof c === 'object') {
+      const n = c.name || c.category || c.title;
+      if (n && String(n).trim()) names.push(String(n).trim());
+    }
+  }
+  return Array.from(new Set(names));
+}
+
+// Snap a model-chosen category to the user's real category list so we never
+// persist an invented category. Case-insensitive exact match first, then a
+// loose contains-match either direction. Returns null when nothing matches
+// (caller keeps the original value / backend default).
+function snapCategory(input, names) {
+  const q = String(input || '').trim().toLowerCase();
+  if (!q || !Array.isArray(names) || names.length === 0) return null;
+  for (const n of names) if (String(n).trim().toLowerCase() === q) return n;
+  for (const n of names) {
+    const ln = String(n).trim().toLowerCase();
+    if (ln && (ln.includes(q) || q.includes(ln))) return n;
+  }
+  return null;
+}
+
+// Make the confirmed draft authoritative for a write: any filled draft slot
+// overrides the model's arg (prevents drift of a value the user already
+// confirmed), then snap the category to the user's real list.
+function applyDraftAndCategory(args, draft, categoryNames) {
+  const merged = { ...(args && typeof args === 'object' ? args : {}) };
+  if (draft && typeof draft === 'object') {
+    for (const [k, v] of Object.entries(draft)) {
+      if (v !== undefined && v !== null && String(v).trim() !== '') merged[k] = v;
+    }
+  }
+  if (merged.category) {
+    const snapped = snapCategory(merged.category, categoryNames);
+    if (snapped) merged.category = snapped;
+  }
+  return merged;
+}
+
 // Heuristic: did the user's current turn confirm the pending proposal? Kept in
 // sync with the CONFIRMATION HANDLING language in the system prompt.
 function isAffirmativeMessage(message) {
@@ -953,6 +1021,11 @@ function isAffirmativeMessage(message) {
     /\bsounds good\b/, /\block it in\b/, /\bproceed\b/, /\bok(ay)?\b/, /\bsure\b/, /\babsolutely\b/,
     /\b(please )?add (it|that|this)\b/, /\badd this (forecast|transaction)\b/, /\bcreate it\b/,
     /\blog it\b/, /\bput (it|that) in\b/, /\bthat'?s? (right|correct)\b/, /\blooks good\b/,
+    // Natural confirmations users actually type (added after observing the
+    // carpet-replacement flow miss "this definitely works for me").
+    /\bworks for me\b/, /\b(this|that|it) works\b/, /\bdefinitely\b/, /\bperfect\b/,
+    /\bgreat\b/, /\bgo for it\b/, /\byes please\b/, /\bplease do\b/, /\bmake it so\b/,
+    /\bthat'?s? (good|fine|perfect)\b/, /\bapprove(d)?\b/, /\bsave it\b/, /\bschedule it\b/,
   ];
   return patterns.some((re) => re.test(m));
 }
@@ -1094,6 +1167,12 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         const intent = incoming.intent; delete incoming.intent;
         const proposed = incoming.pendingConfirmation === true; delete incoming.pendingConfirmation;
         delete incoming.userId; delete incoming.accountId; // identity comes from ctx
+        // Snap a proposed category to the user's real category list so the
+        // stored draft (and the confirmation the user sees) uses a valid one.
+        if (incoming.category) {
+          const snapped = snapCategory(incoming.category, ctx.categoryNames);
+          if (snapped) incoming.category = snapped;
+        }
         for (const [k, v] of Object.entries(incoming)) {
           if (v !== undefined && v !== null && String(v).trim() !== '') state.draftTransaction[k] = v;
         }
@@ -1121,17 +1200,30 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 
       // ── Code-enforced write gate (createTransaction / updateTransaction) ──
       if (WRITE_TOOLS.has(name)) {
-        const confirmed = ctx.pendingConfirmationAtStart === true && ctx.userAffirmative === true;
+        // Arm off EITHER an explicit pendingConfirmation flag OR a complete
+        // draft that was already staged on a prior turn. The latter makes the
+        // gate robust even when the model proposes in prose without setting the
+        // flag (observed in the carpet-replacement flow), while still enforcing
+        // the two-turn "propose then confirm" contract via userAffirmative.
+        const proposedEarlier = ctx.pendingConfirmationAtStart === true || ctx.draftCompleteAtStart === true;
+        const confirmed = proposedEarlier && ctx.userAffirmative === true;
         if (!confirmed) {
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             blocked: true,
             reason: 'confirmation_required',
-            message: 'Do NOT write yet. First show the user the full proposed transaction (title, type, a SINGLE concrete amount, start date, and frequency if recurring) and wait for them to explicitly confirm on their next message. Use updateDraftTransaction to stage the proposal.'
+            message: 'Do NOT write yet. First show the user the full proposed transaction (title, type, a SINGLE concrete amount, start date, category from their available categories, and frequency if recurring) and wait for them to explicitly confirm on their next message. Use updateDraftTransaction to stage the proposal.'
           }) });
           continue;
         }
+
+        // The user confirmed the DRAFT, so the draft is authoritative: merge its
+        // filled slots OVER the model's args so a re-estimate can't silently
+        // drift a confirmed value (e.g. November -> August). Then snap the
+        // category to the user's real category list.
+        const effectiveArgs = applyDraftAndCategory(args, state.draftTransaction, ctx.categoryNames);
+
         // Idempotency: refuse a duplicate write within the same turn/session.
-        const sig = draftSignature(args);
+        const sig = draftSignature(effectiveArgs);
         if (sig && state.lastCommitSignature && sig === state.lastCommitSignature) {
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             duplicate: true,
@@ -1140,7 +1232,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           continue;
         }
         try {
-          const result = await toolFn(args, ctx);
+          const result = await toolFn(effectiveArgs, ctx);
           let toolContent = JSON.stringify(result ?? {});
           if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
           // Mark committed + clear the draft so a re-called round can't refire.
@@ -1277,6 +1369,9 @@ exports.chat = async (req, res) => {
     // 1) Dialogue state: in-progress draft transaction + slot-filling.
     const dialogueState = await loadDialogueState(userId);
     const pendingConfirmationAtStart = dialogueState.pendingConfirmation === true;
+    // A complete draft persisted from a prior turn also arms the write gate,
+    // so confirmations work even when the model proposed in prose.
+    const draftCompleteAtStart = isDraftProposable(dialogueState.draftTransaction);
     const userAffirmative = isAffirmativeMessage(message);
     // Reset the one-shot "committed" flag at the start of each new turn.
     dialogueState.committed = false;
@@ -1405,7 +1500,11 @@ exports.chat = async (req, res) => {
       : buildChatNoAccountContext(firstName);
     console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
 
-    const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting. If the user has not loaded any accounts yet, highlight Keacast's features, purpose, and benefits for a user or small business owner, and use the FAQ items to help them understand how to use it. When referencing the FAQ, don't quote answers word for word — use the questions and answers to craft a response relevant to the user's question.  
+    // The user's real category names — used to (a) tell the model to pick a
+    // category from this list, and (b) snap any chosen category server-side.
+    const categoryNames = extractCategoryNames(selectedAccount);
+
+    const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting. Write dollar amounts WITHOUT thousands separators — e.g. $1000, not $1,000. If the user has not loaded any accounts yet, highlight Keacast's features, purpose, and benefits for a user or small business owner, and use the FAQ items to help them understand how to use it. When referencing the FAQ, don't quote answers word for word — use the questions and answers to craft a response relevant to the user's question.  
     If the user has loaded accounts, then you should use the context provided to answer the user's question.
 
     Core purpose:
@@ -1470,7 +1569,9 @@ exports.chat = async (req, res) => {
 
     ADVISOR MEMORY & TOOLS (use these to be a stateful, context-aware advisor):
     - SLOT-FILLING with updateDraftTransaction: As a plan for a transaction takes shape across the conversation (e.g. the user researches a carpet replacement, you estimate ~$1,600, they mention next month), call updateDraftTransaction to record/refine the known fields (title, type, amount, category, start, frequency, and an intent like "carpet replacement"). This is a NON-writing scratchpad — it never creates anything. Set pendingConfirmation:true on it ONLY when you have just proposed a complete, concrete transaction and are asking the user to confirm. The DIALOGUE STATE block reflects the current draft; reuse it so the user never repeats themselves. Ask only for fields you genuinely cannot infer.
-    - The confirm-before-write rule is enforced in code: createTransaction/updateTransaction will be REFUSED unless you proposed the transaction on a prior turn (pendingConfirmation) and the user's latest message affirmatively confirmed it. So always: (1) propose with a single concrete amount, (2) wait for the user's confirmation on their next message, (3) then call the write tool. If a write is refused, simply show the proposal again and ask them to confirm.
+    - LOCK CONFIRMED VALUES — NO DRIFT: Once you have proposed specific values (e.g. start date November 1, amount $1,600), those values are LOCKED. Do NOT re-estimate or change an already-proposed field on later turns (a common bug was a November date silently becoming August). When the user confirms, call createTransaction with the EXACT values from the DIALOGUE STATE draft — same date, same amount, same category. Only change a value if the user explicitly asks to; then update the draft first via updateDraftTransaction and re-confirm.
+    - CATEGORY MUST BE REAL: Always choose the category from the user's AVAILABLE CATEGORIES list shown in context — pick the closest existing match (e.g. carpet replacement -> "Home Improvement" if present). Never invent a category that isn't in that list. If none fits well, pick the nearest general one from the list.
+    - The confirm-before-write rule is enforced in code: createTransaction/updateTransaction will be REFUSED unless you proposed a complete transaction on a prior turn and the user's latest message affirmatively confirmed it. So the flow is exactly TWO turns: (1) propose with a single concrete amount + a real category, (2) when the user's next message is affirmative (e.g. "yes", "this works for me", "add it", "looks good", "sounds good"), IMMEDIATELY call createTransaction with the locked draft values — do NOT re-propose or ask for confirmation a second/third time. Only if a write is genuinely refused should you show the proposal again.
     - updateTransaction edits an EXISTING forecasted transaction (by transactionid) — same rule: propose the change, get confirmation, then call it.
     - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:carpet_replacement" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
 
@@ -1503,6 +1604,13 @@ exports.chat = async (req, res) => {
     const factsBlock = buildFactsBlock(longTermFacts);
     const summaryBlock = buildSummaryBlock(rollingSummary);
     const dialogueBlock = buildDialogueStateBlock(dialogueState);
+    const categoriesBlock = categoryNames.length
+      ? truncateText(
+          `AVAILABLE CATEGORIES (choose transaction categories ONLY from this list — pick the closest match, never invent one):\n${categoryNames.join(', ')}`,
+          1200
+        )
+      : '';
+    if (categoriesBlock) systemContent += `\n\n---\n${categoriesBlock}`;
     if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
     if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
     if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
@@ -1510,7 +1618,9 @@ exports.chat = async (req, res) => {
       'facts:', longTermFacts.length,
       'summaryChars:', (rollingSummary || '').length,
       'draftSlots:', Object.keys(dialogueState.draftTransaction || {}).length,
+      'categories:', categoryNames.length,
       'pendingConfirm:', pendingConfirmationAtStart,
+      'draftCompleteAtStart:', draftCompleteAtStart,
       'affirmative:', userAffirmative);
 
     // Build message array with memory and clean up long messages
@@ -1580,7 +1690,9 @@ exports.chat = async (req, res) => {
       currentDate,
       dialogueState,
       pendingConfirmationAtStart,
+      draftCompleteAtStart,
       userAffirmative,
+      categoryNames,
     };
     
     // Always try with tools first for data requests, but handle tool calls properly
@@ -1625,7 +1737,7 @@ exports.chat = async (req, res) => {
       hasError: !!result?.error
     });
     
-    const finalText = result.content || '## ❌ No Response\n\n**Sorry, no response generated.**';
+    const finalText = stripCurrencyCommas(result.content || '## ❌ No Response\n\n**Sorry, no response generated.**');
     // Full turn transcript BEFORE trimming — used to decide what overflows into
     // the rolling summary.
     const fullTurn = [
@@ -1818,7 +1930,7 @@ exports.analyzeTransactions = async (req, res) => {
       }
     }
 
-    const finalText = result.content || '';
+    const finalText = stripCurrencyCommas(result.content || '');
     const rawText = result.raw;
     const updatedHistory = [
       ...sanitizeMessageArray(history),
@@ -2084,7 +2196,7 @@ STYLE:
       };
     }
 
-    const finalText = result.content || '';
+    const finalText = stripCurrencyCommas(result.content || '');
     const rawText = result.raw;
 
     // ── Phase 7: Cache the result ────────────────────────────────────────
@@ -3575,13 +3687,19 @@ exports.__testables = {
   isAffirmativeMessage,
   draftSignature,
   computeDraftMissingFields,
+  isDraftProposable,
+  extractCategoryNames,
+  snapCategory,
+  applyDraftAndCategory,
   buildDialogueStateBlock,
   buildFactsBlock,
   buildSummaryBlock,
   redactChatBodyForLog,
-  // Mirrors the write-gate condition enforced inside executeToolCalls.
-  isWriteAllowed: (pendingConfirmationAtStart, userAffirmative) =>
-    pendingConfirmationAtStart === true && userAffirmative === true,
+  // Mirrors the write-gate condition enforced inside executeToolCalls: armed by
+  // an explicit pendingConfirmation flag OR a complete draft staged earlier,
+  // AND an affirmative user turn.
+  isWriteAllowed: (pendingConfirmationAtStart, draftCompleteAtStart, userAffirmative) =>
+    (pendingConfirmationAtStart === true || draftCompleteAtStart === true) && userAffirmative === true,
   constants: {
     MAX_MEMORY,
     MAX_TOOL_ROUNDS,
