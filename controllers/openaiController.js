@@ -12,9 +12,34 @@ const crypto = require('crypto');
 // same way the Sankey / pivot views do — strengthening history matching.
 const { mergeVendorName } = require('../utils/vendorNormalize');
 const MEMORY_TTL = 604800; // 1 week
-const MAX_MEMORY = 10; // reduce memory context size to prevent large requests
+const MAX_MEMORY = 20; // verbatim conversation window (older turns are folded into a rolling summary)
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
 const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
+
+// ─── Kea Assistant memory-upgrade constants ────────────────────────────────
+// Dialogue state (in-progress "draft" transaction + slot-filling) lives in
+// Redis keyed by userId with a short TTL — it is transient, per-conversation
+// working state, not durable memory.
+const DIALOGUE_TTL = 86400;              // 1 day
+const DIALOGUE_STATE_MAX_CHARS = 900;    // hard cap on the injected dialogue block
+// Rolling short-term summary: a compact "conversation so far" that captures
+// turns older than the verbatim window so long chats stay coherent + lean.
+const SUMMARY_TTL = 604800;              // 1 week (matches MEMORY_TTL)
+const SUMMARY_MAX_CHARS = 1200;          // hard cap on the injected summary block
+const SUMMARY_TRIGGER = 16;              // start summarizing once history exceeds this many turns
+// Long-term durable facts (fetched from cashflow-backend-api) budget.
+const FACTS_MAX_CHARS = 1200;            // hard cap on the injected long-term-facts block
+const FACTS_PRELOAD_LIMIT = 12;          // max facts pulled into context per turn
+// Multi-round tool loop: how many read→refine→act cycles a single user turn
+// may run before we force a final answer. Bounds latency + token cost.
+const MAX_TOOL_ROUNDS = 4;
+const MAX_DRAFT_UPDATES_PER_TURN = 4;    // stop the model looping on updateDraftTransaction
+// Tools that WRITE real data. These are gated in code (not just the prompt):
+// they require a prior proposal (dialogueState.pendingConfirmation) AND an
+// affirmative user turn before they may execute.
+const WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction']);
+// Non-writing tool that stages/refines the draft transaction slots.
+const DRAFT_TOOL = 'updateDraftTransaction';
 // Short TTL: the cache key is now a hash of the exact prompt (see
 // buildSummarizationCacheKeyFromContent), so identical inputs are the only way
 // to hit the cache. A short TTL is a secondary safety net that bounds how long
@@ -841,95 +866,378 @@ function buildToolFallbackResponse(toolResults) {
   return `## Action Completed\n\n**${parts.join('. ')}**`;
 }
 
+// ─── Kea Assistant: dialogue state (slot-filling) helpers ───────────────────
+// Dialogue state tracks an in-progress "draft" transaction across turns so the
+// assistant only needs minimal input to complete an action (and can ask for
+// what's genuinely missing). It is background working-state, NOT the transcript
+// — the client-sent history remains the source of truth for the conversation.
+
+function buildDialogueKey(userId) {
+  const u = normalizeAccountIdForCacheKey(userId);
+  return `dialogue:${u}`;
+}
+
+function emptyDialogueState() {
+  return {
+    intent: null,
+    draftTransaction: {},
+    pendingConfirmation: false,
+    committed: false,
+    lastCommitSignature: null,
+    updatedAt: null,
+  };
+}
+
+// Fail-soft load: any Redis hiccup yields a fresh empty state so chat never breaks.
+async function loadDialogueState(userId) {
+  if (!userId) return emptyDialogueState();
+  try {
+    const raw = await redis.get(buildDialogueKey(userId));
+    if (!raw) return emptyDialogueState();
+    const parsed = JSON.parse(raw);
+    return { ...emptyDialogueState(), ...(parsed && typeof parsed === 'object' ? parsed : {}) };
+  } catch (e) {
+    console.warn('Dialogue state load failed:', e.message);
+    return emptyDialogueState();
+  }
+}
+
+// Fail-soft persist. Never throws into the chat flow.
+async function saveDialogueState(userId, state) {
+  if (!userId || !state) return;
+  try {
+    const toSave = { ...state, updatedAt: new Date().toISOString() };
+    await redis.set(buildDialogueKey(userId), JSON.stringify(toSave), 'EX', DIALOGUE_TTL);
+  } catch (e) {
+    console.warn('Dialogue state save failed:', e.message);
+  }
+}
+
+// Slots we consider "core" for a proposable transaction. `title`/`amount`/
+// `type` are the minimum needed to confirm; the rest are estimated downstream.
+const DRAFT_CORE_SLOTS = ['title', 'type', 'amount', 'start'];
+
+function computeDraftMissingFields(draft) {
+  const missing = [];
+  if (!draft || typeof draft !== 'object') return DRAFT_CORE_SLOTS.slice();
+  for (const slot of DRAFT_CORE_SLOTS) {
+    const v = draft[slot];
+    if (v === undefined || v === null || String(v).trim() === '') missing.push(slot);
+  }
+  return missing;
+}
+
+// Stable signature for a draft/create payload so a multi-round loop (or a retry)
+// can't create the same transaction twice within one turn.
+function draftSignature(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  const amt = Number(obj.amount);
+  const parts = [
+    String(obj.title || obj.merchant_name || '').trim().toLowerCase(),
+    String(obj.type || '').trim().toLowerCase(),
+    Number.isFinite(amt) ? Math.abs(Math.round(amt * 100) / 100) : '',
+    obj.start ? moment(obj.start).isValid() ? moment(obj.start).format('YYYY-MM-DD') : String(obj.start) : '',
+    obj.transactionid || obj.transaction_id || '',
+  ];
+  return parts.join('|');
+}
+
+// Heuristic: did the user's current turn confirm the pending proposal? Kept in
+// sync with the CONFIRMATION HANDLING language in the system prompt.
+function isAffirmativeMessage(message) {
+  if (!message || typeof message !== 'string') return false;
+  const m = message.trim().toLowerCase();
+  if (!m) return false;
+  const patterns = [
+    /^y(es|ep|eah|up|es please|es pls)?\b/, /\bconfirm(ed)?\b/, /\bgo ahead\b/, /\bdo it\b/,
+    /\bsounds good\b/, /\block it in\b/, /\bproceed\b/, /\bok(ay)?\b/, /\bsure\b/, /\babsolutely\b/,
+    /\b(please )?add (it|that|this)\b/, /\badd this (forecast|transaction)\b/, /\bcreate it\b/,
+    /\blog it\b/, /\bput (it|that) in\b/, /\bthat'?s? (right|correct)\b/, /\blooks good\b/,
+  ];
+  return patterns.some((re) => re.test(m));
+}
+
+// Compact, hard-capped block describing the in-progress action for the system
+// prompt. Returns '' when there's nothing worth injecting.
+function buildDialogueStateBlock(state) {
+  if (!state || typeof state !== 'object') return '';
+  const draft = state.draftTransaction || {};
+  const hasDraft = draft && Object.keys(draft).some(
+    (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== ''
+  );
+  if (!state.intent && !hasDraft) return '';
+
+  const lines = ['DIALOGUE STATE (background — an in-progress action, NOT a message from the user):'];
+  if (state.intent) lines.push(`- intent: ${state.intent}`);
+  if (hasDraft) {
+    const slotStr = ['title', 'type', 'amount', 'category', 'start', 'frequency']
+      .filter((k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== '')
+      .map((k) => `${k}=${draft[k]}`)
+      .join(', ');
+    lines.push(`- draft transaction: ${slotStr || '(no slots yet)'}`);
+    const missing = computeDraftMissingFields(draft);
+    if (missing.length) lines.push(`- missing/uncertain: ${missing.join(', ')}`);
+  }
+  lines.push(`- awaiting user confirmation: ${state.pendingConfirmation ? 'yes' : 'no'}`);
+  lines.push(
+    'Guidance: refine slots with updateDraftTransaction as details emerge. Propose a SINGLE concrete amount and ask the user to confirm. Only after the user confirms on a later turn should you call createTransaction with the draft values. Ask only for genuinely missing info.'
+  );
+  return truncateText(lines.join('\n'), DIALOGUE_STATE_MAX_CHARS);
+}
+
+// ─── Kea Assistant: rolling short-term summary helpers ──────────────────────
+
+function buildSummaryKey(userId) {
+  return `summary:${normalizeAccountIdForCacheKey(userId)}`;
+}
+
+function buildSummaryBlock(summary) {
+  const s = (summary || '').trim();
+  if (!s) return '';
+  return truncateText(`CONVERSATION SUMMARY SO FAR (background — earlier turns condensed):\n${s}`, SUMMARY_MAX_CHARS);
+}
+
+// Merge the prior summary with the turns that fell out of the verbatim window
+// into an updated compact summary. Fail-soft: returns the prior summary on error.
+async function generateRollingSummary(prevSummary, overflowTurns) {
+  if (!Array.isArray(overflowTurns) || overflowTurns.length === 0) return prevSummary || '';
+  try {
+    const convoText = overflowTurns
+      .map((m) => `${m.role}: ${String(m.content || '').replace(/\s+/g, ' ').slice(0, 500)}`)
+      .join('\n');
+    const sys = 'You maintain a compact running memory of a personal-finance chat between a user and the Kea Assistant. Merge the PRIOR SUMMARY with the NEW TURNS into a single updated summary under 900 characters. Preserve durable, actionable facts: goals, planned purchases and their estimated amounts/dates, decisions, stated preferences, and any transaction that was proposed or created. Drop pleasantries and small talk. Write terse notes, not prose.';
+    const usr = `PRIOR SUMMARY:\n${prevSummary || '(none)'}\n\nNEW TURNS:\n${convoText}\n\nUpdated summary:`;
+    const resp = await queryAzureOpenAI(
+      [{ role: 'system', content: sys }, { role: 'user', content: usr }],
+      { tool_choice: 'none', temperature: 0.2, max_tokens: 320 }
+    );
+    const out = resp?.choices?.[0]?.message?.content || '';
+    return truncateText(out.trim(), SUMMARY_MAX_CHARS) || (prevSummary || '');
+  } catch (e) {
+    console.warn('Rolling summary generation failed (fail-soft):', e.message);
+    return prevSummary || '';
+  }
+}
+
+// ─── Kea Assistant: long-term memory (durable facts) helpers ────────────────
+// Facts live in cashflow-backend-api (assistant_memory table). All calls are
+// fail-soft so chat keeps working if the backend endpoint is unavailable.
+
+async function recallLongTermFacts({ userId, accountId, token }) {
+  if (!userId || !token) return [];
+  try {
+    const res = await functionMap.recallFacts(
+      { userId, accountId, limit: FACTS_PRELOAD_LIMIT },
+      { userId, token, accountId }
+    );
+    if (Array.isArray(res)) return res;
+    if (Array.isArray(res?.facts)) return res.facts;
+    if (Array.isArray(res?.data)) return res.data;
+    return [];
+  } catch (e) {
+    console.warn('Long-term facts recall failed (fail-soft):', e.message);
+    return [];
+  }
+}
+
+function buildFactsBlock(facts) {
+  if (!Array.isArray(facts) || facts.length === 0) return '';
+  const lines = ['LONG-TERM MEMORY (durable facts you previously saved about this user; background context):'];
+  for (const f of facts) {
+    const key = String(f?.mem_key || f?.key || '').trim();
+    const val = String(f?.mem_value || f?.value || '').trim();
+    if (!val) continue;
+    lines.push(`- ${key ? key + ': ' : ''}${val}`);
+  }
+  if (lines.length === 1) return '';
+  return truncateText(lines.join('\n'), FACTS_MAX_CHARS);
+}
+
+// Redact sensitive fields (token, raw message/PII) before logging a chat body.
+function redactChatBodyForLog(body) {
+  if (!body || typeof body !== 'object') return {};
+  return {
+    hasToken: !!body.token,
+    sessionId: body.sessionId,
+    accountid: body.accountid,
+    messageLength: typeof body.message === 'string' ? body.message.length : 0,
+    historyLength: Array.isArray(body.history) ? body.history.length : 0,
+    hasAccountSnapshot: !!body.accountSnapshot,
+    hasFaq: !!body.faq,
+    hasLocation: !!body.location,
+  };
+}
+
 async function executeToolCalls(originalMessages, toolCalls, ctx) {
-  // Execute each requested tool and keep one result per tool_call (tagged with
-  // its id) so we can echo a matching `tool` role message back to the model.
-  const toolResults = [];
+  // Multi-round loop: the model may read data, refine the draft, then act within
+  // a single user turn. Bounded by MAX_TOOL_ROUNDS to keep latency/tokens sane.
+  const state = ctx.dialogueState || (ctx.dialogueState = emptyDialogueState());
+  let draftUpdates = 0;
 
-  for (const toolCall of toolCalls) {
-    const { name, arguments: argsJson } = toolCall.function || {};
-    let args = {};
-    try { args = argsJson ? JSON.parse(argsJson) : {}; } catch { args = {}; }
+  // Execute one batch of tool calls, applying dialogue-state handling + the
+  // code-enforced write gate. Returns matching assistant/tool protocol messages.
+  const runBatch = async (batch) => {
+    const toolResults = [];
+    for (const toolCall of batch) {
+      const { name, arguments: argsJson } = toolCall.function || {};
+      let args = {};
+      try { args = argsJson ? JSON.parse(argsJson) : {}; } catch { args = {}; }
 
-    const toolFn = functionMap[name];
-    if (!toolFn) {
-      toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: `Unknown tool: ${name}` }) });
-      continue;
-    }
-
-    try {
-      const result = await toolFn(args, ctx);
-
-      // Truncate large payloads so a single fetch can't blow up the context
-      // window (read tools are already paginated upstream).
-      let toolContent = JSON.stringify(result ?? {});
-      if (toolContent.length > 13000) {
-        toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
-        console.log('Tool response truncated from', JSON.stringify(result ?? {}).length, 'to', toolContent.length, 'bytes');
+      // ── Non-writing draft tool: merge slots into dialogue state ──────────
+      if (name === DRAFT_TOOL) {
+        draftUpdates++;
+        if (draftUpdates > MAX_DRAFT_UPDATES_PER_TURN) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: 'Draft already refined several times this turn; proceed to propose/confirm or ask the user.' }) });
+          continue;
+        }
+        const incoming = { ...args };
+        const intent = incoming.intent; delete incoming.intent;
+        const proposed = incoming.pendingConfirmation === true; delete incoming.pendingConfirmation;
+        delete incoming.userId; delete incoming.accountId; // identity comes from ctx
+        for (const [k, v] of Object.entries(incoming)) {
+          if (v !== undefined && v !== null && String(v).trim() !== '') state.draftTransaction[k] = v;
+        }
+        if (intent && String(intent).trim()) state.intent = String(intent).trim();
+        if (proposed) state.pendingConfirmation = true;
+        const missing = computeDraftMissingFields(state.draftTransaction);
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          ok: true,
+          draft: state.draftTransaction,
+          intent: state.intent,
+          missingFields: missing,
+          pendingConfirmation: state.pendingConfirmation,
+          note: missing.length
+            ? 'Draft saved. Estimate the missing/uncertain fields and propose a single concrete value, or ask the user only for what you truly cannot infer.'
+            : 'Draft is complete. Propose the concrete transaction and ask the user to confirm before creating.'
+        }) });
+        continue;
       }
 
-      toolResults.push({ id: toolCall.id, name, content: toolContent });
-    } catch (err) {
-      toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || 'Tool execution failed' }) });
+      const toolFn = functionMap[name];
+      if (!toolFn) {
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: `Unknown tool: ${name}` }) });
+        continue;
+      }
+
+      // ── Code-enforced write gate (createTransaction / updateTransaction) ──
+      if (WRITE_TOOLS.has(name)) {
+        const confirmed = ctx.pendingConfirmationAtStart === true && ctx.userAffirmative === true;
+        if (!confirmed) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            blocked: true,
+            reason: 'confirmation_required',
+            message: 'Do NOT write yet. First show the user the full proposed transaction (title, type, a SINGLE concrete amount, start date, and frequency if recurring) and wait for them to explicitly confirm on their next message. Use updateDraftTransaction to stage the proposal.'
+          }) });
+          continue;
+        }
+        // Idempotency: refuse a duplicate write within the same turn/session.
+        const sig = draftSignature(args);
+        if (sig && state.lastCommitSignature && sig === state.lastCommitSignature) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            duplicate: true,
+            message: 'That transaction was just created; not creating it again.'
+          }) });
+          continue;
+        }
+        try {
+          const result = await toolFn(args, ctx);
+          let toolContent = JSON.stringify(result ?? {});
+          if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
+          // Mark committed + clear the draft so a re-called round can't refire.
+          state.lastCommitSignature = sig;
+          state.committed = true;
+          state.pendingConfirmation = false;
+          state.draftTransaction = {};
+          state.intent = null;
+          toolResults.push({ id: toolCall.id, name, content: toolContent });
+        } catch (err) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || 'Tool execution failed' }) });
+        }
+        continue;
+      }
+
+      // ── Read / other tools ───────────────────────────────────────────────
+      try {
+        const result = await toolFn(args, ctx);
+        let toolContent = JSON.stringify(result ?? {});
+        if (toolContent.length > 13000) {
+          toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
+          console.log('Tool response truncated from', JSON.stringify(result ?? {}).length, 'to', toolContent.length, 'bytes');
+        }
+        toolResults.push({ id: toolCall.id, name, content: toolContent });
+      } catch (err) {
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || 'Tool execution failed' }) });
+      }
     }
-  }
 
-  // Standard tool-calling protocol: echo the assistant message that requested
-  // the tools, then one `tool` message per call carrying the ACTUAL result
-  // data. This lets the model answer detailed lookups (specific transactions,
-  // balances, categories) from real data instead of a one-line count summary.
-  const assistantToolMessage = { role: 'assistant', content: null, tool_calls: toolCalls };
-  const toolMessages = toolResults.map(tr => ({
-    role: 'tool',
-    tool_call_id: tr.id,
-    content: tr.content
-  }));
-
-  // Small fixed nudge (kept tiny for token economy).
-  const finalNudge = {
-    role: 'user',
-    content: 'Using the tool results above, answer my previous message directly. If a transaction was created, confirm it with its name, amount, dates and (if recurring) frequency. Respond in markdown and do not mention tools.'
+    const assistantToolMessage = { role: 'assistant', content: null, tool_calls: batch };
+    const toolMessages = toolResults.map(tr => ({ role: 'tool', tool_call_id: tr.id, content: tr.content }));
+    return { assistantToolMessage, toolMessages, toolResults };
   };
 
-  let cleanMessages = [...originalMessages, assistantToolMessage, ...toolMessages, finalNudge];
-
-  // Size guard. Naive slicing would orphan `tool` messages from their parent
-  // assistant tool_calls message (Azure 400s on that), so when oversized we
-  // rebuild a minimal but VALID array: system + last user + assistant
-  // tool_calls + tool results + nudge (chat history dropped).
-  let messageSize = JSON.stringify(cleanMessages).length;
-  console.log('Message array size after tool execution:', messageSize, 'bytes');
-  if (messageSize > 750000) {
+  // Keep the array valid + within Azure's size limit. Naive slicing would orphan
+  // `tool` messages from their parent assistant tool_calls (Azure 400s), so when
+  // oversized we rebuild a minimal but VALID array: system + last user + this
+  // round's assistant tool_calls + tool results.
+  const enforceSize = (messages, assistantToolMessage, toolMessages) => {
+    const size = JSON.stringify(messages).length;
+    console.log('Message array size after tool round:', size, 'bytes');
+    if (size <= 750000) return messages;
     console.log('Tool-result message array too large, rebuilding a minimal valid array');
     const systemMsg = originalMessages.find(m => m.role === 'system');
     let lastUserMsg = null;
     for (let i = originalMessages.length - 1; i >= 0; i--) {
       if (originalMessages[i].role === 'user') { lastUserMsg = originalMessages[i]; break; }
     }
-    cleanMessages = [
+    const rebuilt = [
       ...(systemMsg ? [systemMsg] : []),
       ...(lastUserMsg ? [lastUserMsg] : []),
       assistantToolMessage,
       ...toolMessages,
-      finalNudge
     ];
-    messageSize = JSON.stringify(cleanMessages).length;
-    console.log('Rebuilt minimal message array size:', messageSize, 'bytes');
+    console.log('Rebuilt minimal message array size:', JSON.stringify(rebuilt).length, 'bytes');
+    return rebuilt;
+  };
+
+  // Nudge only used on the final forced round to push a clean text answer.
+  const finalNudge = {
+    role: 'user',
+    content: 'Using the tool results above, answer my previous message directly. If a transaction was created, confirm it with its name, amount, dates and (if recurring) frequency. If a write was blocked pending confirmation, show the proposed transaction and ask me to confirm. Respond in markdown and do not mention tools.'
+  };
+
+  let messages = [...originalMessages];
+  let batch = toolCalls;
+  let lastToolResults = [];
+
+  for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+    const { assistantToolMessage, toolMessages, toolResults } = await runBatch(batch);
+    lastToolResults = toolResults;
+    messages = enforceSize([...messages, assistantToolMessage, ...toolMessages], assistantToolMessage, toolMessages);
+
+    const isLastRound = round === MAX_TOOL_ROUNDS;
+    const convo = isLastRound ? [...messages, finalNudge] : messages;
+
+    let response;
+    try {
+      console.log(`Tool loop round ${round}/${MAX_TOOL_ROUNDS}: calling model with`, convo.length, 'messages (tool_choice:', isLastRound ? 'none' : 'auto', ')');
+      response = await queryAzureOpenAI(convo, { tools: functionSchemas, tool_choice: isLastRound ? 'none' : 'auto' });
+    } catch (error) {
+      console.log('Tool loop model call failed:', error.message);
+      console.log('Error details:', error.response?.data || error);
+      return { content: buildToolFallbackResponse(lastToolResults), raw: null };
+    }
+
+    const msg = response?.choices?.[0]?.message;
+    if (!isLastRound && msg?.tool_calls && msg.tool_calls.length > 0) {
+      console.log('Tool loop: model requested', msg.tool_calls.length, 'more tool call(s); continuing.');
+      batch = msg.tool_calls;
+      continue;
+    }
+    console.log('Tool loop: final response received, content length:', msg?.content?.length || 0);
+    return { content: msg?.content || '', raw: response };
   }
 
-  // Final response. tool_choice 'none' => no further tool calls; a single round
-  // keeps latency + tokens predictable.
-  try {
-    console.log('Getting final response after tool execution with', cleanMessages.length, 'messages');
-    const finalResponse = await queryAzureOpenAI(cleanMessages, { tools: functionSchemas, tool_choice: 'none' });
-    const choice = finalResponse?.choices?.[0];
-    console.log('Final response received:', !!choice?.message?.content, 'Content length:', choice?.message?.content?.length || 0);
-    return { content: choice?.message?.content || '', raw: finalResponse };
-  } catch (error) {
-    console.log('Final response with tool results failed:', error.message);
-    console.log('Error details:', error.response?.data || error);
-    return { content: buildToolFallbackResponse(toolResults), raw: null };
-  }
+  return { content: buildToolFallbackResponse(lastToolResults), raw: null };
 }
 
 // ----------------------------
@@ -937,7 +1245,8 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 // ----------------------------
 exports.chat = async (req, res) => {
   try {
-    console.log('Chat endpoint called with body:', JSON.stringify(req.body, null, 2));
+    // Redacted request log: never emit `token` or the full message/PII to logs.
+    console.log('Chat endpoint called:', JSON.stringify(redactChatBodyForLog(req.body)));
     const { message, systemPrompt } = req.body;
     if (!message) {
       console.log('Chat endpoint: Missing message in request body');
@@ -963,6 +1272,23 @@ exports.chat = async (req, res) => {
       console.warn('Chat endpoint: Redis history load failed:', redisError.message);
       history = [];
     }
+
+    // ── Kea Assistant memory layers (all fail-soft) ──────────────────────────
+    // 1) Dialogue state: in-progress draft transaction + slot-filling.
+    const dialogueState = await loadDialogueState(userId);
+    const pendingConfirmationAtStart = dialogueState.pendingConfirmation === true;
+    const userAffirmative = isAffirmativeMessage(message);
+    // Reset the one-shot "committed" flag at the start of each new turn.
+    dialogueState.committed = false;
+    // 2) Rolling short-term summary of older turns (loaded here, refreshed after the turn).
+    let rollingSummary = '';
+    try {
+      rollingSummary = (await redis.get(buildSummaryKey(userId))) || '';
+    } catch (e) {
+      console.warn('Chat endpoint: rolling summary load failed:', e.message);
+    }
+    // 3) Long-term durable facts from cashflow-backend-api (per user + account).
+    const longTermFacts = await recallLongTermFacts({ userId, accountId: accountid, token });
 
     // Prefer the client-sent transcript when provided. It's the exact
     // conversation the user is looking at, so it can't drift from the UI even
@@ -1079,8 +1405,7 @@ exports.chat = async (req, res) => {
       : buildChatNoAccountContext(firstName);
     console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
 
-    const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting. If the user has not loaded any accounts yet, then you should highlight the features and capabilities of Keacast as well as its purposed and benefits for a user or a small business owner, use the FAQ items to help the user understand how to use Keacast. Always use the FAQ items to help the user understand Keacast and how it can help them, application specific questions and answers should be included.  
-    When referencing the FAQ items, don't use the answers word for word, use the questions and answers and create a response that is relevant to the user's question.  
+    const baseSystem = `You are the Keacast (pronunciation: kee-uh-cast) Assistant, a knowledgeable and proactive personal finance forecasting tool developed by Parrot Insight LLC. Keacast is designed to help users manage their finances with foresight and clarity, going beyond traditional budgeting. You can refer to yourself as the Kea (pronunciation: kee-uh) assistant. Keacast is based on the Kea Parrot and it's predictive intelligence combined with a calendar-based forecasting system hince Keacast. Always respond with markdown formatting. If the user has not loaded any accounts yet, highlight Keacast's features, purpose, and benefits for a user or small business owner, and use the FAQ items to help them understand how to use it. When referencing the FAQ, don't quote answers word for word — use the questions and answers to craft a response relevant to the user's question.  
     If the user has loaded accounts, then you should use the context provided to answer the user's question.
 
     Core purpose:
@@ -1143,6 +1468,12 @@ exports.chat = async (req, res) => {
       - When working with dates and times, consider the user's location and timezone to provide accurate date-based responses. Forecasted transactions can not be created on date before the ${currentDate}. The system automatically calculates the correct date based on the user's coordinates.
       - When creating forecasts always consider whether the user has enough in the coming days, weeks, months, or years and warn them about how this may effect their financial state in the future. 
 
+    ADVISOR MEMORY & TOOLS (use these to be a stateful, context-aware advisor):
+    - SLOT-FILLING with updateDraftTransaction: As a plan for a transaction takes shape across the conversation (e.g. the user researches a carpet replacement, you estimate ~$1,600, they mention next month), call updateDraftTransaction to record/refine the known fields (title, type, amount, category, start, frequency, and an intent like "carpet replacement"). This is a NON-writing scratchpad — it never creates anything. Set pendingConfirmation:true on it ONLY when you have just proposed a complete, concrete transaction and are asking the user to confirm. The DIALOGUE STATE block reflects the current draft; reuse it so the user never repeats themselves. Ask only for fields you genuinely cannot infer.
+    - The confirm-before-write rule is enforced in code: createTransaction/updateTransaction will be REFUSED unless you proposed the transaction on a prior turn (pendingConfirmation) and the user's latest message affirmatively confirmed it. So always: (1) propose with a single concrete amount, (2) wait for the user's confirmation on their next message, (3) then call the write tool. If a write is refused, simply show the proposal again and ask them to confirm.
+    - updateTransaction edits an EXISTING forecasted transaction (by transactionid) — same rule: propose the change, get confirmation, then call it.
+    - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:carpet_replacement" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
+
     Tone & Style: 
     - Clear, empathetic, and supportive
     - Professional yet approachable
@@ -1162,9 +1493,25 @@ exports.chat = async (req, res) => {
     // flows: on a confirmation turn the model saw [assistant: "...confirm?"],
     // then a system-authored "user" context dump, then "yes please" — and
     // treated the context dump as a topic change, restarting the conversation.
-    const systemContent = completeContext
+    let systemContent = completeContext
       ? `${baseSystem}\n\n---\nCURRENT CONTEXT (background — NOT a message from the user):\n${completeContext}`
       : baseSystem;
+
+    // Append the Kea Assistant memory layers as BACKGROUND context (each hard-
+    // capped). Order: long-term facts, then rolling summary, then the live
+    // dialogue state (most immediately actionable last).
+    const factsBlock = buildFactsBlock(longTermFacts);
+    const summaryBlock = buildSummaryBlock(rollingSummary);
+    const dialogueBlock = buildDialogueStateBlock(dialogueState);
+    if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
+    if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
+    if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
+    console.log('Chat endpoint: memory layers ->',
+      'facts:', longTermFacts.length,
+      'summaryChars:', (rollingSummary || '').length,
+      'draftSlots:', Object.keys(dialogueState.draftTransaction || {}).length,
+      'pendingConfirm:', pendingConfirmationAtStart,
+      'affirmative:', userAffirmative);
 
     // Build message array with memory and clean up long messages
     const messages = [
@@ -1224,7 +1571,17 @@ exports.chat = async (req, res) => {
 
     // Function-calling loop (uses functionMap.js). currentDate flows through so
     // createTransaction can default `start` to the user's localized today.
-    const ctx = { userId, token, accountId: accountid, currentDate };
+    // dialogueState (+ gate flags) let executeToolCalls slot-fill the draft and
+    // enforce the confirm-before-write rule in code, not just the prompt.
+    const ctx = {
+      userId,
+      token,
+      accountId: accountid,
+      currentDate,
+      dialogueState,
+      pendingConfirmationAtStart,
+      userAffirmative,
+    };
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
@@ -1269,17 +1626,41 @@ exports.chat = async (req, res) => {
     });
     
     const finalText = result.content || '## ❌ No Response\n\n**Sorry, no response generated.**';
-    const updatedHistory = [
+    // Full turn transcript BEFORE trimming — used to decide what overflows into
+    // the rolling summary.
+    const fullTurn = [
       ...sanitizeMessageArray(history),
       { role: 'user', content: message },
       { role: 'assistant', content: finalText }
-    ].slice(-MAX_MEMORY);
+    ];
+    const updatedHistory = fullTurn.slice(-MAX_MEMORY);
 
     try {
       await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
       console.log('Chat endpoint: Saved updated history to Redis');
     } catch (redisError) {
       console.warn('Chat endpoint: Failed to save history to Redis:', redisError.message);
+    }
+
+    // Persist dialogue state (mutated in-place by executeToolCalls). Fail-soft.
+    await saveDialogueState(userId, ctx.dialogueState || dialogueState);
+
+    // Refresh the rolling summary once the conversation grows past the trigger:
+    // fold the turns that fell OUT of the verbatim window into the summary so
+    // long chats stay coherent without unbounded token growth. Fail-soft.
+    try {
+      if (userId && fullTurn.length > SUMMARY_TRIGGER) {
+        const overflow = fullTurn.slice(0, fullTurn.length - MAX_MEMORY);
+        if (overflow.length > 0) {
+          const newSummary = await generateRollingSummary(rollingSummary, overflow);
+          if (newSummary && newSummary !== rollingSummary) {
+            await redis.set(buildSummaryKey(userId), newSummary, 'EX', SUMMARY_TTL);
+            console.log('Chat endpoint: rolling summary refreshed (', newSummary.length, 'chars )');
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Chat endpoint: rolling summary refresh failed (fail-soft):', e.message);
     }
 
     res.json({
@@ -2926,6 +3307,20 @@ exports.clearHistory = async (req, res) => {
     const existingHistory = await redis.get(sessionKey);
     console.log('Clear history: Existing history found:', !!existingHistory);
 
+    // Also wipe the transient conversation working-state (dialogue draft +
+    // rolling summary) for this user. Durable long-term facts are intentionally
+    // PRESERVED — they're only removed via DELETE /assistant-memory. Fail-soft.
+    try {
+      const { userId: clearUserId } = extractAuthFromRequest(req);
+      if (clearUserId) {
+        await redis.del(buildDialogueKey(clearUserId));
+        await redis.del(buildSummaryKey(clearUserId));
+        console.log('Clear history: cleared dialogue state + rolling summary for user', clearUserId);
+      }
+    } catch (e) {
+      console.warn('Clear history: failed to clear dialogue/summary (non-fatal):', e.message);
+    }
+
     try {
       const deleteResult = await redis.del(sessionKey);
       console.log('Clear history: Redis delete result:', deleteResult);
@@ -3171,4 +3566,29 @@ exports.getChatHistory = async (req, res) => {
     console.error('Get chat history error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+};
+
+// Pure, side-effect-free helpers exposed for the ad-hoc memory test script
+// (test-kea-memory.js). Not part of the HTTP surface.
+exports.__testables = {
+  emptyDialogueState,
+  isAffirmativeMessage,
+  draftSignature,
+  computeDraftMissingFields,
+  buildDialogueStateBlock,
+  buildFactsBlock,
+  buildSummaryBlock,
+  redactChatBodyForLog,
+  // Mirrors the write-gate condition enforced inside executeToolCalls.
+  isWriteAllowed: (pendingConfirmationAtStart, userAffirmative) =>
+    pendingConfirmationAtStart === true && userAffirmative === true,
+  constants: {
+    MAX_MEMORY,
+    MAX_TOOL_ROUNDS,
+    SUMMARY_TRIGGER,
+    DIALOGUE_STATE_MAX_CHARS,
+    SUMMARY_MAX_CHARS,
+    FACTS_MAX_CHARS,
+    WRITE_TOOLS: Array.from(WRITE_TOOLS),
+  },
 };

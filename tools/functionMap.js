@@ -16,7 +16,7 @@ const {
   getUpcomingByAccountAndRangeCount,
   getTransactionSummary
 } = require('../services/transactions.service');
-const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction } = require('./keacast_tool_layer');
+const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction, getTransactionById, updateTransaction, rememberFact, recallFacts } = require('./keacast_tool_layer');
 const moment = require('moment');
 
 // Smart data loading strategy to prevent memory issues
@@ -94,6 +94,58 @@ function normalizeCreateTransactionInput(args = {}, ctx = {}) {
   if (!out.forecast_type) out.forecast_type = 'F';
 
   return out;
+}
+
+// Build a COMPLETE update payload by merging the LLM's partial edits over the
+// existing transaction row. The backend UPDATE overwrites every column, so we
+// must preserve unspecified fields (fetched via getTransactionById) to avoid
+// nulling data. Recomputes the signed amount from the final type.
+async function buildUpdateTransactionInput(args = {}, ctx = {}) {
+  const transactionId = args.transactionid || args.transaction_id || ctx.id;
+  if (!transactionId) throw new Error('transactionid is required to update a transaction');
+
+  let existing = {};
+  try {
+    const rows = await getTransactionById({ transactionId, token: ctx.token });
+    if (Array.isArray(rows) && rows.length) existing = rows[0] || {};
+    else if (rows && typeof rows === 'object') existing = rows;
+  } catch (e) {
+    // Best-effort: if the read-back fails we proceed with provided fields only.
+    console.warn('updateTransaction: failed to read existing row, proceeding best-effort:', e.message);
+  }
+
+  const merged = { ...existing };
+
+  const passThrough = ['title', 'category', 'description', 'location', 'display_name', 'merchant_name', 'time'];
+  for (const k of passThrough) {
+    if (args[k] !== undefined && args[k] !== null && String(args[k]).trim() !== '') merged[k] = args[k];
+  }
+
+  // Resolve final type (provided → existing → infer from existing sign).
+  let type = String(args.type || existing.type || '').toLowerCase();
+  if (type !== 'income' && type !== 'expense') {
+    type = Number(existing.amount) >= 0 ? 'income' : 'expense';
+  }
+  merged.type = type;
+
+  // Amount: if provided, re-sign by type; else keep the existing signed amount.
+  if (args.amount !== undefined && Number.isFinite(Number(args.amount))) {
+    const mag = Math.abs(Number(args.amount));
+    merged.amount = type === 'expense' ? -mag : mag;
+  }
+
+  if (args.start && moment(args.start).isValid()) merged.start = moment(args.start).toISOString();
+  if (args.end && moment(args.end).isValid()) merged.end = moment(args.end).toISOString();
+
+  if (args.frequency !== undefined && Number.isFinite(Number(args.frequency))) {
+    const freq = Number(args.frequency);
+    merged.frequency = freq;
+    merged.forecast_type = freq === FREQUENCY_ONCE ? 'F' : 'RF';
+  }
+
+  if (!merged.display_name || !String(merged.display_name).trim()) merged.display_name = merged.title;
+  merged.transactionid = transactionId;
+  return merged;
 }
 
 // Each tool gets (args, ctx), where ctx can include userId, auth, etc.
@@ -305,6 +357,40 @@ const functionMap = {
     const { id } = ctx;
     const transactionId = id || transaction_id;
     const result = await deleteTransaction({ userId, transactionId, token, body });
+    return result;
+  },
+
+  // Update an existing forecasted transaction. Identity (userId/token) comes
+  // from ctx; the payload is merged over the existing row so partial edits are
+  // safe. The confirm-before-write gate is enforced upstream in executeToolCalls.
+  async updateTransaction(args, ctx) {
+    const { userId, token } = ctx;
+    const body = await buildUpdateTransactionInput(args, ctx);
+    const result = await updateTransaction({ userId, transactionId: body.transactionid, token, body });
+    return result;
+  },
+
+  // Persist a durable fact about the user. accountScoped=true ties it to the
+  // currently selected account; otherwise it's a user-level fact.
+  async rememberFact(args, ctx) {
+    const { userId, token, accountId } = ctx;
+    const accountid = args.accountScoped ? accountId : null;
+    const result = await rememberFact({
+      userId,
+      token,
+      mem_key: args.mem_key,
+      mem_value: args.mem_value,
+      kind: args.kind || 'fact',
+      importance: args.importance,
+      accountid,
+    });
+    return result;
+  },
+
+  // Retrieve durable facts (account-scoped + user-level) for the current user.
+  async recallFacts(args, ctx) {
+    const { userId, token, accountId } = ctx;
+    const result = await recallFacts({ userId, token, accountId, limit: args.limit });
     return result;
   }
 };

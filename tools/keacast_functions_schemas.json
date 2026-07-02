@@ -194,6 +194,86 @@
   {
     "type": "function",
     "function": {
+      "name": "updateDraftTransaction",
+      "description": "NON-WRITING scratchpad for slot-filling. Record or refine the fields of a transaction the user is PLANNING as details emerge across the conversation (e.g. a carpet replacement, an estimated amount, a target month). This does NOT create or change any real data — it only updates the assistant's working draft so the user never has to repeat themselves. Call it whenever a new detail appears. Set pendingConfirmation=true ONLY when you have just proposed a complete, concrete transaction (single amount) and are asking the user to confirm on their next message.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "intent": { "type": "string", "description": "Short label for what the user is planning, e.g. 'carpet replacement'." },
+          "title": { "type": "string", "description": "Short name for the transaction." },
+          "type": { "type": "string", "enum": ["expense", "income"], "description": "expense for money spent, income for money received." },
+          "amount": { "type": "number", "description": "Positive magnitude; a SINGLE concrete estimate, never a range." },
+          "category": { "type": "string", "description": "Best-fit category." },
+          "description": { "type": "string" },
+          "start": { "type": "string", "description": "YYYY-MM-DD or ISO date it occurs/starts." },
+          "frequency": { "type": "number", "description": "Recurrence code: 2=Once (default), 7=Weekly, 14=Bi-Weekly, 28-31=Monthly, 365=Annually." },
+          "merchant_name": { "type": "string" },
+          "transactionid": { "type": "number", "description": "Only when staging an edit to an EXISTING transaction (for updateTransaction)." },
+          "pendingConfirmation": { "type": "boolean", "description": "Set true ONLY when you have proposed a complete concrete transaction and are awaiting the user's yes/no." }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rememberFact",
+      "description": "Persist a DURABLE fact about the user for future conversations (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference). Only save what the user actually stated or clearly implied — never guesses, and never transient chit-chat. Prefer a short stable mem_key so re-saving updates the same fact.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mem_key": { "type": "string", "description": "Short stable key, e.g. 'goal:emergency_fund' or 'plan:carpet_replacement'." },
+          "mem_value": { "type": "string", "description": "Concise fact text worth remembering long-term." },
+          "kind": { "type": "string", "enum": ["profile", "preference", "fact", "episodic"], "description": "Category of memory. Defaults to 'fact'." },
+          "importance": { "type": "integer", "description": "1-10; higher means more important to retain." },
+          "accountScoped": { "type": "boolean", "description": "true if the fact is specific to the currently selected account; omit/false for user-level facts." }
+        },
+        "required": ["mem_key", "mem_value"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "recallFacts",
+      "description": "Retrieve durable facts previously saved about the user (most important/recent first). Use only when you need more of the user's saved context than is already shown in the LONG-TERM MEMORY block.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "description": "Max facts to return (default 12)." }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "updateTransaction",
+      "description": "Update an EXISTING forecasted transaction by transactionid (e.g. change its amount, date, title, category, or frequency). Writes real data, so you MUST first propose the change and get the user's explicit confirmation on a LATER turn before calling this (enforced in code). Only forecasted transactions (forecast_type 'F'/'RF') can be updated. Pass amount as a positive number and set type; the system applies the sign.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "transactionid": { "type": "number", "description": "The id of the transaction to update." },
+          "title": { "type": "string" },
+          "type": { "type": "string", "enum": ["expense", "income"] },
+          "amount": { "type": "number", "description": "Positive magnitude; system applies sign from type." },
+          "category": { "type": "string" },
+          "description": { "type": "string" },
+          "start": { "type": "string", "description": "YYYY-MM-DD or ISO." },
+          "end": { "type": "string", "description": "Recurring only: when recurrence stops." },
+          "time": { "type": "string", "description": "HH:mm." },
+          "frequency": { "type": "number", "description": "Recurrence code (see createTransaction)." },
+          "merchant_name": { "type": "string" }
+        },
+        "required": ["transactionid"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "deleteTransaction",
       "description": "Deletes a transaction from the user's account. If the transaction is not found then return a message saying 'Transaction not found'. Always confirm with the user before deleting a transaction or a group of transactions. If the user is not sure about deleting a transaction then ask them to confirm their decision. Always list out the deleted transactions and the number of transactions deleted. Transactions can be deleted by their transactionid. If the user does not provide a transactionid then ask the user to provide it, else use the relevant information to find the transactionid found in context. Also you can only delete forecasted transaction and not actual transactions. If forecast_type is 'A' then return a message saying 'Transaction is an actual transaction and cannot be deleted'. If forecast_type is 'F' then delete the transaction.",
       "parameters": {

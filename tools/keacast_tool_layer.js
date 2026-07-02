@@ -5,7 +5,7 @@ const axios = require('axios');
 const moment = require('moment');
 
 // Normalize base URL to avoid double slashes when composing paths
-const RAW_BASE_URL = process.env.KEACAST_API_BASE_URL || 'https://cashflow-backend-production.herokuapp.com';
+const RAW_BASE_URL = process.env.CASHFLOW_API_URL || 'https://cashflow-backend-production.herokuapp.com';
 const BASE_URL = RAW_BASE_URL.replace(/\/+$/, '');
 
 // Only attach Authorization header when token is provided
@@ -99,6 +99,43 @@ async function deleteTransaction({ userId, transactionId, token, body }) {
   return response.data;
 }
 
+// Fetch a single transaction by id (SELECT *). Used by updateTransaction to
+// merge partial LLM edits over the existing row so unspecified columns aren't
+// wiped by the full-field UPDATE on the backend.
+async function getTransactionById({ transactionId, token }) {
+  const url = `${BASE_URL}/transactions/get/by/id/${transactionId}`;
+  const response = await axios.get(url, AUTH_HEADER(token));
+  return response.data;
+}
+
+// Update an existing (forecasted) transaction. `body` must be a COMPLETE row
+// (the backend UPDATE overwrites every column), so callers merge over the
+// existing row first.
+async function updateTransaction({ userId, transactionId, token, body }) {
+  const url = `${BASE_URL}/transaction/update/${userId}/${transactionId}`;
+  const response = await axios.post(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
+// ── Long-term memory (assistant_memory on cashflow-backend-api) ─────────────
+async function rememberFact({ userId, token, mem_key, mem_value, kind, importance, accountid }) {
+  const url = `${BASE_URL}/assistant-memory/${userId}`;
+  const body = { mem_key, mem_value, kind, importance, accountid };
+  const response = await axios.post(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
+async function recallFacts({ userId, token, accountId, limit }) {
+  const qs = [];
+  if (accountId !== undefined && accountId !== null && accountId !== '') {
+    qs.push(`accountid=${encodeURIComponent(accountId)}`);
+  }
+  if (limit) qs.push(`limit=${encodeURIComponent(limit)}`);
+  const url = `${BASE_URL}/assistant-memory/${userId}${qs.length ? `?${qs.join('&')}` : ''}`;
+  const response = await axios.get(url, AUTH_HEADER(token));
+  return response.data;
+}
+
 // --------------------------------------
 // Function Map for Tool Execution
 // --------------------------------------
@@ -114,7 +151,11 @@ const functionMap = {
   getSelectedAccount,
   getBalances,
   createTransaction,
-  deleteTransaction
+  deleteTransaction,
+  getTransactionById,
+  updateTransaction,
+  rememberFact,
+  recallFacts
 };
 
 module.exports = {
@@ -130,5 +171,9 @@ module.exports = {
   getBalances,
   createTransaction,
   deleteTransaction,
+  getTransactionById,
+  updateTransaction,
+  rememberFact,
+  recallFacts,
   functionMap // 👈 Exported for OpenAI tool handler integration
 };

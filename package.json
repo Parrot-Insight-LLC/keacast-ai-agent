@@ -9,6 +9,7 @@
     "prod": "NODE_ENV=production node server.js",
     "test": "echo \"Error: no test specified\" && exit 0",
     "test:history": "node test-unified-history.js",
+    "test:memory": "node test-kea-memory.js",
     "deploy:check": "node -e \"console.log('Environment check:'); console.log('NODE_ENV:', process.env.NODE_ENV); console.log('PORT:', process.env.PORT); console.log('AZURE_OPENAI_ENDPOINT:', process.env.AZURE_OPENAI_ENDPOINT ? 'SET' : 'NOT SET'); console.log('REDIS_HOST:', process.env.REDIS_HOST ? 'SET' : 'NOT SET');\""
   },
   "keywords": [
