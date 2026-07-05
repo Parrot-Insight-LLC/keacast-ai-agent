@@ -194,6 +194,72 @@
   {
     "type": "function",
     "function": {
+      "name": "proposeSimulationAdd",
+      "description": "SIMULATION (what-if) tool — stage a HYPOTHETICAL new income or expense in the user's simulation overlay. This does NOT write any data; the user sees the change on their calendar with projected balances and commits or discards it themselves. Use this instead of createTransaction whenever the user is in Simulation Mode or asks a hypothetical/what-if question (e.g. 'what if I added a $500/month savings transfer?'). No confirmation turn is needed — propose immediately with your best estimates for any missing fields, exactly like createTransaction's estimation rules (amount as a positive number, type expense/income, frequency codes, start defaults to today).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "description": "Short name, e.g. 'Rent' or 'Paycheck'. Estimate from context if not stated." },
+          "type": { "type": "string", "enum": ["expense", "income"], "description": "expense for money spent, income for money received." },
+          "amount": { "type": "number", "description": "Positive magnitude; the system signs it based on type. Estimate if not stated." },
+          "category": { "type": "string", "description": "Best-fit category from the user's available categories." },
+          "description": { "type": "string", "description": "Optional details. Defaults to the title." },
+          "start": { "type": "string", "description": "Date it occurs/starts (YYYY-MM-DD or ISO). Defaults to today." },
+          "end": { "type": "string", "description": "Recurring only: when recurrence stops. Defaults to start+1 year." },
+          "time": { "type": "string", "description": "Time of day HH:mm. Defaults to 12:00." },
+          "frequency": { "type": "number", "description": "Recurrence code: 1=Daily, 2=Once (default), 7=Weekly, 14=Bi-Weekly, 15/16=Semi-Monthly, 28-31=Monthly, 60=Bi-Monthly, 91=Quarterly, 182-183=Semi-Annually, 365-366=Annually." },
+          "merchant_name": { "type": "string", "description": "Merchant, if known." },
+          "forecast_type": { "type": "string", "enum": ["F", "RF"], "description": "F=one-off forecast (default), RF=recurring forecast." }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "proposeSimulationModify",
+      "description": "SIMULATION (what-if) tool — stage a HYPOTHETICAL change to an EXISTING forecasted transaction (by transactionid) in the user's simulation overlay. Does NOT write any data and needs NO confirmation turn — the user reviews the change on their calendar and commits or discards it. Use instead of updateTransaction whenever the user is in Simulation Mode or asks a what-if about changing an existing forecast (e.g. 'what if my rent went up to $2000?'). Set scope to 'group' to change every occurrence of a recurring forecast, 'groupfrom' to change this and future occurrences, or 'single' (default) for just this one. Only forecasted transactions (forecast_type F/RF) can be simulated.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "transactionid": { "type": "number", "description": "The id of the existing forecasted transaction to change." },
+          "groupid": { "type": "string", "description": "The recurring group id, when changing a recurring forecast's group." },
+          "scope": { "type": "string", "enum": ["single", "group", "groupfrom"], "description": "single=this occurrence only (default), group=every occurrence, groupfrom=this and future occurrences." },
+          "title": { "type": "string" },
+          "type": { "type": "string", "enum": ["expense", "income"] },
+          "amount": { "type": "number", "description": "Positive magnitude; system applies sign from type." },
+          "category": { "type": "string" },
+          "description": { "type": "string" },
+          "start": { "type": "string", "description": "New date (YYYY-MM-DD or ISO)." },
+          "end": { "type": "string", "description": "Recurring only: new end of the recurrence." },
+          "time": { "type": "string", "description": "HH:mm." },
+          "frequency": { "type": "number", "description": "New recurrence code (see proposeSimulationAdd)." },
+          "merchant_name": { "type": "string" }
+        },
+        "required": ["transactionid"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "proposeSimulationRemove",
+      "description": "SIMULATION (what-if) tool — stage a HYPOTHETICAL removal of an EXISTING forecasted transaction (by transactionid) in the user's simulation overlay. Does NOT delete any data and needs NO confirmation turn — the user reviews the removal on their calendar and commits or discards it. Use instead of deleteTransaction whenever the user is in Simulation Mode or asks a what-if about dropping a forecast (e.g. 'what if I cancelled my gym membership?'). Set scope to 'group' to remove every occurrence of a recurring forecast, 'groupfrom' to remove this and future occurrences, or 'single' (default) for just this one. Only forecasted transactions (forecast_type F/RF) can be simulated.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "transactionid": { "type": "number", "description": "The id of the existing forecasted transaction to remove." },
+          "groupid": { "type": "string", "description": "The recurring group id, when removing a recurring forecast's group." },
+          "scope": { "type": "string", "enum": ["single", "group", "groupfrom"], "description": "single=this occurrence only (default), group=every occurrence, groupfrom=this and future occurrences." }
+        },
+        "required": ["transactionid"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "updateDraftTransaction",
       "description": "NON-WRITING scratchpad for slot-filling. Record or refine the fields of a transaction the user is PLANNING as details emerge across the conversation (e.g. a carpet replacement, an estimated amount, a target month). This does NOT create or change any real data — it only updates the assistant's working draft so the user never has to repeat themselves. Call it whenever a new detail appears. Set pendingConfirmation=true ONLY when you have just proposed a complete, concrete transaction (single amount) and are asking the user to confirm on their next message.",
       "parameters": {

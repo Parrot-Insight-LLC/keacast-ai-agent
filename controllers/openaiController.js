@@ -40,6 +40,13 @@ const MAX_DRAFT_UPDATES_PER_TURN = 4;    // stop the model looping on updateDraf
 const WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction']);
 // Non-writing tool that stages/refines the draft transaction slots.
 const DRAFT_TOOL = 'updateDraftTransaction';
+// Simulation ("what-if") propose tools. These never write — each returns a
+// structured simOp the frontend applies to its client-side simulation overlay.
+const SIM_PROPOSE_TOOLS = new Set(['proposeSimulationAdd', 'proposeSimulationModify', 'proposeSimulationRemove']);
+// While the client is in Simulation Mode, ALL real writes are refused in code
+// (deleteTransaction included — it isn't in WRITE_TOOLS' confirm gate but it
+// still mutates real data). The model is redirected to the propose tools.
+const SIM_BLOCKED_WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction', 'deleteTransaction']);
 // Short TTL: the cache key is now a hash of the exact prompt (see
 // buildSummarizationCacheKeyFromContent), so identical inputs are the only way
 // to hit the cache. A short TTL is a secondary safety net that bounds how long
@@ -1138,6 +1145,9 @@ function redactChatBodyForLog(body) {
     hasAccountSnapshot: !!body.accountSnapshot,
     hasFaq: !!body.faq,
     hasLocation: !!body.location,
+    mode: body.mode,
+    hasSimContext: !!body.simContext,
+    hasSimSnapshot: !!body.simSnapshot,
   };
 }
 
@@ -1146,6 +1156,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   // a single user turn. Bounded by MAX_TOOL_ROUNDS to keep latency/tokens sane.
   const state = ctx.dialogueState || (ctx.dialogueState = emptyDialogueState());
   let draftUpdates = 0;
+  // Structured simulation operations proposed this turn (via the
+  // proposeSimulation* tools). Returned to the client alongside the prose so
+  // the frontend can apply them to its simulation overlay.
+  const proposedSimOps = [];
 
   // Execute one batch of tool calls, applying dialogue-state handling + the
   // code-enforced write gate. Returns matching assistant/tool protocol messages.
@@ -1195,6 +1209,16 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       const toolFn = functionMap[name];
       if (!toolFn) {
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: `Unknown tool: ${name}` }) });
+        continue;
+      }
+
+      // ── Simulation Mode: refuse ALL real writes; redirect to propose tools ──
+      if (ctx.simulationMode === true && SIM_BLOCKED_WRITE_TOOLS.has(name)) {
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          blocked: true,
+          reason: 'simulation_mode_active',
+          message: 'The user is in Simulation Mode — do NOT write real data. Stage this change with the matching simulation tool instead: proposeSimulationAdd for a new transaction, proposeSimulationModify to change an existing forecast, or proposeSimulationRemove to drop one. No confirmation turn is needed for simulation proposals.'
+        }) });
         continue;
       }
 
@@ -1251,6 +1275,11 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       // ── Read / other tools ───────────────────────────────────────────────
       try {
         const result = await toolFn(args, ctx);
+        // Collect simulation proposals so they ride back to the client
+        // alongside the final prose (the frontend applies them to the overlay).
+        if (SIM_PROPOSE_TOOLS.has(name) && result && result.simOp) {
+          proposedSimOps.push(result.simOp);
+        }
         let toolContent = JSON.stringify(result ?? {});
         if (toolContent.length > 13000) {
           toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
@@ -1316,7 +1345,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     } catch (error) {
       console.log('Tool loop model call failed:', error.message);
       console.log('Error details:', error.response?.data || error);
-      return { content: buildToolFallbackResponse(lastToolResults), raw: null };
+      return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps };
     }
 
     const msg = response?.choices?.[0]?.message;
@@ -1326,10 +1355,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       continue;
     }
     console.log('Tool loop: final response received, content length:', msg?.content?.length || 0);
-    return { content: msg?.content || '', raw: response };
+    return { content: msg?.content || '', raw: response, simOps: proposedSimOps };
   }
 
-  return { content: buildToolFallbackResponse(lastToolResults), raw: null };
+  return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps };
 }
 
 // ----------------------------
@@ -1347,6 +1376,18 @@ exports.chat = async (req, res) => {
 
     const sessionKey = buildSessionKey(req);
     const accountid = req.body.accountid;
+    // Simulation ("what-if") mode: the client flags an active simulation with
+    // mode:'simulation' and may attach a summary of the sim (simContext) plus
+    // the current projected-impact numbers (simSnapshot). In this mode real
+    // writes are refused in code and the model is steered to the
+    // proposeSimulation* tools, whose simOps ride back on the response.
+    const simulationMode = req.body?.mode === 'simulation';
+    const simContext = req.body?.simContext && typeof req.body.simContext === 'object' ? req.body.simContext : null;
+    const simSnapshot = req.body?.simSnapshot && typeof req.body.simSnapshot === 'object' ? req.body.simSnapshot : null;
+    // The client sets simulationAvailable when the account's tier includes the
+    // simulation feature — we only advertise the what-if tools when the client
+    // can actually render the resulting overlay.
+    const simulationAvailable = simulationMode || req.body?.simulationAvailable === true;
     let faq;
     if (req.body.faq) {
       faq = JSON.parse(req.body.faq);
@@ -1614,6 +1655,47 @@ exports.chat = async (req, res) => {
     if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
     if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
     if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
+
+    // ── Simulation ("what-if") instructions ────────────────────────────────
+    // The proposeSimulation* tools stage hypothetical changes on the client's
+    // simulation overlay — they never write. When the user's calendar is in
+    // Simulation Mode we route ALL transaction changes through them (real
+    // writes are also refused in code); outside it they still serve "what if"
+    // questions, which auto-start a simulation on the client.
+    if (simulationMode) {
+      let simBlock = `SIMULATION MODE IS ACTIVE. The user is exploring hypothetical "what-if" changes on their calendar. RULES:
+- Use proposeSimulationAdd to stage a new hypothetical income/expense, proposeSimulationModify to change an existing forecasted transaction (find its transactionid via the read tools if needed), and proposeSimulationRemove to drop one. Map intent: "add / what if I had" => add; "change / raise / lower / move" => modify; "cancel / remove / drop / without" => remove.
+- For recurring forecasts set scope: 'group' for every occurrence, 'groupfrom' for this-and-future, 'single' (default) for one occurrence.
+- These tools do NOT write data and need NO confirmation turn — propose immediately with your best estimates, exactly one tool call per distinct change.
+- NEVER call createTransaction, updateTransaction, or deleteTransaction while Simulation Mode is active (they are refused in code). The user commits or discards the simulation from the banner on their calendar.
+- After proposing, briefly narrate the change and its projected impact on the user's balances.`;
+      if (simContext && Number(simContext.opCount) > 0) {
+        simBlock += `\nThe simulation currently holds ${Number(simContext.opCount)} staged change(s).`;
+      }
+      if (simSnapshot) {
+        const parts = [];
+        if (simSnapshot.simLow && simSnapshot.simLow.amount != null) {
+          parts.push(`projected lowest balance ${Number(simSnapshot.simLow.amount)} on ${simSnapshot.simLow.date}`);
+        }
+        if (simSnapshot.baselineLow && simSnapshot.baselineLow.amount != null) {
+          parts.push(`baseline (no simulation) lowest balance ${Number(simSnapshot.baselineLow.amount)} on ${simSnapshot.baselineLow.date}`);
+        }
+        if (simSnapshot.firstNegativeDate) {
+          parts.push(`the simulated balance first goes NEGATIVE on ${simSnapshot.firstNegativeDate}`);
+        }
+        if (simSnapshot.horizonEndDiff != null) {
+          parts.push(`net effect at the forecast horizon ${Number(simSnapshot.horizonEndDiff)}`);
+        }
+        if (parts.length) {
+          simBlock += `\nCURRENT SIMULATION IMPACT (use these exact numbers when narrating impact; format them as dollar amounts): ${parts.join('; ')}.`;
+        }
+      }
+      systemContent += `\n\n---\n${simBlock}`;
+    } else if (simulationAvailable) {
+      systemContent += `\n\n---\nWHAT-IF SIMULATIONS: When the user asks a hypothetical "what if" question about adding, changing, or removing a transaction (rather than asking you to actually do it), use the proposeSimulation* tools (proposeSimulationAdd / proposeSimulationModify / proposeSimulationRemove). They stage the change on the user's calendar as a reviewable simulation without writing data and need no confirmation turn. Only use createTransaction/updateTransaction/deleteTransaction when the user wants the REAL change made.`;
+    } else {
+      systemContent += `\n\n---\nDo not use the proposeSimulation* tools — this user's plan does not include Simulation Mode. For hypothetical questions, explain the impact in prose instead.`;
+    }
     console.log('Chat endpoint: memory layers ->',
       'facts:', longTermFacts.length,
       'summaryChars:', (rollingSummary || '').length,
@@ -1693,6 +1775,7 @@ exports.chat = async (req, res) => {
       draftCompleteAtStart,
       userAffirmative,
       categoryNames,
+      simulationMode,
     };
     
     // Always try with tools first for data requests, but handle tool calls properly
@@ -1781,6 +1864,9 @@ exports.chat = async (req, res) => {
       contextLoaded: hasAccount,
       dataMessage: dataMessage,
       requestSize: requestSize,
+      // Structured simulation proposals from the proposeSimulation* tools.
+      // The frontend applies these to its client-side simulation overlay.
+      simOps: Array.isArray(result?.simOps) ? result.simOps : [],
       error: result?.error,
     });
 

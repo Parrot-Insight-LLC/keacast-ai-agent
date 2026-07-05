@@ -96,23 +96,32 @@ function normalizeCreateTransactionInput(args = {}, ctx = {}) {
   return out;
 }
 
+// Best-effort read of a single existing transaction row. Returns {} when the
+// lookup fails so callers can proceed with the fields they have.
+async function fetchTransactionRow(transactionId, token) {
+  try {
+    const rows = await getTransactionById({ transactionId, token });
+    if (Array.isArray(rows) && rows.length) return rows[0] || {};
+    if (rows && typeof rows === 'object') return rows;
+  } catch (e) {
+    console.warn('fetchTransactionRow: failed to read existing row, proceeding best-effort:', e.message);
+  }
+  return {};
+}
+
 // Build a COMPLETE update payload by merging the LLM's partial edits over the
 // existing transaction row. The backend UPDATE overwrites every column, so we
 // must preserve unspecified fields (fetched via getTransactionById) to avoid
 // nulling data. Recomputes the signed amount from the final type.
-async function buildUpdateTransactionInput(args = {}, ctx = {}) {
+// `preloadedExisting` lets callers that already fetched the row skip a
+// duplicate lookup (the simulation propose tools).
+async function buildUpdateTransactionInput(args = {}, ctx = {}, preloadedExisting = null) {
   const transactionId = args.transactionid || args.transaction_id || ctx.id;
   if (!transactionId) throw new Error('transactionid is required to update a transaction');
 
-  let existing = {};
-  try {
-    const rows = await getTransactionById({ transactionId, token: ctx.token });
-    if (Array.isArray(rows) && rows.length) existing = rows[0] || {};
-    else if (rows && typeof rows === 'object') existing = rows;
-  } catch (e) {
-    // Best-effort: if the read-back fails we proceed with provided fields only.
-    console.warn('updateTransaction: failed to read existing row, proceeding best-effort:', e.message);
-  }
+  const existing = preloadedExisting && typeof preloadedExisting === 'object'
+    ? preloadedExisting
+    : await fetchTransactionRow(transactionId, ctx.token);
 
   const merged = { ...existing };
 
@@ -368,6 +377,83 @@ const functionMap = {
     const body = await buildUpdateTransactionInput(args, ctx);
     const result = await updateTransaction({ userId, transactionId: body.transactionid, token, body });
     return result;
+  },
+
+  // ── Simulation ("what-if") propose tools ──────────────────────────────────
+  // NONE of these write to the database. Each returns a structured `simOp`
+  // that the frontend applies to its client-side simulation overlay, where the
+  // user reviews the change on the calendar and commits or discards it.
+
+  async proposeSimulationAdd(args, ctx) {
+    const payload = normalizeCreateTransactionInput(args, ctx);
+    return {
+      ok: true,
+      simulated: true,
+      simOp: {
+        kind: 'add',
+        payload,
+        tempId: `simadd_${Date.now().toString(36)}`
+      },
+      note: 'Hypothetical transaction staged in the user\'s simulation overlay. Nothing was written to the database. Describe the change and its projected impact; the user commits or discards from the simulation banner.'
+    };
+  },
+
+  async proposeSimulationModify(args, ctx) {
+    const transactionId = args.transactionid || args.transaction_id;
+    if (!transactionId) return { error: 'transactionid is required to simulate a change to an existing transaction.' };
+
+    const existing = await fetchTransactionRow(transactionId, ctx.token);
+    if (String(existing.forecast_type || '').toUpperCase() === 'A') {
+      return { error: 'Actual (posted) transactions cannot be simulated — only forecasted transactions can be changed in a simulation.' };
+    }
+
+    const payload = await buildUpdateTransactionInput(args, ctx, existing);
+    const scope = ['single', 'group', 'groupfrom'].includes(String(args.scope || '').toLowerCase())
+      ? String(args.scope).toLowerCase()
+      : 'single';
+    const anchorRaw = existing.start || existing.date;
+    return {
+      ok: true,
+      simulated: true,
+      simOp: {
+        kind: 'modify',
+        payload,
+        targetTransactionId: transactionId,
+        targetGroupId: args.groupid || existing.groupid || undefined,
+        scope,
+        anchorDate: anchorRaw && moment(anchorRaw).isValid() ? moment(anchorRaw).format('YYYY/MM/DD') : undefined,
+        originalFrequency: existing.frequency,
+        originalEnd: existing.end
+      },
+      note: 'Hypothetical change staged in the user\'s simulation overlay. Nothing was written to the database. Describe the change and its projected impact; the user commits or discards from the simulation banner.'
+    };
+  },
+
+  async proposeSimulationRemove(args, ctx) {
+    const transactionId = args.transactionid || args.transaction_id;
+    if (!transactionId) return { error: 'transactionid is required to simulate removing an existing transaction.' };
+
+    const existing = await fetchTransactionRow(transactionId, ctx.token);
+    if (String(existing.forecast_type || '').toUpperCase() === 'A') {
+      return { error: 'Actual (posted) transactions cannot be simulated — only forecasted transactions can be removed in a simulation.' };
+    }
+
+    const scope = ['single', 'group', 'groupfrom'].includes(String(args.scope || '').toLowerCase())
+      ? String(args.scope).toLowerCase()
+      : 'single';
+    const anchorRaw = existing.start || existing.date;
+    return {
+      ok: true,
+      simulated: true,
+      simOp: {
+        kind: 'remove',
+        targetTransactionId: transactionId,
+        targetGroupId: args.groupid || existing.groupid || undefined,
+        scope,
+        anchorDate: anchorRaw && moment(anchorRaw).isValid() ? moment(anchorRaw).format('YYYY/MM/DD') : undefined
+      },
+      note: 'Hypothetical removal staged in the user\'s simulation overlay. Nothing was deleted from the database. Describe the change and its projected impact; the user commits or discards from the simulation banner.'
+    };
   },
 
   // Persist a durable fact about the user. accountScoped=true ties it to the
