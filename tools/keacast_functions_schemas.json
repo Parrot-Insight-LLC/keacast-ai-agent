@@ -261,11 +261,11 @@
     "type": "function",
     "function": {
       "name": "updateDraftTransaction",
-      "description": "NON-WRITING scratchpad for slot-filling. Record or refine the fields of a transaction the user is PLANNING as details emerge across the conversation (e.g. a carpet replacement, an estimated amount, a target month). This does NOT create or change any real data — it only updates the assistant's working draft so the user never has to repeat themselves. Call it whenever a new detail appears. Set pendingConfirmation=true ONLY when you have just proposed a complete, concrete transaction (single amount) and are asking the user to confirm on their next message.",
+      "description": "NON-WRITING scratchpad for slot-filling. Record or refine the fields of a transaction the user is PLANNING as details emerge across the conversation (a planned purchase, an estimated amount, a target month). Only record values that came from THIS conversation. This does NOT create or change any real data — it only updates the assistant's working draft so the user never has to repeat themselves. Call it whenever a new detail appears. Set pendingConfirmation=true ONLY when you have just proposed a complete, concrete transaction (single amount) and are asking the user to confirm on their next message.",
       "parameters": {
         "type": "object",
         "properties": {
-          "intent": { "type": "string", "description": "Short label for what the user is planning, e.g. 'carpet replacement'." },
+          "intent": { "type": "string", "description": "Short label for what the user is planning, e.g. 'weekly gas budget'." },
           "title": { "type": "string", "description": "Short name for the transaction." },
           "type": { "type": "string", "enum": ["expense", "income"], "description": "expense for money spent, income for money received." },
           "amount": { "type": "number", "description": "Positive magnitude; a SINGLE concrete estimate, never a range." },
@@ -289,7 +289,7 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "mem_key": { "type": "string", "description": "Short stable key, e.g. 'goal:emergency_fund' or 'plan:carpet_replacement'." },
+          "mem_key": { "type": "string", "description": "Short stable key, e.g. 'goal:emergency_fund' or 'plan:home_repair'." },
           "mem_value": { "type": "string", "description": "Concise fact text worth remembering long-term." },
           "kind": { "type": "string", "enum": ["profile", "preference", "fact", "episodic"], "description": "Category of memory. Defaults to 'fact'." },
           "importance": { "type": "integer", "description": "1-10; higher means more important to retain." },

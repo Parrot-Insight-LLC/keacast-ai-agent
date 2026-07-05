@@ -19,8 +19,12 @@ const SYSTEM_PROMPT_MAX_LENGTH = 15000; // separate limit for system prompts
 // ─── Kea Assistant memory-upgrade constants ────────────────────────────────
 // Dialogue state (in-progress "draft" transaction + slot-filling) lives in
 // Redis keyed by userId with a short TTL — it is transient, per-conversation
-// working state, not durable memory.
-const DIALOGUE_TTL = 86400;              // 1 day
+// working state, not durable memory. Keep this TTL SHORT: the previous 24h
+// value let an abandoned draft survive into a completely unrelated
+// conversation the next day, where a casual "sounds good" could commit it
+// (a stale carpet-replacement draft was created instead of a requested
+// weekly gas forecast). One hour comfortably covers an active conversation.
+const DIALOGUE_TTL = 3600;               // 1 hour
 const DIALOGUE_STATE_MAX_CHARS = 900;    // hard cap on the injected dialogue block
 // Rolling short-term summary: a compact "conversation so far" that captures
 // turns older than the verbatim window so long chats stay coherent + lean.
@@ -1017,12 +1021,70 @@ function applyDraftAndCategory(args, draft, categoryNames) {
   return merged;
 }
 
+function normalizeTitleTokens(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+}
+
+// Staleness guard for the write gate. The draft-over-args merge exists to stop
+// value drift on a CONFIRMED draft — but if the model's own args describe a
+// materially DIFFERENT transaction (different title AND different amount), the
+// stored draft is a leftover from an earlier/abandoned topic, and merging it
+// would silently create the wrong transaction (observed: a stale "carpet
+// replacement $1600" draft overwrote a freshly requested $40 weekly gas
+// forecast). Only judges when both sides supply both title and amount; a model
+// that omits them is deferring to the draft, which is the normal case.
+function draftConflictsWithArgs(args, draft) {
+  if (!draft || typeof draft !== 'object') return false;
+  const draftTitle = String(draft.title || '').trim();
+  const argsTitle = String(args?.title || args?.merchant_name || '').trim();
+  const draftAmount = Number(draft.amount);
+  const argsAmount = Number(args?.amount);
+  if (!draftTitle || !argsTitle || !Number.isFinite(draftAmount) || !Number.isFinite(argsAmount)) return false;
+
+  const draftTokens = new Set(normalizeTitleTokens(draftTitle));
+  const argTokens = normalizeTitleTokens(argsTitle);
+  const dl = draftTitle.toLowerCase();
+  const al = argsTitle.toLowerCase();
+  const titlesRelated = argTokens.some((t) => draftTokens.has(t)) || dl.includes(al) || al.includes(dl);
+
+  // 5% (min $1) tolerance so rounding/sign differences don't count as conflicts.
+  const tolerance = Math.max(1, Math.abs(argsAmount) * 0.05);
+  const amountsMatch = Math.abs(Math.abs(draftAmount) - Math.abs(argsAmount)) <= tolerance;
+
+  return !titlesRelated && !amountsMatch;
+}
+
 // Heuristic: did the user's current turn confirm the pending proposal? Kept in
 // sync with the CONFIRMATION HANDLING language in the system prompt.
-function isAffirmativeMessage(message) {
+// `draft` (optional) is the currently staged draft transaction: a message that
+// restates the draft's own amount still counts as a confirmation, but a message
+// introducing NEW specifics (a different dollar amount, a recurrence schedule)
+// is a new instruction — treating it as a "yes" was how a stale draft got
+// created instead of the transaction the user was actually describing.
+function isAffirmativeMessage(message, draft) {
   if (!message || typeof message !== 'string') return false;
   const m = message.trim().toLowerCase();
   if (!m) return false;
+
+  const amountMatches = m.match(/\$\s*\d[\d,]*(\.\d+)?|\b\d[\d,]*(\.\d+)?\s*(dollars|bucks)\b/g) || [];
+  if (amountMatches.length > 0) {
+    const draftAmount = Number(draft?.amount);
+    const mentionsOnlyDraftAmount = Number.isFinite(draftAmount) && amountMatches.every((raw) => {
+      const n = Number(raw.replace(/[^0-9.]/g, ''));
+      return Number.isFinite(n) && Math.abs(n - Math.abs(draftAmount)) < 0.01;
+    });
+    if (!mentionsOnlyDraftAmount) return false;
+  }
+  // A recurrence schedule in the message means the user is specifying a new or
+  // changed transaction, not just agreeing to the pending one.
+  if (/\b(every\s+(day|week|month|year|other)|daily|weekly|bi-?weekly|monthly|quarterly|annually|yearly)\b/.test(m)) {
+    return false;
+  }
+
   const patterns = [
     /^y(es|ep|eah|up|es please|es pls)?\b/, /\bconfirm(ed)?\b/, /\bgo ahead\b/, /\bdo it\b/,
     /\bsounds good\b/, /\block it in\b/, /\bproceed\b/, /\bok(ay)?\b/, /\bsure\b/, /\babsolutely\b/,
@@ -1240,11 +1302,32 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           continue;
         }
 
+        // Staleness guard: if the model's args describe a materially different
+        // transaction than the stored draft, the draft belongs to an earlier
+        // topic. Discard it and force a fresh propose→confirm cycle instead of
+        // letting the merge below overwrite the user's actual request.
+        if (draftConflictsWithArgs(args, state.draftTransaction)) {
+          console.warn(`[write-audit] STALE DRAFT DISCARDED user=${ctx.userId} tool=${name} draft=${JSON.stringify(state.draftTransaction)} modelArgs=${JSON.stringify(args)}`);
+          state.draftTransaction = {};
+          state.intent = null;
+          state.pendingConfirmation = false;
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            blocked: true,
+            reason: 'stale_draft_mismatch',
+            message: 'A leftover draft from an earlier topic did not match this request, so it was discarded. Re-propose THIS transaction to the user (updateDraftTransaction with a SINGLE concrete amount) and wait for them to explicitly confirm on their next message before creating it.'
+          }) });
+          continue;
+        }
+
         // The user confirmed the DRAFT, so the draft is authoritative: merge its
         // filled slots OVER the model's args so a re-estimate can't silently
         // drift a confirmed value (e.g. November -> August). Then snap the
         // category to the user's real category list.
         const effectiveArgs = applyDraftAndCategory(args, state.draftTransaction, ctx.categoryNames);
+
+        // Forensic audit trail for every real write: what the draft held, what
+        // the model asked for, and what we actually sent to the backend.
+        console.log(`[write-audit] tool=${name} user=${ctx.userId} account=${ctx.accountId} draft=${JSON.stringify(state.draftTransaction)} modelArgs=${JSON.stringify(args)} effectiveArgs=${JSON.stringify(effectiveArgs)}`);
 
         // Idempotency: refuse a duplicate write within the same turn/session.
         const sig = draftSignature(effectiveArgs);
@@ -1395,15 +1478,27 @@ exports.chat = async (req, res) => {
     const { token, userId, authHeader } = extractAuthFromRequest(req);
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
 
+    // When no session identifier was provided, buildSessionKey falls back to
+    // 'session:anonymous' — a single Redis bucket SHARED by every such caller.
+    // Reading/writing it would leak one user's conversation (and any drafted
+    // transactions in it) into another user's context, so we skip Redis history
+    // persistence entirely and rely on the client-provided transcript instead.
+    const hasScopedSession = sessionKey !== 'session:anonymous';
+    if (!hasScopedSession) {
+      console.warn('Chat endpoint: no sessionId provided — skipping shared anonymous history persistence');
+    }
+
     // Load prior conversation memory
     let history = [];
-    try {
-      const historyData = await redis.get(sessionKey);
-      history = historyData ? JSON.parse(historyData) : [];
-      console.log('Chat endpoint: Loaded history length:', history.length);
-    } catch (redisError) {
-      console.warn('Chat endpoint: Redis history load failed:', redisError.message);
-      history = [];
+    if (hasScopedSession) {
+      try {
+        const historyData = await redis.get(sessionKey);
+        history = historyData ? JSON.parse(historyData) : [];
+        console.log('Chat endpoint: Loaded history length:', history.length);
+      } catch (redisError) {
+        console.warn('Chat endpoint: Redis history load failed:', redisError.message);
+        history = [];
+      }
     }
 
     // ── Kea Assistant memory layers (all fail-soft) ──────────────────────────
@@ -1413,7 +1508,7 @@ exports.chat = async (req, res) => {
     // A complete draft persisted from a prior turn also arms the write gate,
     // so confirmations work even when the model proposed in prose.
     const draftCompleteAtStart = isDraftProposable(dialogueState.draftTransaction);
-    const userAffirmative = isAffirmativeMessage(message);
+    const userAffirmative = isAffirmativeMessage(message, dialogueState.draftTransaction);
     // Reset the one-shot "committed" flag at the start of each new turn.
     dialogueState.committed = false;
     // 2) Rolling short-term summary of older turns (loaded here, refreshed after the turn).
@@ -1597,24 +1692,24 @@ exports.chat = async (req, res) => {
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
     - Creating a transaction should feel effortless. The user does NOT have to provide a title, amount, type, category, date, or frequency. ESTIMATE every field you weren't given from this conversation, the account context, and the user's similar/recurring/recent transactions (e.g. estimate a Netflix expense at their typical streaming amount, a paycheck from their recurring income). Never make the user fill in details just to satisfy the tool.
-    - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction and they have agreed. When you propose, ALWAYS state a SINGLE concrete amount — if your estimate is a range (e.g. carpet replacement is $750–$2,500), pick one reasonable figure (e.g. the midpoint, ~$1,600), state it plainly, and ask them to confirm or adjust. Never leave the amount as a range going into the confirmation. On the turn the user first expresses intent, do NOT call the tool — propose the concrete details and ask them to confirm or adjust. Only call createTransaction after they agree. If they tweak a value, restate the updated proposal and confirm again.
+    - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction and they have agreed. When you propose, ALWAYS state a SINGLE concrete amount — if your estimate is a range, pick one reasonable figure (such as the midpoint of the range), state it plainly, and ask them to confirm or adjust. Never leave the amount as a range going into the confirmation. On the turn the user first expresses intent, do NOT call the tool — propose the concrete details and ask them to confirm or adjust. Only call createTransaction after they agree. If they tweak a value, restate the updated proposal and confirm again.
     - CONFIRMATION HANDLING: Treat the user's reply as confirmation to create the transaction you just proposed whenever it is affirmative OR an add/create instruction — e.g. "yes", "yes please", "go ahead", "do it", "confirm", "sounds good", "please add this", "please add this forecast", "add it", "add that", "create it", "log it", "put it in my forecast". When you get any of these and your previous message proposed (or discussed) exactly one transaction, immediately call createTransaction using those proposed values (read them from your previous message in the history). Do NOT start over and do NOT re-ask for details you already proposed.
-    - NEVER reply with "which forecast/transaction would you like to add?" when your own previous turn already identified exactly one thing (e.g. you just asked "would you like to create a transaction for the carpet replacement?"). "This forecast"/"this transaction" unambiguously refers to that item — create it. The ONLY time you may ask a clarifying question is if you genuinely proposed two or more clearly different transactions in the same breath. Also note: in Keacast "add this as a forecast" / "add this forecast" means CREATE a new forecasted transaction for the item just discussed — it does NOT mean look up an existing forecast, so do NOT call read tools (getRecurringForecasts/getUpcomingTransactions) to "find" it.
-    - STAY ON TOPIC: The transaction you create must be the one that was actually being DISCUSSED with the user (e.g. the carpet replacement you just proposed). NEVER substitute an unrelated item that merely appears in the account context or the "Recent posted"/"Upcoming forecasted" lists (e.g. a paycheck). The CURRENT CONTEXT block is reference data only — it is never the thing to create unless the user explicitly asked for it.
+    - NEVER reply with "which forecast/transaction would you like to add?" when your own previous turn already identified exactly one thing (e.g. you just asked "would you like to create a transaction for the item we discussed?"). "This forecast"/"this transaction" unambiguously refers to that item — create it. The ONLY time you may ask a clarifying question is if you genuinely proposed two or more clearly different transactions in the same breath. Also note: in Keacast "add this as a forecast" / "add this forecast" means CREATE a new forecasted transaction for the item just discussed — it does NOT mean look up an existing forecast, so do NOT call read tools (getRecurringForecasts/getUpcomingTransactions) to "find" it.
+    - STAY ON TOPIC: The transaction you create must be the one that was actually being DISCUSSED with the user (the item you just proposed in this conversation). NEVER substitute an unrelated item that merely appears in the account context or the "Recent posted"/"Upcoming forecasted" lists (e.g. a paycheck). The CURRENT CONTEXT block is reference data only — it is never the thing to create unless the user explicitly asked for it.
     - Use the full chat history above as memory: remember the amounts, dates, merchants, goals, and any transaction you already proposed earlier in this conversation, and reuse them so the user never has to repeat themselves (the confirmation turn relies on this).
-    - Carry conversation TOPICS into transactions. When the user asks to "add a transaction" (or "add that", "log it", "put that in my forecast") without naming what it's for, scan back through the recent messages for the most relevant purchase/expense/income topic that was being discussed and treat THAT as the subject. Example: if you were just discussing a carpet replacement and the user then says "add a transaction", understand it's the carpet replacement — set the title/description/category accordingly and estimate the amount from any figure mentioned in that discussion (or a reasonable estimate for that item). Briefly state which topic you linked it to in your confirmation prompt so the user can correct you if you guessed wrong.
+    - Carry conversation TOPICS into transactions. When the user asks to "add a transaction" (or "add that", "log it", "put that in my forecast") without naming what it's for, scan back through the recent messages for the most relevant purchase/expense/income topic that was being discussed and treat THAT as the subject. Example: if you were just discussing a specific purchase and the user then says "add a transaction", understand it refers to that purchase — set the title/description/category accordingly and estimate the amount from any figure mentioned in that discussion (or a reasonable estimate for that item). Briefly state which topic you linked it to in your confirmation prompt so the user can correct you if you guessed wrong.
     - When creating transactions, always provide clear confirmation to the user that their transaction has been successfully created. Include details like the transaction name, amount, frequency (if recurring), and any relevant dates. Make the user feel confident that their transaction has been properly added to their forecast. Don't mention the execution of the tool, just confirm the transaction has been created. Make sure not to duplicate or repeat anything in your response.
       - Always return with the transaction_id and if the transaction is recurring then also return the group_id which you can refer to as the recurring_id.
       - When working with dates and times, consider the user's location and timezone to provide accurate date-based responses. Forecasted transactions can not be created on date before the ${currentDate}. The system automatically calculates the correct date based on the user's coordinates.
       - When creating forecasts always consider whether the user has enough in the coming days, weeks, months, or years and warn them about how this may effect their financial state in the future. 
 
     ADVISOR MEMORY & TOOLS (use these to be a stateful, context-aware advisor):
-    - SLOT-FILLING with updateDraftTransaction: As a plan for a transaction takes shape across the conversation (e.g. the user researches a carpet replacement, you estimate ~$1,600, they mention next month), call updateDraftTransaction to record/refine the known fields (title, type, amount, category, start, frequency, and an intent like "carpet replacement"). This is a NON-writing scratchpad — it never creates anything. Set pendingConfirmation:true on it ONLY when you have just proposed a complete, concrete transaction and are asking the user to confirm. The DIALOGUE STATE block reflects the current draft; reuse it so the user never repeats themselves. Ask only for fields you genuinely cannot infer.
-    - LOCK CONFIRMED VALUES — NO DRIFT: Once you have proposed specific values (e.g. start date November 1, amount $1,600), those values are LOCKED. Do NOT re-estimate or change an already-proposed field on later turns (a common bug was a November date silently becoming August). When the user confirms, call createTransaction with the EXACT values from the DIALOGUE STATE draft — same date, same amount, same category. Only change a value if the user explicitly asks to; then update the draft first via updateDraftTransaction and re-confirm.
-    - CATEGORY MUST BE REAL: Always choose the category from the user's AVAILABLE CATEGORIES list shown in context — pick the closest existing match (e.g. carpet replacement -> "Home Improvement" if present). Never invent a category that isn't in that list. If none fits well, pick the nearest general one from the list.
+    - SLOT-FILLING with updateDraftTransaction: As a plan for a transaction takes shape across the conversation (the user researches a purchase, you estimate its cost, they mention a target date), call updateDraftTransaction to record/refine the known fields (title, type, amount, category, start, frequency, and a short intent label describing the item). ONLY record values that came from THIS conversation — never invent a draft for something the user has not discussed. This is a NON-writing scratchpad — it never creates anything. Set pendingConfirmation:true on it ONLY when you have just proposed a complete, concrete transaction and are asking the user to confirm. The DIALOGUE STATE block reflects the current draft; reuse it so the user never repeats themselves. Ask only for fields you genuinely cannot infer.
+    - LOCK CONFIRMED VALUES — NO DRIFT: Once you have proposed specific values (a specific start date and amount), those values are LOCKED. Do NOT re-estimate or change an already-proposed field on later turns (a common bug was a November date silently becoming August). When the user confirms, call createTransaction with the EXACT values from the DIALOGUE STATE draft — same date, same amount, same category. Only change a value if the user explicitly asks to; then update the draft first via updateDraftTransaction and re-confirm.
+    - CATEGORY MUST BE REAL: Always choose the category from the user's AVAILABLE CATEGORIES list shown in context — pick the closest existing match for the item being created. Never invent a category that isn't in that list. If none fits well, pick the nearest general one from the list.
     - The confirm-before-write rule is enforced in code: createTransaction/updateTransaction will be REFUSED unless you proposed a complete transaction on a prior turn and the user's latest message affirmatively confirmed it. So the flow is exactly TWO turns: (1) propose with a single concrete amount + a real category, (2) when the user's next message is affirmative (e.g. "yes", "this works for me", "add it", "looks good", "sounds good"), IMMEDIATELY call createTransaction with the locked draft values — do NOT re-propose or ask for confirmation a second/third time. Only if a write is genuinely refused should you show the proposal again.
     - updateTransaction edits an EXISTING forecasted transaction (by transactionid) — same rule: propose the change, get confirmation, then call it.
-    - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:carpet_replacement" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
+    - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:home_repair" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
 
     Tone & Style: 
     - Clear, empathetic, and supportive
@@ -1830,11 +1925,13 @@ exports.chat = async (req, res) => {
     ];
     const updatedHistory = fullTurn.slice(-MAX_MEMORY);
 
-    try {
-      await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
-      console.log('Chat endpoint: Saved updated history to Redis');
-    } catch (redisError) {
-      console.warn('Chat endpoint: Failed to save history to Redis:', redisError.message);
+    if (hasScopedSession) {
+      try {
+        await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
+        console.log('Chat endpoint: Saved updated history to Redis');
+      } catch (redisError) {
+        console.warn('Chat endpoint: Failed to save history to Redis:', redisError.message);
+      }
     }
 
     // Persist dialogue state (mutated in-place by executeToolCalls). Fail-soft.
@@ -3777,6 +3874,7 @@ exports.__testables = {
   extractCategoryNames,
   snapCategory,
   applyDraftAndCategory,
+  draftConflictsWithArgs,
   buildDialogueStateBlock,
   buildFactsBlock,
   buildSummaryBlock,
