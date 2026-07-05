@@ -48,8 +48,11 @@ async function getUserCategories({ userId, token }) {
   return response.data;
 }
 
-async function getShoppingList({ userId, token }) {
-  const url = `${BASE_URL}/list/get/${userId}`;
+// The /list/get/:id route keys on TRANSACTION id, not user id (passing userId
+// here was a latent bug that always returned an empty list). Callers must
+// supply the forecast transaction's id.
+async function getShoppingList({ transactionId, token }) {
+  const url = `${BASE_URL}/list/get/${transactionId}`;
   const response = await axios.get(url, AUTH_HEADER(token));
   return response.data;
 }

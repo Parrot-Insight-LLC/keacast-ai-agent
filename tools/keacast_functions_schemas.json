@@ -340,6 +340,31 @@
   {
     "type": "function",
     "function": {
+      "name": "suggestShoppingItemOptions",
+      "description": "NON-WRITING Smart Price Assist for shopping-list items. Given an item name (e.g. 'Milk'), returns 3-5 realistic purchase options across major retailers (store, brand, product, size, estimatedPrice, confidence), a normalized item name, a suggested tax category/taxability, and a flag when the user's own estimate looks unrealistic. Prices are ESTIMATES, never live prices, and are NEVER applied automatically — the user chooses an option or keeps their manual estimate. Use when the user asks what an item costs or wants price suggestions for a shopping list.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "itemName": { "type": "string", "description": "The shopping item as the user typed it, e.g. 'milk' or 'paper towels'." },
+          "quantity": { "type": "number", "description": "How many the user plans to buy (default 1)." },
+          "region": {
+            "type": "object",
+            "description": "Shopper location for regional pricing, when known.",
+            "properties": {
+              "state": { "type": "string", "description": "Two-letter US state code." },
+              "zip": { "type": "string" },
+              "city": { "type": "string" }
+            }
+          },
+          "userEstimate": { "type": "number", "description": "The user's current unit-price estimate, to sanity-check for unrealistic values." }
+        },
+        "required": ["itemName"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "deleteTransaction",
       "description": "Deletes a transaction from the user's account. If the transaction is not found then return a message saying 'Transaction not found'. Always confirm with the user before deleting a transaction or a group of transactions. If the user is not sure about deleting a transaction then ask them to confirm their decision. Always list out the deleted transactions and the number of transactions deleted. Transactions can be deleted by their transactionid. If the user does not provide a transactionid then ask the user to provide it, else use the relevant information to find the transactionid found in context. Also you can only delete forecasted transaction and not actual transactions. If forecast_type is 'A' then return a message saying 'Transaction is an actual transaction and cannot be deleted'. If forecast_type is 'F' then delete the transaction.",
       "parameters": {

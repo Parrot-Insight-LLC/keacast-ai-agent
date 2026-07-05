@@ -456,6 +456,30 @@ const functionMap = {
     };
   },
 
+  // ── Shopping list: Smart Price Assist (propose-only) ──────────────────────
+  // Returns advisory purchase options + normalization/category hints for one
+  // item. Never writes anything; the user applies an option explicitly in the
+  // shopping list UI (or via the cashflow backend's suggestions proxy).
+  async suggestShoppingItemOptions(args, _ctx) {
+    const { suggestItemOptions } = require('../services/shoppingSuggest.service');
+    try {
+      const result = await suggestItemOptions({
+        itemName: args.itemName,
+        quantity: args.quantity,
+        region: args.region,
+        userEstimate: args.userEstimate
+      });
+      return {
+        ok: true,
+        ...result,
+        note: 'These are ESTIMATES of typical retail prices, not live prices. Present the options with their stores and confidence, mention the price flag if present, and remind the user their own estimate stays unless they pick one.'
+      };
+    } catch (e) {
+      console.error('suggestShoppingItemOptions failed:', e.message);
+      return { error: 'Price suggestions are unavailable right now. The user\'s manual estimate still works.' };
+    }
+  },
+
   // Persist a durable fact about the user. accountScoped=true ties it to the
   // currently selected account; otherwise it's a user-level fact.
   async rememberFact(args, ctx) {

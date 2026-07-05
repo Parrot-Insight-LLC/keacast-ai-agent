@@ -118,4 +118,23 @@ router.get('/summary/:userId/:accountId', async (req, res) => {
 
 router.post('/summarization', summarization);
 
+// Smart Price Assist — direct (non-chat) entry point used by the cashflow
+// backend's shopping-list suggestions proxy. Propose-only: returns options,
+// normalization, and taxability hints; nothing is persisted here (the proxy
+// persists to shopping_list_item_suggestions). Redis-cached per item+region.
+router.post('/shopping/suggest-item', async (req, res) => {
+  try {
+    const { itemName, quantity, region, userEstimate } = req.body || {};
+    if (!itemName || !String(itemName).trim()) {
+      return res.status(400).json({ success: false, message: 'itemName is required' });
+    }
+    const { suggestItemOptions } = require('../services/shoppingSuggest.service');
+    const result = await suggestItemOptions({ itemName, quantity, region, userEstimate });
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Error in shopping suggest-item:', error.message);
+    res.status(500).json({ success: false, message: 'Failed to generate suggestions' });
+  }
+});
+
 module.exports = router;
