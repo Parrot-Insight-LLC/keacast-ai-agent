@@ -122,6 +122,49 @@ async function updateTransaction({ userId, transactionId, token, body }) {
   return response.data;
 }
 
+// ── Goals (savings targets on cashflow-backend-api) ─────────────────────────
+// Goals are savings-style targets: a target_amount distributed into scheduled
+// contributions between start_date and end_date. All routes are tier-gated on
+// the backend (requireTier/requireQuota), which remains the authoritative gate.
+
+async function getGoals({ userId, accountId, token }) {
+  const url = `${BASE_URL}/goals/list/${userId}/${accountId}`;
+  const response = await axios.get(url, AUTH_HEADER(token));
+  return response.data;
+}
+
+async function getGoal({ goalId, token }) {
+  const url = `${BASE_URL}/goals/single/${goalId}`;
+  const response = await axios.get(url, AUTH_HEADER(token));
+  return response.data;
+}
+
+// Pure compute preview — never writes. Returns { occurrences, amount_per_row,
+// last_row_amount, dates, sign } for a target/window/frequency combination.
+async function previewGoalCadence({ token, body }) {
+  const url = `${BASE_URL}/goals/compute-cadence`;
+  const response = await axios.post(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
+async function createGoal({ userId, accountId, token, body }) {
+  const url = `${BASE_URL}/goals/${userId}/${accountId}`;
+  const response = await axios.post(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
+async function updateGoal({ userId, goalId, token, body }) {
+  const url = `${BASE_URL}/goals/${userId}/${goalId}`;
+  const response = await axios.put(url, body, AUTH_HEADER(token));
+  return response.data;
+}
+
+async function deleteGoal({ userId, goalId, token }) {
+  const url = `${BASE_URL}/goals/${userId}/${goalId}`;
+  const response = await axios.delete(url, AUTH_HEADER(token));
+  return response.data;
+}
+
 // ── Long-term memory (assistant_memory on cashflow-backend-api) ─────────────
 async function rememberFact({ userId, token, mem_key, mem_value, kind, importance, accountid }) {
   const url = `${BASE_URL}/assistant-memory/${userId}`;
@@ -178,6 +221,12 @@ module.exports = {
   deleteTransaction,
   getTransactionById,
   updateTransaction,
+  getGoals,
+  getGoal,
+  previewGoalCadence,
+  createGoal,
+  updateGoal,
+  deleteGoal,
   rememberFact,
   recallFacts,
   functionMap // 👈 Exported for OpenAI tool handler integration

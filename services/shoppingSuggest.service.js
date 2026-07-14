@@ -70,9 +70,14 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate }) 
     const cached = await redis.get(key);
     if (cached) {
       const parsed = JSON.parse(cached);
-      parsed.cached = true;
-      parsed.userPriceFlag = computePriceFlag(parsed.options, userEstimate);
-      return parsed;
+      // Ignore degenerate entries cached before the empty-result guard below
+      // existed — fall through and regenerate instead of serving "no
+      // options" for the rest of the TTL.
+      if (Array.isArray(parsed.options) && parsed.options.length > 0) {
+        parsed.cached = true;
+        parsed.userPriceFlag = computePriceFlag(parsed.options, userEstimate);
+        return parsed;
+      }
     }
   } catch (e) {
     console.warn('[shoppingSuggest] cache read failed:', e.message);
@@ -93,7 +98,11 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate }) 
       { role: 'user', content: userParts.join('\n') }
     ],
     {
-      tools: undefined,
+      // null (not undefined) — undefined would fall through to the
+      // destructuring default in queryAzureOpenAI and attach the full
+      // Keacast function-calling layer, letting the model answer with
+      // tool_calls (null content) instead of the JSON contract above.
+      tools: null,
       tool_choice: undefined,
       temperature: 0.2,
       max_tokens: 900,
@@ -132,10 +141,15 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate }) 
   };
   result.userPriceFlag = parsed.userPriceFlag || computePriceFlag(result.options, userEstimate);
 
-  try {
-    await redis.set(key, JSON.stringify({ ...result, userPriceFlag: null }), 'EX', CACHE_TTL_SECONDS);
-  } catch (e) {
-    console.warn('[shoppingSuggest] cache write failed:', e.message);
+  // Only cache useful results. Caching an empty option set would pin the
+  // degenerate answer to this item+region for the full TTL, making one bad
+  // model response look like a permanently broken feature.
+  if (result.options.length > 0) {
+    try {
+      await redis.set(key, JSON.stringify({ ...result, userPriceFlag: null }), 'EX', CACHE_TTL_SECONDS);
+    } catch (e) {
+      console.warn('[shoppingSuggest] cache write failed:', e.message);
+    }
   }
 
   return result;

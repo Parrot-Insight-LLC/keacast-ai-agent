@@ -292,6 +292,90 @@
   {
     "type": "function",
     "function": {
+      "name": "getGoals",
+      "description": "Fetch the user's savings goals on the selected account, with derived progress: target_amount, accumulated_amount, remaining_amount, progress_pct, days_remaining, next_contribution, expected_by_now, and on_track (whether accumulated savings match what the schedule expects by today). Use this whenever the user asks about a goal, their savings progress, or when giving financial-planning advice that should account for money already earmarked toward goals. Report the derived numbers as-is — do not recompute them.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "previewGoalCadence",
+      "description": "NON-WRITING savings-plan calculator. Given a target amount, a date window, and a contribution frequency, returns exactly how much the user must set aside per contribution and on which dates (occurrences, amount_per_row, dates). Use it to answer questions like 'how much per paycheck to save $3000 by December?' with real math instead of estimating, and to preview a plan BEFORE proposing createGoal. Always sanity-check the per-contribution amount against the user's upcoming forecasted balances and warn if it would cause a negative balance.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target_amount": { "type": "number", "description": "Total amount the user wants to save (positive)." },
+          "start_date": { "type": "string", "description": "First contribution date (YYYY-MM-DD). Defaults to today." },
+          "end_date": { "type": "string", "description": "Deadline to reach the target (YYYY-MM-DD)." },
+          "frequency": { "type": "string", "enum": ["1", "7", "14", "15", "28", "29", "30", "31", "60", "91", "182", "365"], "description": "Contribution cadence: '1' daily, '7' weekly, '14' bi-weekly, '15' semi-monthly (1st & 15th), '28'-'31' monthly anchored to start_date's day, '60' bi-monthly, '91' quarterly, '182' semi-annual, '365' annual." }
+        },
+        "required": ["target_amount", "end_date", "frequency"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "createGoal",
+      "description": "Create a REAL savings goal on the user's selected account. The system schedules the contributions between start_date and end_date at the given frequency, and they appear on the user's calendar as forecasted set-asides. This writes real data: like createTransaction, you MUST first propose the full goal (title, target amount, deadline, cadence and the per-contribution amount from previewGoalCadence) and get the user's explicit confirmation on a later turn (call confirmTransaction first when they confirm). Goals are savings-style only. Before proposing, verify the per-contribution amount doesn't push the user's forecasted balances negative — warn them if it would.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "description": "Short goal name, e.g. 'Vacation fund' or 'Emergency fund'." },
+          "target_amount": { "type": "number", "description": "Total amount to save (positive)." },
+          "category": { "type": "string", "description": "Category label for the goal. Defaults to 'Savings'." },
+          "description": { "type": "string", "description": "Optional details about what the goal is for." },
+          "start_date": { "type": "string", "description": "First contribution date (YYYY-MM-DD). Defaults to today." },
+          "end_date": { "type": "string", "description": "Deadline to reach the target (YYYY-MM-DD)." },
+          "frequency": { "type": "string", "enum": ["1", "7", "14", "15", "28", "29", "30", "31", "60", "91", "182", "365"], "description": "Contribution cadence (same codes as previewGoalCadence)." }
+        },
+        "required": ["title", "target_amount", "end_date", "frequency"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "updateGoal",
+      "description": "Update an EXISTING savings goal by goalid (change its target, deadline, cadence, or name). Writes real data — propose the change and get the user's explicit confirmation on a later turn first (call confirmTransaction when they confirm). Changing target/frequency/dates automatically redistributes the remaining unlocked future contributions. Find the goalid via getGoals.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "goalid": { "type": "number", "description": "The id of the goal to update." },
+          "title": { "type": "string" },
+          "category": { "type": "string" },
+          "description": { "type": "string" },
+          "target_amount": { "type": "number", "description": "New total target (positive)." },
+          "start_date": { "type": "string", "description": "YYYY-MM-DD." },
+          "end_date": { "type": "string", "description": "New deadline (YYYY-MM-DD)." },
+          "frequency": { "type": "string", "enum": ["1", "7", "14", "15", "28", "29", "30", "31", "60", "91", "182", "365"], "description": "New contribution cadence." }
+        },
+        "required": ["goalid"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "deleteGoal",
+      "description": "Delete an EXISTING savings goal by goalid (removes its scheduled future contributions from the calendar). Destructive — always confirm with the user on a later turn before calling (call confirmTransaction when they confirm). Find the goalid via getGoals.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "goalid": { "type": "number", "description": "The id of the goal to delete." }
+        },
+        "required": ["goalid"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "rememberFact",
       "description": "Persist a DURABLE fact about the user for future conversations (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference). Only save what the user actually stated or clearly implied — never guesses, and never transient chit-chat. Prefer a short stable mem_key so re-saving updates the same fact.",
       "parameters": {

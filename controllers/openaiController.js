@@ -33,6 +33,7 @@ const SUMMARY_MAX_CHARS = 1200;          // hard cap on the injected summary blo
 const SUMMARY_TRIGGER = 16;              // start summarizing once history exceeds this many turns
 // Long-term durable facts (fetched from cashflow-backend-api) budget.
 const FACTS_MAX_CHARS = 1200;            // hard cap on the injected long-term-facts block
+const GOALS_BLOCK_MAX_CHARS = 1100;      // hard cap on the injected active-goals block
 const FACTS_PRELOAD_LIMIT = 12;          // max facts pulled into context per turn
 // Multi-round tool loop: how many read→refine→act cycles a single user turn
 // may run before we force a final answer. Bounds latency + token cost.
@@ -42,6 +43,10 @@ const MAX_DRAFT_UPDATES_PER_TURN = 4;    // stop the model looping on updateDraf
 // they require a prior proposal (dialogueState.pendingConfirmation) AND an
 // affirmative user turn before they may execute.
 const WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction']);
+// Goal write tools share the same propose→confirm contract but NOT the
+// transaction draft-slot merge (goal fields are unrelated to the transaction
+// draft, so merging it over goal args would corrupt them).
+const GOAL_WRITE_TOOLS = new Set(['createGoal', 'updateGoal', 'deleteGoal']);
 // Non-writing tool that stages/refines the draft transaction slots.
 const DRAFT_TOOL = 'updateDraftTransaction';
 // Non-writing tool the model calls when it judges the user's latest message to
@@ -54,7 +59,7 @@ const SIM_PROPOSE_TOOLS = new Set(['proposeSimulationAdd', 'proposeSimulationMod
 // While the client is in Simulation Mode, ALL real writes are refused in code
 // (deleteTransaction included — it isn't in WRITE_TOOLS' confirm gate but it
 // still mutates real data). The model is redirected to the propose tools.
-const SIM_BLOCKED_WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction', 'deleteTransaction']);
+const SIM_BLOCKED_WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction', 'deleteTransaction', 'createGoal', 'updateGoal', 'deleteGoal']);
 // Short TTL: the cache key is now a hash of the exact prompt (see
 // buildSummarizationCacheKeyFromContent), so identical inputs are the only way
 // to hit the cache. A short TTL is a secondary safety net that bounds how long
@@ -499,16 +504,31 @@ function buildChatAccountContext(account, firstName, currentDate) {
   if (sav && typeof sav === 'object') {
     const pot = typeof sav.savingsPotential === 'number' ? sav.savingsPotential : Number(sav.savingsPotential);
     if (Number.isFinite(pot)) {
-      lines.push(`Lowest projected balance through end of ${monthLabel} (${monthEnd}): ${fmtMoney(pot)}.`);
+      lines.push(`Lowest projected balance through end of ${monthLabel} (${monthEnd}): ${fmtMoney(pot)} — this is the month's safe-to-save amount (savings potential).`);
+    }
+    // Month-level forecast summary → the "forecasted disposable" number the
+    // prompt style guide requires but nothing previously computed.
+    const inc = Number(sav.totalIncome);
+    const exp = Number(sav.totalExpenses);
+    const net = Number(sav.netCashFlow);
+    if (Number.isFinite(inc) && Number.isFinite(exp) && (inc !== 0 || exp !== 0)) {
+      lines.push(`${monthLabel} forecast: income ${fmtMoney(inc)}, expenses ${fmtMoney(-Math.abs(exp))}, forecasted disposable (net cash flow) ${fmtMoney(net)}.`);
     }
   }
   if (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number') {
     lines.push(`Next 14 days: income ${fmtMoney(Math.abs(account.upcomingIncomeTotal || 0))}, expenses ${fmtMoney(Math.abs(account.upcomingExpenseTotal || 0))}.`);
   }
 
-  const negs = pickNegativeBalancePreviews(account, 3);
+  const negs = pickNegativeBalancePreviews(account, 5);
   if (negs.length > 0) {
-    lines.push(`Future negative projected balances: ${negs.join('; ')}.`);
+    lines.push(`Future negative projected balances within ~90 days (warn the user; any plan must avoid making these worse): ${negs.join('; ')}.`);
+  } else {
+    lines.push('No negative projected balances in the next ~90 days.');
+  }
+
+  const topCats = pickTopSpendingCategories(account, 5);
+  if (topCats.length > 0) {
+    lines.push(`Top recent spending categories (posted): ${topCats.join('; ')} — use these as concrete levers when suggesting where to free up cash.`);
   }
 
   const recent = pickRecentTransactions(account, 10);
@@ -522,9 +542,74 @@ function buildChatAccountContext(account, firstName, currentDate) {
 
   lines.push('');
   lines.push(
-    'This is a high-level brief. For anything not listed above (a specific transaction, category, merchant, or date range), call the available tools to fetch exact data instead of guessing. Use createTransaction to add forecasts and deleteTransaction to remove them.'
+    'This is a high-level brief. For anything not listed above (a specific transaction, category, merchant, or date range), call the available tools to fetch exact data instead of guessing. Use createTransaction to add forecasts, deleteTransaction to remove them, getGoals/previewGoalCadence/createGoal for savings goals.'
   );
   return lines.join('\n');
+}
+
+// Aggregate recent posted expenses by category (from account.breakdown when
+// populated, else account.recents) so advice can name concrete, quantified
+// levers ("Dining is your #2 category at $410/mo") instead of staying vague.
+function pickTopSpendingCategories(account, limit = 5) {
+  if (!account || typeof account !== 'object') return [];
+  const rows = [];
+  const pools = [account.breakdown, account.recents];
+  for (const pool of pools) {
+    if (!Array.isArray(pool) || pool.length === 0) continue;
+    for (const r of pool) {
+      if (!r) continue;
+      if (Array.isArray(r.transactions)) rows.push(...r.transactions);
+      else rows.push(r);
+    }
+    if (rows.length > 0) break; // prefer breakdown; fall back to recents
+  }
+  const totals = new Map();
+  for (const t of rows) {
+    const amt = Number(t?.amount);
+    if (!Number.isFinite(amt) || amt >= 0) continue; // expenses only
+    const cat = String(t?.category || '').trim();
+    if (!cat) continue;
+    totals.set(cat, (totals.get(cat) || 0) + Math.abs(amt));
+  }
+  return Array.from(totals.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([cat, total]) => `${cat} ${fmtMoney(total)}`);
+}
+
+// Compact ACTIVE GOALS block for the system prompt, derived from the goals
+// already embedded in the selected-account blob (serializeGoal shape). Keeps
+// goal progress permanently visible to the model without a tool round-trip.
+function buildGoalsBlock(goals, currentDate) {
+  if (!Array.isArray(goals) || goals.length === 0) return '';
+  const today = currentDate && moment(currentDate).isValid() ? moment(currentDate) : moment();
+  const lines = [];
+  for (const g of goals) {
+    if (!g || g.status === 'abandoned') continue;
+    const target = Number(g.target_amount) || 0;
+    const accumulated = Number(g.accumulated_amount) || 0;
+    const pct = target > 0 ? Math.min(100, Math.round((accumulated / target) * 100)) : 0;
+    // Expected-by-now from the contribution schedule → on-track signal.
+    let expected = 0;
+    for (const c of (Array.isArray(g.contributions) ? g.contributions : [])) {
+      if (!c || c.status === 'Skipped') continue;
+      const start = moment(c.start);
+      if (start.isValid() && start.isSameOrBefore(today, 'day')) expected += Math.abs(Number(c.amount) || 0);
+    }
+    const end = g.end_date ? moment(g.end_date) : null;
+    const daysLeft = end && end.isValid() ? Math.max(0, end.diff(today, 'days')) : null;
+    const onTrack = accumulated >= expected - 0.01;
+    lines.push(
+      `- ${g.title || g.display_name || 'Goal'} (goalid ${g.goalid}): ${fmtMoney(accumulated)} of ${fmtMoney(target)} (${pct}%)` +
+      `${daysLeft != null ? `, ${daysLeft} days left (by ${moment(g.end_date).format('MMM D, YYYY')})` : ''}` +
+      `${g.status === 'in_progress' ? (onTrack ? ', on track' : `, BEHIND schedule (expected ${fmtMoney(expected)} by now)`) : `, ${g.status}`}`
+    );
+  }
+  if (lines.length === 0) return '';
+  return truncateText(
+    `ACTIVE GOALS (the user's real savings goals on this account; use these exact numbers):\n${lines.join('\n')}\nUse getGoals for full details; reference goals by goalid when updating.`,
+    GOALS_BLOCK_MAX_CHARS
+  );
 }
 
 // No-account variant: keep it short and let the (already large) system prompt
@@ -1430,6 +1515,66 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         continue;
       }
 
+      // ── Goal write gate (createGoal / updateGoal / deleteGoal) ───────────
+      // Same propose→confirm contract as transactions, but WITHOUT the
+      // transaction-draft merge (goal fields are unrelated to the draft slots).
+      if (GOAL_WRITE_TOOLS.has(name)) {
+        if (ctx.goalsAvailable === false) {
+          blockedWrites.push({ tool: name, reason: 'goals_not_available' });
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            blocked: true,
+            reason: 'goals_not_available',
+            message: 'This user\'s plan does not include Goals (or their goal quota is reached). Do not offer to create/update/delete goals. Instead, lay out the savings plan in prose (per-period amount and timeline) and suggest they can track it manually or upgrade to use Goals.'
+          }) });
+          continue;
+        }
+        const proposedEarlier =
+          ctx.pendingConfirmationAtStart === true ||
+          ctx.draftCompleteAtStart === true ||
+          ctx.proposalInTranscript === true;
+        const confirmed = proposedEarlier && ctx.userAffirmative === true;
+        if (!confirmed) {
+          blockedWrites.push({ tool: name, reason: 'confirmation_required' });
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            blocked: true,
+            reason: 'confirmation_required',
+            message: 'Do NOT write yet. First show the user the full proposed goal (title, target amount, deadline, cadence, and the per-contribution amount from previewGoalCadence) and wait for them to explicitly confirm on their next message.'
+          }) });
+          continue;
+        }
+        // Idempotency within the turn/session (mirrors the transaction guard).
+        const goalSig = ['goal', name, String(args.goalid || ''), String(args.title || '').trim().toLowerCase(), String(args.target_amount || ''), String(args.end_date || '')].join('|');
+        if (state.lastCommitSignature && goalSig === state.lastCommitSignature) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            duplicate: true,
+            message: 'That goal change was just made; not repeating it.'
+          }) });
+          continue;
+        }
+        console.log(`[write-audit] tool=${name} user=${ctx.userId} account=${ctx.accountId} goalArgs=${JSON.stringify(args)}`);
+        try {
+          const result = await toolFn(args, ctx);
+          state.lastCommitSignature = goalSig;
+          state.committed = true;
+          state.pendingConfirmation = false;
+          committedWrites.push({
+            action: result?.action || 'goal_write',
+            transaction_id: null,
+            group_id: null,
+            goal_id: result?.goal_id ?? args.goalid ?? null,
+            title: result?.title ?? args.title ?? null,
+            start: result?.start_date ?? null,
+          });
+          let toolContent = JSON.stringify(result ?? {});
+          if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
+          toolResults.push({ id: toolCall.id, name, content: toolContent });
+        } catch (err) {
+          blockedWrites.push({ tool: name, reason: 'execution_failed' });
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || err?.response?.data?.message || 'Goal tool execution failed' }) });
+        }
+        continue;
+      }
+
       // ── Read / other tools ───────────────────────────────────────────────
       try {
         const result = await toolFn(args, ctx);
@@ -1557,6 +1702,10 @@ exports.chat = async (req, res) => {
     // simulation feature — we only advertise the what-if tools when the client
     // can actually render the resulting overlay.
     const simulationAvailable = simulationMode || req.body?.simulationAvailable === true;
+    // Goals availability (tier 2+ / quota). Defaults OPEN when the client
+    // doesn't send the flag (older clients) — the backend's tier gate on the
+    // goals routes remains the authoritative enforcement.
+    const goalsAvailable = req.body?.goalsAvailable !== false;
     let faq;
     if (req.body.faq) {
       faq = JSON.parse(req.body.faq);
@@ -1797,6 +1946,15 @@ exports.chat = async (req, res) => {
     - updateTransaction edits an EXISTING forecasted transaction (by transactionid) — same rule: propose the change, get confirmation, then call it.
     - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:home_repair" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
 
+    FINANCIAL PLANNING PLAYBOOK (follow this structure whenever the user states or implies a goal, asks "can I afford X", asks how to save/pay off/plan for something, or asks how to improve their cash flow):
+    1. STATE THE TARGET: name the goal, the dollar target, and the timeline. If the user gave no timeline, propose a realistic one from their numbers and say why.
+    2. QUANTIFY THE GAP with real numbers — never estimate what you can fetch or what is already in context: the ACTIVE GOALS block for existing goals, getGoals for details, previewGoalCadence to compute exact per-period contributions ("$125 per paycheck for 12 paychecks"), and the CURRENT CONTEXT forecast figures (forecasted disposable, savings potential, top spending categories).
+    3. GIVE 1-3 CONCRETE LEVERS, each quantified and tied to their actual data: e.g. trim a named top spending category by a specific amount, redirect part of the monthly forecasted disposable, or move/reduce a specific recurring expense. Show how each lever changes the timeline or the per-period amount.
+    4. STRESS-TEST THE PLAN: check it against the future negative projected balances in context (or fetch upcoming transactions). NEVER recommend a plan whose contributions would push a projected balance negative — say so and offer a smaller amount or a longer timeline instead.
+    5. MAKE IT REAL: offer ONE clear next action — create a goal (propose it with the exact cadence numbers, then confirm), stage a what-if simulation so they can SEE the impact (when simulations are available), or save the intent with rememberFact if they're not ready. Lead them to a decision, not just information.
+    - When simulations are available, prefer SHOWING impact over describing it: propose the change with proposeSimulationAdd/Modify so the user sees projected balances on their calendar.
+    - Money already scheduled toward ACTIVE GOALS is committed — never double-count it as available disposable income, and flag goals that are BEHIND schedule with a concrete catch-up option.
+
     Tone & Style: 
     - Clear, empathetic, and supportive
     - Professional yet approachable
@@ -1804,7 +1962,7 @@ exports.chat = async (req, res) => {
     - Be sure to be concise and to the point, do not provide too much information, just the information that is relevant to the user's question.
     - Be sure to be thoughtful and consider the user's financial situation and goals, and provide advice that is in the best interest of the user.
 
-    When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning (no more than 600 characters). If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, reconciliation, and visualization where relevant.
+    When interacting, always ground responses in the principles of cash-flow forecasting, clarity, and proactive planning. RESPONSE LENGTH IS TIERED: for quick lookups and simple questions (a balance, a transaction, a date) stay under ~600 characters; for financial-planning, goal, affordability, or "how do I..." questions you may use up to ~1500 characters with headers and bullets to deliver the full playbook structure — but never pad; every sentence must carry a number or a decision. If the user asks about short-term or long-term financial planning tasks, explain how Keacast can help, referencing forecasting, goals, simulations, reconciliation, and visualization where relevant.
     
     IMPORTANT: Always respond with markdown formatting.
     
@@ -1826,6 +1984,10 @@ exports.chat = async (req, res) => {
     const factsBlock = buildFactsBlock(longTermFacts);
     const summaryBlock = buildSummaryBlock(rollingSummary);
     const dialogueBlock = buildDialogueStateBlock(dialogueState);
+    // Active savings goals ride along in the selected-account blob — surface
+    // them permanently so planning advice always accounts for money already
+    // earmarked toward goals (no tool round-trip needed).
+    const goalsBlock = hasAccount ? buildGoalsBlock(selectedAccount.goals, currentDate) : '';
     const categoriesBlock = categoryNames.length
       ? truncateText(
           `AVAILABLE CATEGORIES (choose transaction categories ONLY from this list — pick the closest match, never invent one):\n${categoryNames.join(', ')}`,
@@ -1833,9 +1995,16 @@ exports.chat = async (req, res) => {
         )
       : '';
     if (categoriesBlock) systemContent += `\n\n---\n${categoriesBlock}`;
+    if (goalsBlock) systemContent += `\n\n---\n${goalsBlock}`;
     if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
     if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
     if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
+    // Goals feature availability steers whether the model may offer goal writes.
+    if (goalsAvailable) {
+      systemContent += `\n\n---\nGOALS ARE AVAILABLE: You may use getGoals, previewGoalCadence, and (after propose+confirm) createGoal/updateGoal/deleteGoal.`;
+    } else {
+      systemContent += `\n\n---\nGOALS ARE NOT AVAILABLE on this user's plan. Do NOT offer to create, update, or delete goals (those tools are refused in code). You may still lay out savings plans in prose and mention that the Goals feature is available on upgraded plans.`;
+    }
 
     // ── Simulation ("what-if") instructions ────────────────────────────────
     // The proposeSimulation* tools stage hypothetical changes on the client's
@@ -1962,6 +2131,7 @@ exports.chat = async (req, res) => {
       proposalInTranscript,
       categoryNames,
       simulationMode,
+      goalsAvailable,
     };
     
     // Always try with tools first for data requests, but handle tool calls properly
@@ -3976,6 +4146,7 @@ exports.getChatHistory = async (req, res) => {
 exports.__testables = {
   emptyDialogueState,
   isAffirmativeMessage,
+  transcriptShowsPendingProposal,
   draftSignature,
   computeDraftMissingFields,
   isDraftProposable,
@@ -3986,12 +4157,16 @@ exports.__testables = {
   buildDialogueStateBlock,
   buildFactsBlock,
   buildSummaryBlock,
+  buildGoalsBlock,
+  pickTopSpendingCategories,
   redactChatBodyForLog,
   // Mirrors the write-gate condition enforced inside executeToolCalls: armed by
-  // an explicit pendingConfirmation flag OR a complete draft staged earlier,
-  // AND an affirmative user turn.
-  isWriteAllowed: (pendingConfirmationAtStart, draftCompleteAtStart, userAffirmative) =>
-    (pendingConfirmationAtStart === true || draftCompleteAtStart === true) && userAffirmative === true,
+  // an explicit pendingConfirmation flag, a complete draft staged earlier, OR a
+  // proposal visible in the client transcript, AND a confirmation (the model's
+  // confirmTransaction call or the affirmative-regex fallback).
+  isWriteAllowed: (pendingConfirmationAtStart, draftCompleteAtStart, userAffirmative, proposalInTranscript) =>
+    (pendingConfirmationAtStart === true || draftCompleteAtStart === true || proposalInTranscript === true) &&
+    userAffirmative === true,
   constants: {
     MAX_MEMORY,
     MAX_TOOL_ROUNDS,

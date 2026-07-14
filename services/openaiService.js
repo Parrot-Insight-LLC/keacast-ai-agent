@@ -59,7 +59,18 @@ async function queryAzureOpenAI(
     response_format,      // optional structured-output hint (Azure 2024-08-06+)
   } = {}
 ) {
-  const body = { messages, temperature, tools, tool_choice, max_tokens };
+  const body = { messages, temperature, max_tokens };
+  // Only attach the function-calling layer when there are real tools to
+  // offer. Callers can opt out by passing `tools: null` (or `[]`) — note
+  // `tools: undefined` does NOT opt out, because destructuring defaults
+  // above replace undefined with functionSchemas. Omitting the keys
+  // entirely (rather than sending tools: null) keeps Azure from rejecting
+  // the body, and prevents the model from answering with tool_calls (null
+  // content) on plain-completion endpoints like Smart Price Assist.
+  if (Array.isArray(tools) && tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = tool_choice;
+  }
   if (response_format) body.response_format = response_format;
   const data = await callAOAI(body, { deployment, timeout });
   // Return the full data so controller can inspect tool calls

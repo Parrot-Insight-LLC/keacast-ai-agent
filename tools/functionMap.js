@@ -16,7 +16,7 @@ const {
   getUpcomingByAccountAndRangeCount,
   getTransactionSummary
 } = require('../services/transactions.service');
-const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction, getTransactionById, updateTransaction, rememberFact, recallFacts } = require('./keacast_tool_layer');
+const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction, getTransactionById, updateTransaction, getGoals, getGoal, previewGoalCadence, createGoal, updateGoal, deleteGoal, rememberFact, recallFacts } = require('./keacast_tool_layer');
 const moment = require('moment');
 
 // Smart data loading strategy to prevent memory issues
@@ -125,6 +125,93 @@ function normalizeCreateTransactionInput(args = {}, ctx = {}) {
   out.forecast_type = 'F';
 
   return out;
+}
+
+// Goal cadence codes accepted by the backend (generateContributionDates).
+const GOAL_FREQUENCIES = new Set(['1', '7', '14', '15', '16', '28', '29', '30', '31', '60', '91', '182', '365']);
+
+// Compact a serialized goal (parent + contributions[]) into a model-friendly
+// summary with derived progress signal, so the LLM never has to do the
+// arithmetic itself (and can't get it wrong).
+function summarizeGoalForModel(goal, currentDate) {
+  if (!goal || typeof goal !== 'object') return null;
+  const today = currentDate && moment(currentDate).isValid() ? moment(currentDate) : moment();
+  const target = Number(goal.target_amount) || 0;
+  const accumulated = Number(goal.accumulated_amount) || 0;
+  const contributions = Array.isArray(goal.contributions) ? goal.contributions : [];
+
+  // Expected-by-now: the sum the cadence says should have been set aside by
+  // today. Compared against accumulated to derive on_track.
+  let expectedByNow = 0;
+  let nextContribution = null;
+  for (const c of contributions) {
+    if (!c || c.status === 'Skipped') continue;
+    const amt = Math.abs(Number(c.amount) || 0);
+    const start = moment(c.start);
+    if (!start.isValid()) continue;
+    if (start.isSameOrBefore(today, 'day')) {
+      expectedByNow += amt;
+    } else if (!nextContribution || start.isBefore(moment(nextContribution.date))) {
+      nextContribution = { date: start.format('YYYY-MM-DD'), amount: amt };
+    }
+  }
+
+  const endDate = goal.end_date ? moment(goal.end_date) : null;
+  return {
+    goalid: goal.goalid,
+    title: goal.title || goal.display_name,
+    category: goal.category,
+    status: goal.status,
+    completion_state: goal.completion_state,
+    target_amount: target,
+    accumulated_amount: accumulated,
+    remaining_amount: Math.max(0, Number((target - accumulated).toFixed(2))),
+    progress_pct: target > 0 ? Math.min(100, Math.round((accumulated / target) * 100)) : 0,
+    start_date: goal.start_date,
+    end_date: goal.end_date,
+    days_remaining: endDate && endDate.isValid() ? Math.max(0, endDate.diff(today, 'days')) : null,
+    frequency: goal.frequency,
+    contribution_count: contributions.length,
+    next_contribution: nextContribution,
+    expected_by_now: Number(expectedByNow.toFixed(2)),
+    on_track: accumulated >= expectedByNow - 0.01,
+  };
+}
+
+// Validate + normalize the LLM's createGoal args into the backend payload.
+// Goals are savings-style ('expense' type only — enforced by the backend too).
+function normalizeCreateGoalInput(args = {}, ctx = {}) {
+  const title = String(args.title || args.display_name || '').trim();
+  if (!title) throw new Error('title is required — name the goal (e.g. "Vacation fund").');
+
+  const target = Number(args.target_amount);
+  if (!Number.isFinite(target) || target <= 0) {
+    throw new Error('target_amount is required and must be a positive number. Propose a concrete target to the user and confirm it first.');
+  }
+
+  const today = ctx.currentDate && moment(ctx.currentDate).isValid() ? moment(ctx.currentDate) : moment();
+  const start = args.start_date && moment(args.start_date).isValid() ? moment(args.start_date) : today.clone();
+  const end = args.end_date && moment(args.end_date).isValid() ? moment(args.end_date) : null;
+  if (!end) throw new Error('end_date is required — the date the user wants to reach the target by.');
+  if (end.isBefore(start, 'day')) throw new Error('end_date must be on or after start_date.');
+
+  const frequency = String(args.frequency || '');
+  if (!GOAL_FREQUENCIES.has(frequency)) {
+    throw new Error("frequency is required and must be one of: '1' daily, '7' weekly, '14' bi-weekly, '15' semi-monthly, '28'-'31' monthly, '60' bi-monthly, '91' quarterly, '182' semi-annual, '365' annual.");
+  }
+
+  return {
+    title,
+    display_name: String(args.display_name || title),
+    category: String(args.category || 'Savings'),
+    type: 'expense', // income-typed goals are rejected by the backend
+    description: args.description || null,
+    notes: args.notes || null,
+    target_amount: target,
+    frequency,
+    start_date: start.format('YYYY-MM-DD'),
+    end_date: end.format('YYYY-MM-DD'),
+  };
 }
 
 // Best-effort read of a single existing transaction row. Returns {} when the
@@ -445,6 +532,115 @@ const functionMap = {
       start: body.start,
       frequency: body.frequency,
       message: (result && result.message) || 'Transaction has been successfully updated.',
+    };
+  },
+
+  // ── Goals (savings targets) ────────────────────────────────────────────────
+  // Read tools return compact summaries with derived progress (progress_pct,
+  // remaining_amount, on_track) so the model reports real numbers. Write tools
+  // are confirm-gated upstream in executeToolCalls, exactly like transactions.
+
+  async getGoals(args, ctx) {
+    const { userId, token, accountId } = ctx;
+    if (!accountId) return { goals: [], message: 'No account selected.' };
+    const raw = await getGoals({ userId, accountId, token });
+    const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.goals) ? raw.goals : []);
+    const goals = list
+      .map((g) => summarizeGoalForModel(g, ctx.currentDate))
+      .filter(Boolean);
+    const active = goals.filter((g) => g.status === 'in_progress');
+    return {
+      goals,
+      active_count: active.length,
+      message: goals.length
+        ? 'Derived fields: remaining_amount, progress_pct, days_remaining, expected_by_now, and on_track (accumulated vs. what the cadence expects by today). Use these numbers as-is.'
+        : 'The user has no goals on this account yet.'
+    };
+  },
+
+  async previewGoalCadence(args, ctx) {
+    const target = Number(args.target_amount);
+    if (!Number.isFinite(target) || target <= 0) return { error: 'target_amount must be a positive number.' };
+    const today = ctx.currentDate && moment(ctx.currentDate).isValid() ? moment(ctx.currentDate) : moment();
+    const start = args.start_date && moment(args.start_date).isValid() ? moment(args.start_date) : today.clone();
+    const end = args.end_date && moment(args.end_date).isValid() ? moment(args.end_date) : null;
+    if (!end) return { error: 'end_date is required (the date the user wants to reach the target by).' };
+    const frequency = String(args.frequency || '');
+    if (!GOAL_FREQUENCIES.has(frequency)) {
+      return { error: "frequency must be one of: '1' daily, '7' weekly, '14' bi-weekly, '15' semi-monthly, '28'-'31' monthly, '60' bi-monthly, '91' quarterly, '182' semi-annual, '365' annual." };
+    }
+    const result = await previewGoalCadence({
+      token: ctx.token,
+      body: {
+        target_amount: target,
+        start_date: start.format('YYYY-MM-DD'),
+        end_date: end.format('YYYY-MM-DD'),
+        frequency,
+        type: 'expense',
+      },
+    });
+    return {
+      ...result,
+      note: 'This is a pure preview — nothing was created. amount_per_row is the per-contribution amount (negative = money set aside). Present it to the user (e.g. "$X per week for N weeks") and check it against their upcoming forecasted balances before recommending it.'
+    };
+  },
+
+  async createGoal(args, ctx) {
+    const { userId, token, accountId } = ctx;
+    if (!accountId) throw new Error('No account selected — a goal must belong to an account.');
+    const body = normalizeCreateGoalInput(args, ctx);
+    const result = await createGoal({ userId, accountId, token, body });
+    const summary = summarizeGoalForModel(result, ctx.currentDate) || {};
+    return {
+      success: true,
+      action: 'create_goal',
+      goal_id: result?.goalid ?? null,
+      title: body.title,
+      target_amount: body.target_amount,
+      start_date: body.start_date,
+      end_date: body.end_date,
+      frequency: body.frequency,
+      contribution_count: summary.contribution_count ?? null,
+      next_contribution: summary.next_contribution ?? null,
+      message: 'Goal created. Its scheduled contributions now appear on the user\'s calendar as forecasted set-asides.',
+    };
+  },
+
+  async updateGoal(args, ctx) {
+    const { userId, token } = ctx;
+    const goalId = args.goalid || args.goal_id;
+    if (!goalId) throw new Error('goalid is required to update a goal — find it via getGoals first.');
+    // The backend enforces optimistic concurrency; read the current row to
+    // supply expectedUpdatedAt (and to preserve unspecified fields).
+    const existing = await getGoal({ goalId, token });
+    if (!existing || !existing.goalid) throw new Error('Goal not found.');
+    const body = { expectedUpdatedAt: existing.updatedAt };
+    for (const k of ['title', 'display_name', 'category', 'description', 'notes', 'target_amount', 'frequency', 'start_date', 'end_date']) {
+      if (args[k] !== undefined && args[k] !== null && String(args[k]).trim() !== '') body[k] = args[k];
+    }
+    if (body.frequency !== undefined) body.frequency = String(body.frequency);
+    const result = await updateGoal({ userId, goalId, token, body });
+    return {
+      success: true,
+      action: 'update_goal',
+      goal_id: goalId,
+      title: result?.title ?? body.title ?? existing.title,
+      target_amount: result?.target_amount ?? body.target_amount ?? existing.target_amount,
+      end_date: result?.end_date ?? body.end_date ?? existing.end_date,
+      message: 'Goal updated. Unlocked future contributions were redistributed to match the new plan.',
+    };
+  },
+
+  async deleteGoal(args, ctx) {
+    const { userId, token } = ctx;
+    const goalId = args.goalid || args.goal_id;
+    if (!goalId) throw new Error('goalid is required to delete a goal — find it via getGoals first.');
+    const result = await deleteGoal({ userId, goalId, token });
+    return {
+      success: true,
+      action: 'delete_goal',
+      goal_id: goalId,
+      message: (result && result.message) || 'Goal deleted.',
     };
   },
 
