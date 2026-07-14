@@ -96,9 +96,11 @@ async function createTransaction({ userId, accountId, token, body }) {
   return response.data;
 }
 
-async function deleteTransaction({ userId, transactionId, token, body }) {
+async function deleteTransaction({ userId, transactionId, token }) {
   const url = `${BASE_URL}/transaction/delete/${userId}/${transactionId}`;
-  const response = await axios.delete(url, body, AUTH_HEADER(token));
+  // axios.delete(url, config) — the old (url, body, config) form passed the
+  // body into the config slot, silently dropping the auth header.
+  const response = await axios.delete(url, AUTH_HEADER(token));
   return response.data;
 }
 

@@ -44,6 +44,10 @@ const MAX_DRAFT_UPDATES_PER_TURN = 4;    // stop the model looping on updateDraf
 const WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction']);
 // Non-writing tool that stages/refines the draft transaction slots.
 const DRAFT_TOOL = 'updateDraftTransaction';
+// Non-writing tool the model calls when it judges the user's latest message to
+// confirm the pending proposal. This is the PRIMARY confirmation signal for
+// the write gate (the isAffirmativeMessage regex remains as a fallback).
+const CONFIRM_TOOL = 'confirmTransaction';
 // Simulation ("what-if") propose tools. These never write — each returns a
 // structured simOp the frontend applies to its client-side simulation overlay.
 const SIM_PROPOSE_TOOLS = new Set(['proposeSimulationAdd', 'proposeSimulationModify', 'proposeSimulationRemove']);
@@ -1051,8 +1055,11 @@ function draftConflictsWithArgs(args, draft) {
   const al = argsTitle.toLowerCase();
   const titlesRelated = argTokens.some((t) => draftTokens.has(t)) || dl.includes(al) || al.includes(dl);
 
-  // 5% (min $1) tolerance so rounding/sign differences don't count as conflicts.
-  const tolerance = Math.max(1, Math.abs(argsAmount) * 0.05);
+  // 10% (min $1) tolerance so rounding/sign differences and modest model
+  // re-estimates on the confirm turn don't count as conflicts. A conflict now
+  // requires BOTH an unrelated title AND a materially different amount — i.e.
+  // a genuine topic switch.
+  const tolerance = Math.max(1, Math.abs(argsAmount) * 0.10);
   const amountsMatch = Math.abs(Math.abs(draftAmount) - Math.abs(argsAmount)) <= tolerance;
 
   return !titlesRelated && !amountsMatch;
@@ -1070,21 +1077,6 @@ function isAffirmativeMessage(message, draft) {
   const m = message.trim().toLowerCase();
   if (!m) return false;
 
-  const amountMatches = m.match(/\$\s*\d[\d,]*(\.\d+)?|\b\d[\d,]*(\.\d+)?\s*(dollars|bucks)\b/g) || [];
-  if (amountMatches.length > 0) {
-    const draftAmount = Number(draft?.amount);
-    const mentionsOnlyDraftAmount = Number.isFinite(draftAmount) && amountMatches.every((raw) => {
-      const n = Number(raw.replace(/[^0-9.]/g, ''));
-      return Number.isFinite(n) && Math.abs(n - Math.abs(draftAmount)) < 0.01;
-    });
-    if (!mentionsOnlyDraftAmount) return false;
-  }
-  // A recurrence schedule in the message means the user is specifying a new or
-  // changed transaction, not just agreeing to the pending one.
-  if (/\b(every\s+(day|week|month|year|other)|daily|weekly|bi-?weekly|monthly|quarterly|annually|yearly)\b/.test(m)) {
-    return false;
-  }
-
   const patterns = [
     /^y(es|ep|eah|up|es please|es pls)?\b/, /\bconfirm(ed)?\b/, /\bgo ahead\b/, /\bdo it\b/,
     /\bsounds good\b/, /\block it in\b/, /\bproceed\b/, /\bok(ay)?\b/, /\bsure\b/, /\babsolutely\b/,
@@ -1096,7 +1088,42 @@ function isAffirmativeMessage(message, draft) {
     /\bgreat\b/, /\bgo for it\b/, /\byes please\b/, /\bplease do\b/, /\bmake it so\b/,
     /\bthat'?s? (good|fine|perfect)\b/, /\bapprove(d)?\b/, /\bsave it\b/, /\bschedule it\b/,
   ];
-  return patterns.some((re) => re.test(m));
+  if (!patterns.some((re) => re.test(m))) return false;
+
+  // A DIFFERENT dollar amount alongside the "yes" means the user is adjusting
+  // the proposal, not plainly agreeing. The regex fallback stays conservative
+  // here — the model handles adjustments properly via updateDraftTransaction
+  // followed by confirmTransaction (the primary confirmation signal).
+  const amountMatches = m.match(/\$\s*\d[\d,]*(\.\d+)?|\b\d[\d,]*(\.\d+)?\s*(dollars|bucks)\b/g) || [];
+  if (amountMatches.length > 0) {
+    const draftAmount = Number(draft?.amount);
+    const mentionsOnlyDraftAmount = Number.isFinite(draftAmount) && amountMatches.every((raw) => {
+      const n = Number(raw.replace(/[^0-9.]/g, ''));
+      return Number.isFinite(n) && Math.abs(n - Math.abs(draftAmount)) < 0.01;
+    });
+    if (!mentionsOnlyDraftAmount) return false;
+  }
+  return true;
+}
+
+// Redis-eviction fallback for the write gate: did the LAST assistant turn in
+// the (client-provided) transcript propose a concrete transaction and ask for
+// confirmation? When the dialogue-state draft was evicted or never staged,
+// this lets a valid confirmation still arm the gate — the model's own args
+// then supply the values (the empty draft merge is a no-op).
+function transcriptShowsPendingProposal(history) {
+  if (!Array.isArray(history) || history.length === 0) return false;
+  let lastAssistant = null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]?.role === 'assistant') { lastAssistant = String(history[i].content || ''); break; }
+    if (history[i]?.role === 'user') break; // only the immediately-preceding assistant turn counts
+  }
+  if (!lastAssistant) return false;
+  const t = lastAssistant.toLowerCase();
+  const hasAmount = /(^|[^\w])\$\s*\d/.test(lastAssistant) || /\b\d[\d,]*(\.\d+)?\s*(dollars|bucks)\b/.test(t);
+  const asksToConfirm =
+    /\b(confirm|shall i|should i|would you like|want me to|do you want|sound good|look good|looks right|is (this|that) (right|correct|ok|okay)|ready to (add|create)|go ahead)\b/.test(t);
+  return hasAmount && asksToConfirm;
 }
 
 // Compact, hard-capped block describing the in-progress action for the system
@@ -1222,6 +1249,13 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   // proposeSimulation* tools). Returned to the client alongside the prose so
   // the frontend can apply them to its simulation overlay.
   const proposedSimOps = [];
+  // Committed real writes this turn ({ action, transaction_id, group_id, start }).
+  // Surfaced to the client as transactionResult so the UI reloads account data
+  // off a structured signal instead of sniffing the prose.
+  const committedWrites = [];
+  // Writes the gate refused this turn ({ tool, reason }) — lets the client know
+  // a proposal/confirmation is pending rather than guessing from prose.
+  const blockedWrites = [];
 
   // Execute one batch of tool calls, applying dialogue-state handling + the
   // code-enforced write gate. Returns matching assistant/tool protocol messages.
@@ -1268,6 +1302,32 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         continue;
       }
 
+      // ── Non-writing confirmation signal: the model judged the user's latest
+      // message to confirm the pending proposal. This is the PRIMARY way the
+      // write gate is armed — far more robust than the regex fallback, which
+      // can't cover every natural phrasing ("yeah let's do that", emoji, etc.).
+      if (name === CONFIRM_TOOL) {
+        const proposalExists =
+          ctx.pendingConfirmationAtStart === true ||
+          ctx.draftCompleteAtStart === true ||
+          ctx.proposalInTranscript === true;
+        if (proposalExists) {
+          ctx.userAffirmative = true;
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: true,
+            confirmed: true,
+            message: 'Confirmation registered. Now call createTransaction (or updateTransaction) with the confirmed draft values — do not re-ask the user.'
+          }) });
+        } else {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: false,
+            confirmed: false,
+            message: 'No pending proposal found to confirm. Propose the full transaction first (updateDraftTransaction with a SINGLE concrete amount, then ask the user to confirm on their next message).'
+          }) });
+        }
+        continue;
+      }
+
       const toolFn = functionMap[name];
       if (!toolFn) {
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: `Unknown tool: ${name}` }) });
@@ -1286,14 +1346,18 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 
       // ── Code-enforced write gate (createTransaction / updateTransaction) ──
       if (WRITE_TOOLS.has(name)) {
-        // Arm off EITHER an explicit pendingConfirmation flag OR a complete
-        // draft that was already staged on a prior turn. The latter makes the
-        // gate robust even when the model proposes in prose without setting the
-        // flag (observed in the carpet-replacement flow), while still enforcing
-        // the two-turn "propose then confirm" contract via userAffirmative.
-        const proposedEarlier = ctx.pendingConfirmationAtStart === true || ctx.draftCompleteAtStart === true;
+        // Arm off an explicit pendingConfirmation flag, a complete draft staged
+        // on a prior turn, OR a proposal visible in the client transcript (the
+        // Redis-eviction fallback). Confirmation itself comes from the model's
+        // confirmTransaction call (primary) or the regex fallback — both land
+        // in ctx.userAffirmative.
+        const proposedEarlier =
+          ctx.pendingConfirmationAtStart === true ||
+          ctx.draftCompleteAtStart === true ||
+          ctx.proposalInTranscript === true;
         const confirmed = proposedEarlier && ctx.userAffirmative === true;
         if (!confirmed) {
+          blockedWrites.push({ tool: name, reason: 'confirmation_required' });
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             blocked: true,
             reason: 'confirmation_required',
@@ -1311,6 +1375,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           state.draftTransaction = {};
           state.intent = null;
           state.pendingConfirmation = false;
+          blockedWrites.push({ tool: name, reason: 'stale_draft_mismatch' });
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             blocked: true,
             reason: 'stale_draft_mismatch',
@@ -1348,8 +1413,18 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           state.pendingConfirmation = false;
           state.draftTransaction = {};
           state.intent = null;
+          // Structured write record for the client (functionMap normalizes the
+          // backend response into { action, transaction_id, group_id, ... }).
+          committedWrites.push({
+            action: result?.action || (name === 'updateTransaction' ? 'update' : 'create'),
+            transaction_id: result?.transaction_id ?? null,
+            group_id: result?.group_id ?? null,
+            title: result?.title ?? effectiveArgs.title ?? null,
+            start: result?.start ?? effectiveArgs.start ?? null,
+          });
           toolResults.push({ id: toolCall.id, name, content: toolContent });
         } catch (err) {
+          blockedWrites.push({ tool: name, reason: 'execution_failed' });
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || 'Tool execution failed' }) });
         }
         continue;
@@ -1362,6 +1437,17 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         // alongside the final prose (the frontend applies them to the overlay).
         if (SIM_PROPOSE_TOOLS.has(name) && result && result.simOp) {
           proposedSimOps.push(result.simOp);
+        }
+        // deleteTransaction also mutates real data (it lives outside the
+        // confirm gate) — record it so the client reloads account data.
+        if (name === 'deleteTransaction' && result && result.success === true) {
+          committedWrites.push({
+            action: 'delete',
+            transaction_id: result.transaction_id ?? null,
+            group_id: result.group_id ?? null,
+            title: null,
+            start: null,
+          });
         }
         let toolContent = JSON.stringify(result ?? {});
         if (toolContent.length > 13000) {
@@ -1428,7 +1514,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     } catch (error) {
       console.log('Tool loop model call failed:', error.message);
       console.log('Error details:', error.response?.data || error);
-      return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps };
+      return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, writes: committedWrites, blocked: blockedWrites };
     }
 
     const msg = response?.choices?.[0]?.message;
@@ -1438,10 +1524,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       continue;
     }
     console.log('Tool loop: final response received, content length:', msg?.content?.length || 0);
-    return { content: msg?.content || '', raw: response, simOps: proposedSimOps };
+    return { content: msg?.content || '', raw: response, simOps: proposedSimOps, writes: committedWrites, blocked: blockedWrites };
   }
 
-  return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps };
+  return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, writes: committedWrites, blocked: blockedWrites };
 }
 
 // ----------------------------
@@ -1693,7 +1779,7 @@ exports.chat = async (req, res) => {
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
     - Creating a transaction should feel effortless. The user does NOT have to provide a title, amount, type, category, date, or frequency. ESTIMATE every field you weren't given from this conversation, the account context, and the user's similar/recurring/recent transactions (e.g. estimate a Netflix expense at their typical streaming amount, a paycheck from their recurring income). Never make the user fill in details just to satisfy the tool.
     - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction and they have agreed. When you propose, ALWAYS state a SINGLE concrete amount — if your estimate is a range, pick one reasonable figure (such as the midpoint of the range), state it plainly, and ask them to confirm or adjust. Never leave the amount as a range going into the confirmation. On the turn the user first expresses intent, do NOT call the tool — propose the concrete details and ask them to confirm or adjust. Only call createTransaction after they agree. If they tweak a value, restate the updated proposal and confirm again.
-    - CONFIRMATION HANDLING: Treat the user's reply as confirmation to create the transaction you just proposed whenever it is affirmative OR an add/create instruction — e.g. "yes", "yes please", "go ahead", "do it", "confirm", "sounds good", "please add this", "please add this forecast", "add it", "add that", "create it", "log it", "put it in my forecast". When you get any of these and your previous message proposed (or discussed) exactly one transaction, immediately call createTransaction using those proposed values (read them from your previous message in the history). Do NOT start over and do NOT re-ask for details you already proposed.
+    - CONFIRMATION HANDLING: Treat the user's reply as confirmation to create the transaction you just proposed whenever it is affirmative OR an add/create instruction — e.g. "yes", "yes please", "go ahead", "do it", "confirm", "sounds good", "please add this", "please add this forecast", "add it", "add that", "create it", "log it", "put it in my forecast", or any natural equivalent. When you get any of these and your previous message proposed (or discussed) exactly one transaction, FIRST call confirmTransaction (this registers the confirmation), THEN immediately call createTransaction using those proposed values (read them from your previous message in the history). If the user confirmed but adjusted a value ("yes, but make it $45"), call updateDraftTransaction with the adjusted value BEFORE confirmTransaction. Do NOT start over and do NOT re-ask for details you already proposed.
     - NEVER reply with "which forecast/transaction would you like to add?" when your own previous turn already identified exactly one thing (e.g. you just asked "would you like to create a transaction for the item we discussed?"). "This forecast"/"this transaction" unambiguously refers to that item — create it. The ONLY time you may ask a clarifying question is if you genuinely proposed two or more clearly different transactions in the same breath. Also note: in Keacast "add this as a forecast" / "add this forecast" means CREATE a new forecasted transaction for the item just discussed — it does NOT mean look up an existing forecast, so do NOT call read tools (getRecurringForecasts/getUpcomingTransactions) to "find" it.
     - STAY ON TOPIC: The transaction you create must be the one that was actually being DISCUSSED with the user (the item you just proposed in this conversation). NEVER substitute an unrelated item that merely appears in the account context or the "Recent posted"/"Upcoming forecasted" lists (e.g. a paycheck). The CURRENT CONTEXT block is reference data only — it is never the thing to create unless the user explicitly asked for it.
     - Use the full chat history above as memory: remember the amounts, dates, merchants, goals, and any transaction you already proposed earlier in this conversation, and reuse them so the user never has to repeat themselves (the confirmation turn relies on this).
@@ -1707,7 +1793,7 @@ exports.chat = async (req, res) => {
     - SLOT-FILLING with updateDraftTransaction: As a plan for a transaction takes shape across the conversation (the user researches a purchase, you estimate its cost, they mention a target date), call updateDraftTransaction to record/refine the known fields (title, type, amount, category, start, frequency, and a short intent label describing the item). ONLY record values that came from THIS conversation — never invent a draft for something the user has not discussed. This is a NON-writing scratchpad — it never creates anything. Set pendingConfirmation:true on it ONLY when you have just proposed a complete, concrete transaction and are asking the user to confirm. The DIALOGUE STATE block reflects the current draft; reuse it so the user never repeats themselves. Ask only for fields you genuinely cannot infer.
     - LOCK CONFIRMED VALUES — NO DRIFT: Once you have proposed specific values (a specific start date and amount), those values are LOCKED. Do NOT re-estimate or change an already-proposed field on later turns (a common bug was a November date silently becoming August). When the user confirms, call createTransaction with the EXACT values from the DIALOGUE STATE draft — same date, same amount, same category. Only change a value if the user explicitly asks to; then update the draft first via updateDraftTransaction and re-confirm.
     - CATEGORY MUST BE REAL: Always choose the category from the user's AVAILABLE CATEGORIES list shown in context — pick the closest existing match for the item being created. Never invent a category that isn't in that list. If none fits well, pick the nearest general one from the list.
-    - The confirm-before-write rule is enforced in code: createTransaction/updateTransaction will be REFUSED unless you proposed a complete transaction on a prior turn and the user's latest message affirmatively confirmed it. So the flow is exactly TWO turns: (1) propose with a single concrete amount + a real category, (2) when the user's next message is affirmative (e.g. "yes", "this works for me", "add it", "looks good", "sounds good"), IMMEDIATELY call createTransaction with the locked draft values — do NOT re-propose or ask for confirmation a second/third time. Only if a write is genuinely refused should you show the proposal again.
+    - The confirm-before-write rule is enforced in code: createTransaction/updateTransaction will be REFUSED unless you proposed a complete transaction on a prior turn and the confirmation was registered. So the flow is exactly TWO turns: (1) propose with a single concrete amount + a real category (stage it via updateDraftTransaction with pendingConfirmation:true), (2) when the user's next message confirms it, call confirmTransaction and then IMMEDIATELY createTransaction with the locked draft values — do NOT re-propose or ask for confirmation a second/third time. Only if a write is genuinely refused should you show the proposal again.
     - updateTransaction edits an EXISTING forecasted transaction (by transactionid) — same rule: propose the change, get confirmation, then call it.
     - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:home_repair" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
 
@@ -1860,6 +1946,10 @@ exports.chat = async (req, res) => {
     // createTransaction can default `start` to the user's localized today.
     // dialogueState (+ gate flags) let executeToolCalls slot-fill the draft and
     // enforce the confirm-before-write rule in code, not just the prompt.
+    // Redis-eviction fallback: a proposal visible in the client transcript can
+    // arm the write gate even when the dialogue-state draft is gone/incomplete.
+    const proposalInTranscript = transcriptShowsPendingProposal(history);
+
     const ctx = {
       userId,
       token,
@@ -1869,6 +1959,7 @@ exports.chat = async (req, res) => {
       pendingConfirmationAtStart,
       draftCompleteAtStart,
       userAffirmative,
+      proposalInTranscript,
       categoryNames,
       simulationMode,
     };
@@ -1955,6 +2046,22 @@ exports.chat = async (req, res) => {
       console.warn('Chat endpoint: rolling summary refresh failed (fail-soft):', e.message);
     }
 
+    // Structured outcome of any real writes this turn. The UI keys off
+    // reloadSelectedAccount to refresh account data (instead of sniffing the
+    // prose for "success"/"created"), and can use `focus` to navigate to a
+    // newly created transaction.
+    const writes = Array.isArray(result?.writes) ? result.writes : [];
+    const blocked = Array.isArray(result?.blocked) ? result.blocked : [];
+    const firstCreate = writes.find((w) => w.action === 'create' && w.transaction_id != null) || null;
+    const transactionResult = {
+      reloadSelectedAccount: writes.length > 0,
+      writes,
+      blocked,
+      focus: firstCreate
+        ? { transaction_id: firstCreate.transaction_id, group_id: firstCreate.group_id, date: firstCreate.start }
+        : null,
+    };
+
     res.json({
       response: finalText,
       memoryUsed: updatedHistory.length,
@@ -1964,6 +2071,7 @@ exports.chat = async (req, res) => {
       // Structured simulation proposals from the proposeSimulation* tools.
       // The frontend applies these to its client-side simulation overlay.
       simOps: Array.isArray(result?.simOps) ? result.simOps : [],
+      transactionResult,
       error: result?.error,
     });
 

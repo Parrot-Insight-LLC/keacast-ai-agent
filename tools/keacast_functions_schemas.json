@@ -132,7 +132,7 @@
     "type": "function",
     "function": {
       "name": "createTransaction",
-      "description": "Create a forecasted income or expense on the user's currently selected account. The user does NOT have to supply ANY field — estimate every value you weren't given (title, amount, type, category, date, frequency) from the conversation, account context, and the user's similar/recurring/recent transactions. CRITICAL: this tool writes real data, so do NOT call it until you have shown the user the full proposed transaction (title, type, amount, start date, frequency if recurring) and they have EXPLICITLY confirmed. On the turn the user first asks, DO NOT call this — propose the estimated details and ask them to confirm or adjust; only call it after they say yes. Pass amount as a positive number and set type ('expense' or 'income'); the system applies the correct sign. Omitted fields default: frequency=2 (one-time), start=today, end=start for one-time or start+1 year for recurring, category/title/description from context, time=12:00. Set frequency only when recurrence is implied (e.g. 'every month' => 28-31, 'weekly' => 7). Always warn about any resulting negative forecasted balances.",
+      "description": "Create a forecasted income or expense on the user's currently selected account. Estimate any value you weren't given (title, category, date, frequency) from the conversation, account context, and the user's similar/recurring/recent transactions — but you MUST always supply a concrete non-zero amount and an explicit type. CRITICAL: this tool writes real data, so do NOT call it until you have shown the user the full proposed transaction (title, type, amount, start date, frequency if recurring) and they have EXPLICITLY confirmed (call confirmTransaction first when they do). On the turn the user first asks, DO NOT call this — propose the estimated details and ask them to confirm or adjust; only call it after they say yes. Pass amount as a positive number and set type ('expense' or 'income'); the system applies the correct sign. Recurrence is controlled ONLY by frequency (e.g. 'every month' => 28-31, 'weekly' => 7); omitted frequency means one-time. Omitted fields default: start=today, end=start for one-time or start+1 year for recurring, category/title/description from context, time=12:00. Always warn about any resulting negative forecasted balances.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -180,14 +180,9 @@
           "location": {
             "type": "string",
             "description": "Optional location."
-          },
-          "forecast_type": {
-            "type": "string",
-            "enum": ["F", "RF"],
-            "description": "F=one-off forecast (default), RF=recurring forecast."
           }
         },
-        "required": []
+        "required": ["amount", "type"]
       }
     }
   },
@@ -208,10 +203,9 @@
           "end": { "type": "string", "description": "Recurring only: when recurrence stops. Defaults to start+1 year." },
           "time": { "type": "string", "description": "Time of day HH:mm. Defaults to 12:00." },
           "frequency": { "type": "number", "description": "Recurrence code: 1=Daily, 2=Once (default), 7=Weekly, 14=Bi-Weekly, 15/16=Semi-Monthly, 28-31=Monthly, 60=Bi-Monthly, 91=Quarterly, 182-183=Semi-Annually, 365-366=Annually." },
-          "merchant_name": { "type": "string", "description": "Merchant, if known." },
-          "forecast_type": { "type": "string", "enum": ["F", "RF"], "description": "F=one-off forecast (default), RF=recurring forecast." }
+          "merchant_name": { "type": "string", "description": "Merchant, if known." }
         },
-        "required": []
+        "required": ["amount", "type"]
       }
     }
   },
@@ -254,6 +248,20 @@
           "scope": { "type": "string", "enum": ["single", "group", "groupfrom"], "description": "single=this occurrence only (default), group=every occurrence, groupfrom=this and future occurrences." }
         },
         "required": ["transactionid"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "confirmTransaction",
+      "description": "NON-WRITING signal that the user's LATEST message confirms the transaction you proposed on a PRIOR turn (e.g. 'yes', 'go ahead', 'add it', 'looks good', 'yes but make it $45'). Call this FIRST on the confirmation turn, then immediately call createTransaction (or updateTransaction) with the confirmed draft values. If the user confirmed but also adjusted a value ('yes, make it $45 instead'), call updateDraftTransaction with the adjusted value BEFORE calling this. Do NOT call this when the user is still deciding, asking a question, or describing a brand-new transaction.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "note": { "type": "string", "description": "Optional: one short phrase quoting what the user said that constitutes the confirmation." }
+        },
+        "required": []
       }
     }
   },
@@ -370,10 +378,9 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "userId": { "type": "string" },
-          "transactionid": { "type": "number" }
+          "transactionid": { "type": "number", "description": "The id of the forecasted transaction to delete." }
         },
-        "required": ["userId", "transactionid"]
+        "required": ["transactionid"]
       }
     }
   }

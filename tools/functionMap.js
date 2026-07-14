@@ -29,12 +29,29 @@ const SMART_LIMITS = {
 
 const FREQUENCY_ONCE = 2;
 
+// Snap a model-chosen category to the user's real category list (from
+// ctx.categoryNames) so we never persist an invented category. Case-insensitive
+// exact match first, then a loose contains-match either direction. Returns
+// null when nothing matches. (Kept local — requiring openaiController here
+// would create a circular dependency.)
+function snapCategoryToList(input, names) {
+  const q = String(input || '').trim().toLowerCase();
+  if (!q || !Array.isArray(names) || names.length === 0) return null;
+  for (const n of names) if (String(n).trim().toLowerCase() === q) return n;
+  for (const n of names) {
+    const ln = String(n).trim().toLowerCase();
+    if (ln && (ln.includes(q) || q.includes(ln))) return n;
+  }
+  return null;
+}
+
 // Build a complete, valid createTransaction payload from whatever sparse
-// fields the LLM supplied. The chat schema only requires `amount` + `type`, so
-// the user can say "add $1200 rent on the 1st every month" and we still produce
-// a fully-formed record. Defaults here mirror the backend's own fallbacks
-// (TransactionsController.createTransaction) so creation never 400s on a thin
-// payload and the user doesn't have to spell out every field.
+// fields the LLM supplied. The chat schema requires `amount` + `type`; the
+// rest ("add $1200 rent on the 1st every month") is filled here so creation
+// never 400s on a thin payload. Amount and type are hard requirements: a
+// missing/zero amount or missing type is REJECTED (never silently defaulted)
+// so the model re-proposes instead of writing a $0 row or flipping an expense
+// into income.
 function normalizeCreateTransactionInput(args = {}, ctx = {}) {
   const out = { ...args };
 
@@ -43,24 +60,22 @@ function normalizeCreateTransactionInput(args = {}, ctx = {}) {
   delete out.userId;
   delete out.accountId;
 
-  // type: trust the model, else infer from the sign, else default to expense.
-  const rawAmount = Number(out.amount);
-  let type = String(out.type || '').toLowerCase();
+  // type: must be explicit. The model always sends positive magnitudes, so
+  // inferring type from sign would silently turn every typeless expense into
+  // income — refuse instead and let the model re-propose.
+  const type = String(out.type || '').toLowerCase();
   if (type !== 'income' && type !== 'expense') {
-    type = Number.isFinite(rawAmount) && rawAmount > 0 ? 'income' : 'expense';
+    throw new Error("type is required and must be 'expense' or 'income'. Re-propose the transaction with an explicit type.");
   }
   out.type = type;
 
-  // amount: persist signed (negative = expense, positive = income) so the LLM
-  // can pass a plain magnitude and we still match existing data conventions.
-  // The model is expected to estimate + confirm an amount before calling, so a
-  // non-finite amount here is a safety-net only (default 0 to avoid a NULL
-  // insert / backend crash).
-  if (Number.isFinite(rawAmount)) {
-    out.amount = type === 'expense' ? -Math.abs(rawAmount) : Math.abs(rawAmount);
-  } else {
-    out.amount = 0;
+  // amount: must be a concrete non-zero number. Persist signed (negative =
+  // expense, positive = income) to match existing data conventions.
+  const rawAmount = Number(out.amount);
+  if (!Number.isFinite(rawAmount) || rawAmount === 0) {
+    throw new Error('amount is required and must be a concrete non-zero number. Propose a single concrete amount to the user, get their confirmation, then call again with that amount.');
   }
+  out.amount = type === 'expense' ? -Math.abs(rawAmount) : Math.abs(rawAmount);
 
   // frequency: default to a one-time entry unless recurrence was specified.
   let freq = Number(out.frequency);
@@ -88,10 +103,26 @@ function normalizeCreateTransactionInput(args = {}, ctx = {}) {
   if (!out.title || !String(out.title).trim()) out.title = fallbackTitle;
   if (!out.display_name || !String(out.display_name).trim()) out.display_name = out.title;
   if (!out.description || !String(out.description).trim()) out.description = out.title;
-  if (!out.category || !String(out.category).trim()) out.category = type === 'income' ? 'Income' : 'Uncategorized';
+
+  // category: snap whatever we have (model's pick, then the title, then a
+  // type default) to the user's REAL category list so we never persist an
+  // invented category. Falls back to the raw value when the user has no
+  // matching category (backend accepts arbitrary strings).
+  const categoryNames = Array.isArray(ctx.categoryNames) ? ctx.categoryNames : [];
+  const rawCategory = (out.category && String(out.category).trim())
+    ? String(out.category).trim()
+    : (type === 'income' ? 'Income' : 'Uncategorized');
+  out.category = snapCategoryToList(rawCategory, categoryNames)
+    || snapCategoryToList(out.title, categoryNames)
+    || rawCategory;
+
   if (!out.time || !String(out.time).trim()) out.time = '12:00';
   if (out.location == null) out.location = '';
-  if (!out.forecast_type) out.forecast_type = 'F';
+
+  // forecast_type is ALWAYS 'F' here. 'RF' means Rollover Forecast — a
+  // distinct accumulating-budget feature, NOT "recurring forecast" — and must
+  // never be set by the LLM. Recurrence is expressed solely via `frequency`.
+  out.forecast_type = 'F';
 
   return out;
 }
@@ -147,9 +178,12 @@ async function buildUpdateTransactionInput(args = {}, ctx = {}, preloadedExistin
   if (args.end && moment(args.end).isValid()) merged.end = moment(args.end).toISOString();
 
   if (args.frequency !== undefined && Number.isFinite(Number(args.frequency))) {
-    const freq = Number(args.frequency);
-    merged.frequency = freq;
-    merged.forecast_type = freq === FREQUENCY_ONCE ? 'F' : 'RF';
+    // Recurrence lives ONLY in `frequency`. Never touch forecast_type here:
+    // 'RF' means Rollover Forecast (a distinct accumulating-budget feature),
+    // and deriving it from frequency was silently converting ordinary
+    // recurring forecasts into rollover budgets on every edit. The existing
+    // row's forecast_type (already in `merged`) is preserved as-is.
+    merged.frequency = Number(args.frequency);
   }
 
   if (!merged.display_name || !String(merged.display_name).trim()) merged.display_name = merged.title;
@@ -358,15 +392,38 @@ const functionMap = {
     const { userId, token, accountId } = ctx;
     const body = normalizeCreateTransactionInput(args, ctx);
     const result = await createTransaction({ userId, accountId, token, body });
-    return result;
+    // Normalize the backend response ({ message, data: { id, groupid, ... } })
+    // into a stable shape so confirmations always carry the ids and the
+    // controller can emit a structured transactionResult to the client.
+    const data = result && typeof result === 'object' ? (result.data || {}) : {};
+    return {
+      success: true,
+      action: 'create',
+      transaction_id: data.id ?? null,
+      group_id: data.groupid ?? null,
+      title: body.title,
+      amount: body.amount,
+      type: body.type,
+      category: body.category,
+      start: body.start,
+      frequency: body.frequency,
+      message: (result && result.message) || 'Transaction has been successfully created.',
+    };
   },
 
   async deleteTransaction(args, ctx) {
-    const { userId, transaction_id, token, body } = args;
-    const { id } = ctx;
-    const transactionId = id || transaction_id;
-    const result = await deleteTransaction({ userId, transactionId, token, body });
-    return result;
+    // Identity comes from ctx; the schema sends `transactionid` (older model
+    // outputs may use transaction_id).
+    const { userId, token } = ctx;
+    const transactionId = args.transactionid || args.transaction_id || ctx.id;
+    if (!transactionId) throw new Error('transactionid is required to delete a transaction');
+    const result = await deleteTransaction({ userId, transactionId, token });
+    return {
+      success: true,
+      action: 'delete',
+      transaction_id: transactionId,
+      message: (result && result.message) || 'Transaction has been deleted.',
+    };
   },
 
   // Update an existing forecasted transaction. Identity (userId/token) comes
@@ -376,7 +433,19 @@ const functionMap = {
     const { userId, token } = ctx;
     const body = await buildUpdateTransactionInput(args, ctx);
     const result = await updateTransaction({ userId, transactionId: body.transactionid, token, body });
-    return result;
+    return {
+      success: true,
+      action: 'update',
+      transaction_id: body.transactionid,
+      group_id: body.groupid ?? null,
+      title: body.title,
+      amount: body.amount,
+      type: body.type,
+      category: body.category,
+      start: body.start,
+      frequency: body.frequency,
+      message: (result && result.message) || 'Transaction has been successfully updated.',
+    };
   },
 
   // ── Simulation ("what-if") propose tools ──────────────────────────────────
