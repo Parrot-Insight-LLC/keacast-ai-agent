@@ -36,7 +36,9 @@ typical US retail pricing — never claim they are live prices.
 Offer VARIETY across quality/price levels, not just the cheapest picks. When the item category
 supports it, include at least one "budget" option (store brand or discount retailer), at least
 one "standard" name-brand option, and at least one "premium" option (organic, specialty, or
-premium brand). Order options budget first, premium last.
+premium brand). Order options budget first, premium last. Each option must come from a
+DIFFERENT store — never repeat the same store across options, even if that store carries
+multiple product lines that would fit different tiers.
 
 When a shopper region is provided, adjust price estimates for that region's typical cost of
 living and prefer retailers with a strong presence there (e.g. Publix in the Southeast, H-E-B
@@ -66,6 +68,24 @@ const VALID_TIERS = ['budget', 'standard', 'premium'];
 function normalizeTier(tier) {
   const t = String(tier || '').trim().toLowerCase();
   return VALID_TIERS.includes(t) ? t : 'standard';
+}
+
+/**
+ * Keep the FIRST option per store (case-insensitive). The prompt forbids
+ * repeating a store, but that's advisory — this is the guarantee. Options
+ * arrive budget-first, so a duplicated store keeps its cheapest listing and
+ * drops the later repeat. Options with no store name are kept as-is (nothing
+ * meaningful to dedupe on).
+ */
+function dedupeByStore(options) {
+  const seen = new Set();
+  return options.filter(o => {
+    const key = String(o.store || '').trim().toLowerCase();
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /**
@@ -167,9 +187,10 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate, ex
     normalizedName: parsed.normalizedName || String(itemName).trim(),
     category: parsed.category || 'general',
     isTaxable: parsed.isTaxable !== false,
+    // Dedupe BEFORE the slice so a dropped duplicate store doesn't shrink
+    // the final count below what the model actually offered.
     options: Array.isArray(parsed.options)
-      ? parsed.options
-          .filter(o => o && Number(o.estimatedPrice) > 0)
+      ? dedupeByStore(parsed.options.filter(o => o && Number(o.estimatedPrice) > 0))
           .slice(0, 5)
           .map(o => ({
             store: String(o.store || ''),
