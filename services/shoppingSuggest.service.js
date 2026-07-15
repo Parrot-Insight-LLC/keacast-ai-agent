@@ -54,33 +54,49 @@ Respond ONLY with JSON matching this shape:
  * @param {number} [params.quantity]
  * @param {object} [params.region]        { state?, zip?, city? }
  * @param {number} [params.userEstimate]  the user's current unit-price estimate
+ * @param {Array}  [params.excludeOptions] options already shown to the user
+ *                 ([{ store, brand, product }]) — "generate more" requests.
+ *                 When present, the cache is bypassed both ways (a variation
+ *                 request must not serve nor overwrite the base entry) and
+ *                 the model is told not to repeat them.
  * @returns {Promise<object>} { normalizedName, category, isTaxable, userPriceFlag, options, cached }
  */
-async function suggestItemOptions({ itemName, quantity, region, userEstimate }) {
+async function suggestItemOptions({ itemName, quantity, region, userEstimate, excludeOptions }) {
   if (!itemName || !String(itemName).trim()) {
     throw new Error('itemName is required');
   }
+
+  const exclusions = Array.isArray(excludeOptions)
+    ? excludeOptions
+        .map(o => [o && o.store, o && o.brand, o && o.product].filter(Boolean).join(' '))
+        .filter(s => s.trim())
+    : [];
+  const isMoreRequest = exclusions.length > 0;
 
   const key = cacheKey(itemName, region);
 
   // Cache first (region-scoped). userEstimate is intentionally NOT part of the
   // key — the options are the same; only the flag depends on it, so recompute
-  // that cheaply against the cached options.
-  try {
-    const cached = await redis.get(key);
-    if (cached) {
-      const parsed = JSON.parse(cached);
-      // Ignore degenerate entries cached before the empty-result guard below
-      // existed — fall through and regenerate instead of serving "no
-      // options" for the rest of the TTL.
-      if (Array.isArray(parsed.options) && parsed.options.length > 0) {
-        parsed.cached = true;
-        parsed.userPriceFlag = computePriceFlag(parsed.options, userEstimate);
-        return parsed;
+  // that cheaply against the cached options. "More options" requests skip the
+  // cache entirely: serving the cached set would return exactly what the user
+  // already has on screen.
+  if (!isMoreRequest) {
+    try {
+      const cached = await redis.get(key);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        // Ignore degenerate entries cached before the empty-result guard below
+        // existed — fall through and regenerate instead of serving "no
+        // options" for the rest of the TTL.
+        if (Array.isArray(parsed.options) && parsed.options.length > 0) {
+          parsed.cached = true;
+          parsed.userPriceFlag = computePriceFlag(parsed.options, userEstimate);
+          return parsed;
+        }
       }
+    } catch (e) {
+      console.warn('[shoppingSuggest] cache read failed:', e.message);
     }
-  } catch (e) {
-    console.warn('[shoppingSuggest] cache read failed:', e.message);
   }
 
   const userParts = [`Item: ${String(itemName).trim()}`];
@@ -90,6 +106,13 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate }) 
   }
   if (userEstimate != null && Number(userEstimate) > 0) {
     userParts.push(`User's own unit-price estimate: $${Number(userEstimate).toFixed(2)}`);
+  }
+  if (isMoreRequest) {
+    userParts.push(
+      'The shopper has already seen these options — do NOT repeat them; propose DIFFERENT ' +
+      'stores, brands, or products:\n' +
+      exclusions.map(s => `- ${s}`).join('\n')
+    );
   }
 
   const data = await queryAzureOpenAI(
@@ -104,7 +127,8 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate }) 
       // tool_calls (null content) instead of the JSON contract above.
       tools: null,
       tool_choice: undefined,
-      temperature: 0.2,
+      // Variation requests need headroom to diverge from the first batch.
+      temperature: isMoreRequest ? 0.6 : 0.2,
       max_tokens: 900,
       timeout: 20000,
       response_format: { type: 'json_object' }
@@ -143,8 +167,10 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate }) 
 
   // Only cache useful results. Caching an empty option set would pin the
   // degenerate answer to this item+region for the full TTL, making one bad
-  // model response look like a permanently broken feature.
-  if (result.options.length > 0) {
+  // model response look like a permanently broken feature. Variation
+  // ("more options") batches are never cached — they would overwrite the
+  // base entry with a partial, exclusion-shaped answer.
+  if (!isMoreRequest && result.options.length > 0) {
     try {
       await redis.set(key, JSON.stringify({ ...result, userPriceFlag: null }), 'EX', CACHE_TTL_SECONDS);
     } catch (e) {

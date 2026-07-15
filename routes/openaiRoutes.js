@@ -124,12 +124,12 @@ router.post('/summarization', summarization);
 // persists to shopping_list_item_suggestions). Redis-cached per item+region.
 router.post('/shopping/suggest-item', async (req, res) => {
   try {
-    const { itemName, quantity, region, userEstimate } = req.body || {};
+    const { itemName, quantity, region, userEstimate, excludeOptions } = req.body || {};
     if (!itemName || !String(itemName).trim()) {
       return res.status(400).json({ success: false, message: 'itemName is required' });
     }
     const { suggestItemOptions } = require('../services/shoppingSuggest.service');
-    const result = await suggestItemOptions({ itemName, quantity, region, userEstimate });
+    const result = await suggestItemOptions({ itemName, quantity, region, userEstimate, excludeOptions });
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error in shopping suggest-item:', error.message);
