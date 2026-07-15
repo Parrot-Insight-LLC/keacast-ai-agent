@@ -14,7 +14,10 @@ const { queryAzureOpenAI } = require('./openaiService');
 const redis = require('./redisService');
 
 const CACHE_TTL_SECONDS = 60 * 60 * 24; // 24h — price estimates go stale slowly
-const CACHE_PREFIX = 'shopping:suggest:';
+// v2: options carry a `tier` field and prices are region-adjusted. The version
+// bump orphans v1 entries (no tier, no regional adjustment) instead of serving
+// the old shape for up to 24h after deploy.
+const CACHE_PREFIX = 'shopping:suggest:v2:';
 
 function normalizeName(itemName) {
   return String(itemName || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -30,23 +33,40 @@ Given a shopping list item, return realistic purchase options a shopper would fi
 retailers (Walmart, Target, Kroger, Publix, Costco, Aldi, etc.). Prices are ESTIMATES based on
 typical US retail pricing — never claim they are live prices.
 
+Offer VARIETY across quality/price levels, not just the cheapest picks. When the item category
+supports it, include at least one "budget" option (store brand or discount retailer), at least
+one "standard" name-brand option, and at least one "premium" option (organic, specialty, or
+premium brand). Order options budget first, premium last.
+
+When a shopper region is provided, adjust price estimates for that region's typical cost of
+living and prefer retailers with a strong presence there (e.g. Publix in the Southeast, H-E-B
+in Texas, WinCo in the West, Wegmans in the Northeast).
+
 Respond ONLY with JSON matching this shape:
 {
   "normalizedName": string,          // cleaned-up item name, e.g. "milk" -> "Milk (1 gallon)"
   "category": string,                // one of: general, grocery, medicine, clothing, electronics, household, other
   "isTaxable": boolean,              // typical US treatment (groceries often reduced/exempt)
   "userPriceFlag": string|null,      // if userEstimate provided and clearly unrealistic, one short sentence; else null
-  "options": [                       // 3-5 options, best value first
+  "options": [                       // 4-5 options spanning price tiers, budget first
     {
       "store": string,
       "brand": string,
       "product": string,
       "size": string,
+      "tier": string,                // "budget" | "standard" | "premium"
       "estimatedPrice": number,      // unit price in USD
       "confidence": number           // 0-1, how typical/reliable this estimate is
     }
   ]
 }`;
+
+const VALID_TIERS = ['budget', 'standard', 'premium'];
+
+function normalizeTier(tier) {
+  const t = String(tier || '').trim().toLowerCase();
+  return VALID_TIERS.includes(t) ? t : 'standard';
+}
 
 /**
  * @param {object} params
@@ -156,6 +176,7 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate, ex
             brand: String(o.brand || ''),
             product: String(o.product || ''),
             size: String(o.size || ''),
+            tier: normalizeTier(o.tier),
             estimatedPrice: Math.round(Number(o.estimatedPrice) * 100) / 100,
             confidence: Math.min(1, Math.max(0, Number(o.confidence) || 0.5)),
             source: 'llm'
@@ -182,11 +203,15 @@ async function suggestItemOptions({ itemName, quantity, region, userEstimate, ex
 }
 
 // Deterministic outlier check: flag when the user's estimate is more than 3x
-// (or under a third of) the median suggested price.
+// (or under a third of) the median suggested price. Compares against
+// standard-tier options when any exist — premium picks would otherwise skew
+// the median upward and mislabel reasonable estimates as "low".
 function computePriceFlag(options, userEstimate) {
   const est = Number(userEstimate);
   if (!Array.isArray(options) || options.length === 0 || !Number.isFinite(est) || est <= 0) return null;
-  const prices = options.map(o => Number(o.estimatedPrice)).filter(p => p > 0).sort((a, b) => a - b);
+  const standard = options.filter(o => (o.tier || 'standard') === 'standard');
+  const pool = standard.length > 0 ? standard : options;
+  const prices = pool.map(o => Number(o.estimatedPrice)).filter(p => p > 0).sort((a, b) => a - b);
   if (!prices.length) return null;
   const median = prices[Math.floor(prices.length / 2)];
   if (est > median * 3) {
