@@ -1196,19 +1196,78 @@ function isAffirmativeMessage(message, draft) {
 // confirmation? When the dialogue-state draft was evicted or never staged,
 // this lets a valid confirmation still arm the gate — the model's own args
 // then supply the values (the empty draft merge is a no-op).
-function transcriptShowsPendingProposal(history) {
-  if (!Array.isArray(history) || history.length === 0) return false;
-  let lastAssistant = null;
+function lastAssistantTurnText(history) {
+  if (!Array.isArray(history) || history.length === 0) return null;
   for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i]?.role === 'assistant') { lastAssistant = String(history[i].content || ''); break; }
+    if (history[i]?.role === 'assistant') return String(history[i].content || '');
     if (history[i]?.role === 'user') break; // only the immediately-preceding assistant turn counts
   }
+  return null;
+}
+
+function transcriptShowsPendingProposal(history) {
+  const lastAssistant = lastAssistantTurnText(history);
   if (!lastAssistant) return false;
   const t = lastAssistant.toLowerCase();
   const hasAmount = /(^|[^\w])\$\s*\d/.test(lastAssistant) || /\b\d[\d,]*(\.\d+)?\s*(dollars|bucks)\b/.test(t);
   const asksToConfirm =
     /\b(confirm|shall i|should i|would you like|want me to|do you want|sound good|look good|looks right|is (this|that) (right|correct|ok|okay)|ready to (add|create)|go ahead)\b/.test(t);
   return hasAmount && asksToConfirm;
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Best-effort extraction of the concrete values the assistant proposed in its
+// LAST message. This closes the "proposed $16 Racetrac, created $50 Expense"
+// failure: when the model proposed in prose without staging a draft, the
+// confirmation-turn write otherwise ships whatever the model re-estimates, and
+// the normalizer's defaults fill the rest. The transcript proposal is what the
+// user actually saw and confirmed, so it is authoritative over the model's
+// re-estimated args (but never over an explicitly staged draft).
+// Returns null when there's nothing extractable.
+function extractProposalFromMessage(text, categoryNames) {
+  const t = String(text || '');
+  if (!t.trim()) return null;
+  const out = { amounts: [] };
+
+  // Distinct dollar amounts mentioned in the proposal ($16, $1,250.50, ...).
+  const amountMatches = t.match(/\$\s*\d[\d,]*(\.\d+)?/g) || [];
+  out.amounts = Array.from(new Set(
+    amountMatches.map((m) => Number(m.replace(/[^0-9.]/g, ''))).filter((n) => Number.isFinite(n) && n > 0)
+  ));
+  // Only when exactly ONE amount was mentioned is it unambiguous enough to
+  // adopt directly (a message mixing balances and the proposal has several).
+  if (out.amounts.length === 1) out.amount = out.amounts[0];
+
+  // ISO date — the assistant states proposal dates as YYYY-MM-DD per prompt.
+  const iso = t.match(/\b20\d{2}-\d{2}-\d{2}\b/);
+  if (iso && moment(iso[0], 'YYYY-MM-DD', true).isValid()) out.start = iso[0];
+
+  // Category: adopt only when exactly one of the user's REAL categories is
+  // mentioned, so we never guess between two. Lookarounds instead of \b so
+  // names ending in non-word chars ("Fees (misc)") still match; generic
+  // type-words ("Expense" as a category name) lose to a specific match since
+  // "expense" appears in nearly every proposal sentence.
+  if (Array.isArray(categoryNames) && categoryNames.length > 0) {
+    const mentions = (n) => new RegExp(`(?<!\\w)${escapeRegExp(String(n).trim())}(?!\\w)`, 'i').test(t);
+    let found = categoryNames.filter((n) => n && String(n).trim() && mentions(n));
+    if (found.length > 1) {
+      const specific = found.filter((n) => !/^(expense|income|transaction)s?$/i.test(String(n).trim()));
+      if (specific.length > 0) found = specific;
+    }
+    if (found.length === 1) out.category = found[0];
+  }
+
+  // Type: unambiguous expense/income wording only.
+  const saysExpense = /\bexpense\b/i.test(t);
+  const saysIncome = /\b(income|deposit|paycheck)\b/i.test(t);
+  if (saysExpense && !saysIncome) out.type = 'Expense';
+  else if (saysIncome && !saysExpense) out.type = 'Income';
+
+  const hasSignal = out.amounts.length > 0 || out.start || out.category || out.type;
+  return hasSignal ? out : null;
 }
 
 // Compact, hard-capped block describing the in-progress action for the system
@@ -1396,12 +1455,27 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           ctx.pendingConfirmationAtStart === true ||
           ctx.draftCompleteAtStart === true ||
           ctx.proposalInTranscript === true;
-        if (proposalExists) {
+        // The confirmation must resolve to concrete values from SOMEWHERE the
+        // user actually saw: the staged draft, or values extractable from the
+        // proposal message itself. Without either, a follow-up write would run
+        // on re-estimated args + normalizer defaults — stage the draft first.
+        const draftObj = state.draftTransaction || {};
+        const draftHasSlots = ['title', 'type', 'amount', 'category', 'start'].some(
+          (k) => draftObj[k] !== undefined && draftObj[k] !== null && String(draftObj[k]).trim() !== ''
+        );
+        const transcriptHasValues = !!(ctx.transcriptProposal && (ctx.transcriptProposal.amount !== undefined || ctx.transcriptProposal.amounts?.length));
+        if (proposalExists && (draftHasSlots || transcriptHasValues)) {
           ctx.userAffirmative = true;
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             ok: true,
             confirmed: true,
-            message: 'Confirmation registered. Now call createTransaction (or updateTransaction) with the confirmed draft values — do not re-ask the user.'
+            message: 'Confirmation registered. Now call createTransaction (or updateTransaction) with the EXACT values you proposed to the user — same amount, same date, same category, same title. Do NOT re-estimate anything, and do not re-ask the user.'
+          }) });
+        } else if (proposalExists) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: false,
+            confirmed: false,
+            message: 'The proposed values were never staged and could not be recovered from the conversation. Call updateDraftTransaction NOW with the exact values you proposed (title, type, amount, category, start), then call confirmTransaction again in the same turn.'
           }) });
         } else {
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
@@ -1474,6 +1548,46 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         // drift a confirmed value (e.g. November -> August). Then snap the
         // category to the user's real category list.
         const effectiveArgs = applyDraftAndCategory(args, state.draftTransaction, ctx.categoryNames);
+
+        // When the proposal only lives in the transcript (model proposed in
+        // prose without staging a draft), the extracted proposal values are
+        // authoritative for any slot the draft didn't fill — the user confirmed
+        // THOSE values, not whatever the model re-estimates this turn.
+        if (ctx.transcriptProposal) {
+          const draft = state.draftTransaction || {};
+          const draftHas = (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== '';
+          for (const k of ['amount', 'start', 'category', 'type']) {
+            const v = ctx.transcriptProposal[k];
+            if (v !== undefined && v !== null && !draftHas(k)) effectiveArgs[k] = v;
+          }
+          // A generic default title paired with an adopted proposal category
+          // reads better as the category ("Gas") than as "Expense".
+          if (!draftHas('title') && (!effectiveArgs.title || /^(expense|income|transaction)$/i.test(String(effectiveArgs.title).trim())) && ctx.transcriptProposal.category) {
+            effectiveArgs.title = ctx.transcriptProposal.category;
+          }
+        }
+
+        // Cross-check: on a confirmation turn the final amount must be one the
+        // user actually saw in the proposal. A mismatch means the model
+        // re-estimated (the "$16 proposed, $50 created" bug) — block and force
+        // a fresh propose→confirm cycle instead of writing the wrong number.
+        const proposedAmounts = ctx.transcriptProposal?.amounts || [];
+        const finalAmount = Number(effectiveArgs.amount);
+        if (proposedAmounts.length > 0 && Number.isFinite(finalAmount) && finalAmount !== 0) {
+          const matchesProposal = proposedAmounts.some(
+            (p) => Math.abs(p - Math.abs(finalAmount)) <= Math.max(1, p * 0.05)
+          );
+          if (!matchesProposal) {
+            console.warn(`[write-audit] AMOUNT MISMATCH BLOCKED user=${ctx.userId} tool=${name} finalAmount=${finalAmount} proposedAmounts=${JSON.stringify(proposedAmounts)}`);
+            blockedWrites.push({ tool: name, reason: 'amount_mismatch_with_proposal' });
+            toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+              blocked: true,
+              reason: 'amount_mismatch_with_proposal',
+              message: `The amount you passed (${finalAmount}) does not match any amount from your own proposal (${proposedAmounts.map((p) => '$' + p).join(', ')}). Never re-estimate on the confirmation turn. Call ${name} again using the EXACT amount, date, and category from your previous proposal message.`
+            }) });
+            continue;
+          }
+        }
 
         // Forensic audit trail for every real write: what the draft held, what
         // the model asked for, and what we actually sent to the backend.
@@ -1927,8 +2041,8 @@ exports.chat = async (req, res) => {
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
     - Creating a transaction should feel effortless. The user does NOT have to provide a title, amount, type, category, date, or frequency. ESTIMATE every field you weren't given from this conversation, the account context, and the user's similar/recurring/recent transactions (e.g. estimate a Netflix expense at their typical streaming amount, a paycheck from their recurring income). Never make the user fill in details just to satisfy the tool.
-    - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction and they have agreed. When you propose, ALWAYS state a SINGLE concrete amount — if your estimate is a range, pick one reasonable figure (such as the midpoint of the range), state it plainly, and ask them to confirm or adjust. Never leave the amount as a range going into the confirmation. On the turn the user first expresses intent, do NOT call the tool — propose the concrete details and ask them to confirm or adjust. Only call createTransaction after they agree. If they tweak a value, restate the updated proposal and confirm again.
-    - CONFIRMATION HANDLING: Treat the user's reply as confirmation to create the transaction you just proposed whenever it is affirmative OR an add/create instruction — e.g. "yes", "yes please", "go ahead", "do it", "confirm", "sounds good", "please add this", "please add this forecast", "add it", "add that", "create it", "log it", "put it in my forecast", or any natural equivalent. When you get any of these and your previous message proposed (or discussed) exactly one transaction, FIRST call confirmTransaction (this registers the confirmation), THEN immediately call createTransaction using those proposed values (read them from your previous message in the history). If the user confirmed but adjusted a value ("yes, but make it $45"), call updateDraftTransaction with the adjusted value BEFORE confirmTransaction. Do NOT start over and do NOT re-ask for details you already proposed.
+    - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction and they have agreed. When you propose, ALWAYS state a SINGLE concrete amount — if your estimate is a range, pick one reasonable figure (such as the midpoint of the range), state it plainly, and ask them to confirm or adjust. Never leave the amount as a range going into the confirmation. On the turn the user first expresses intent, do NOT call the tool — propose the concrete details and ask them to confirm or adjust. EVERY TIME you propose a transaction in prose you MUST also call updateDraftTransaction in that same turn with those exact values (pendingConfirmation:true) — a proposal that was never staged is the #1 cause of the wrong transaction being created later. Only call createTransaction after they agree. If they tweak a value, restate the updated proposal and confirm again.
+    - CONFIRMATION HANDLING: Treat the user's reply as confirmation to create the transaction you just proposed whenever it is affirmative OR an add/create instruction — e.g. "yes", "yes please", "go ahead", "do it", "confirm", "sounds good", "please add this", "please add this forecast", "add it", "add that", "create it", "log it", "put it in my forecast", or any natural equivalent. When you get any of these and your previous message proposed (or discussed) exactly one transaction, FIRST call confirmTransaction (this registers the confirmation), THEN immediately call createTransaction, copying the EXACT values from your previous proposal message — the same amount, the same date, the same category, the same title. NEVER re-estimate, round, or substitute a value on the confirmation turn: if you proposed "$16 at Racetrac tomorrow" you must create exactly $16, Racetrac, tomorrow's date (a mismatched amount will be refused by the server). If the user confirmed but adjusted a value ("yes, but make it $45"), call updateDraftTransaction with the adjusted value BEFORE confirmTransaction. Do NOT start over and do NOT re-ask for details you already proposed.
     - NEVER reply with "which forecast/transaction would you like to add?" when your own previous turn already identified exactly one thing (e.g. you just asked "would you like to create a transaction for the item we discussed?"). "This forecast"/"this transaction" unambiguously refers to that item — create it. The ONLY time you may ask a clarifying question is if you genuinely proposed two or more clearly different transactions in the same breath. Also note: in Keacast "add this as a forecast" / "add this forecast" means CREATE a new forecasted transaction for the item just discussed — it does NOT mean look up an existing forecast, so do NOT call read tools (getRecurringForecasts/getUpcomingTransactions) to "find" it.
     - STAY ON TOPIC: The transaction you create must be the one that was actually being DISCUSSED with the user (the item you just proposed in this conversation). NEVER substitute an unrelated item that merely appears in the account context or the "Recent posted"/"Upcoming forecasted" lists (e.g. a paycheck). The CURRENT CONTEXT block is reference data only — it is never the thing to create unless the user explicitly asked for it.
     - Use the full chat history above as memory: remember the amounts, dates, merchants, goals, and any transaction you already proposed earlier in this conversation, and reuse them so the user never has to repeat themselves (the confirmation turn relies on this).
@@ -2118,6 +2232,13 @@ exports.chat = async (req, res) => {
     // Redis-eviction fallback: a proposal visible in the client transcript can
     // arm the write gate even when the dialogue-state draft is gone/incomplete.
     const proposalInTranscript = transcriptShowsPendingProposal(history);
+    // Concrete values from the last assistant proposal — the authoritative
+    // payload on the confirmation turn when no draft was staged (or the draft
+    // is missing slots). Prevents the model's re-estimated args + normalizer
+    // defaults from creating a different transaction than the one proposed.
+    const transcriptProposal = proposalInTranscript
+      ? extractProposalFromMessage(lastAssistantTurnText(history), categoryNames)
+      : null;
 
     const ctx = {
       userId,
@@ -2129,6 +2250,7 @@ exports.chat = async (req, res) => {
       draftCompleteAtStart,
       userAffirmative,
       proposalInTranscript,
+      transcriptProposal,
       categoryNames,
       simulationMode,
       goalsAvailable,
@@ -4147,6 +4269,8 @@ exports.__testables = {
   emptyDialogueState,
   isAffirmativeMessage,
   transcriptShowsPendingProposal,
+  lastAssistantTurnText,
+  extractProposalFromMessage,
   draftSignature,
   computeDraftMissingFields,
   isDraftProposable,
