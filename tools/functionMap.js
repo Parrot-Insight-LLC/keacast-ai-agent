@@ -805,6 +805,115 @@ const functionMap = {
     const { userId, token, accountId } = ctx;
     const result = await recallFacts({ userId, token, accountId, limit: args.limit });
     return result;
+  },
+
+  /**
+   * Phase 6: deep-fetch for on-screen focus when the uiContext snapshot lacks
+   * fields the user asked about. Fail-soft; prefer ON-SCREEN CONTEXT first.
+   */
+  async getFocusedEntityDetails(args = {}, ctx = {}) {
+    const typeRaw = String(args.type || args.entityType || '').toLowerCase();
+    const id = args.id != null ? args.id
+      : (args.transactionId != null ? args.transactionId
+        : (args.transactionid != null ? args.transactionid
+          : (args.goalId != null ? args.goalId : args.goalid)));
+    const date = typeof args.date === 'string' ? args.date.trim() : '';
+    const type = typeRaw || (id != null ? 'transaction' : (date ? 'day' : ''));
+
+    if (type === 'transaction') {
+      if (id == null || String(id).trim() === '') {
+        return { ok: false, error: 'id_required', message: 'transaction id is required (from focusedEntity / uiReferent).' };
+      }
+      const row = await fetchTransactionRow(id, ctx.token);
+      if (!row || typeof row !== 'object' || Object.keys(row).length === 0) {
+        return { ok: false, error: 'not_found', message: `No transaction found for id ${id}.` };
+      }
+      return {
+        ok: true,
+        entity: {
+          type: 'transaction',
+          id: row.transactionid ?? row.transaction_id ?? id,
+          title: row.display_name || row.title || row.merchant_name || null,
+          amount: row.amount != null ? Number(row.amount) : null,
+          category: row.category || null,
+          date: row.start ? String(row.start).slice(0, 10) : (row.startDate ? String(row.startDate).slice(0, 10) : null),
+          frequency: row.frequency != null ? Number(row.frequency) : null,
+          forecast_type: row.forecast_type || null,
+          status: row.status || null,
+          groupid: row.groupid || row.group_id || null,
+          description: row.description ? String(row.description).slice(0, 200) : null,
+        },
+        note: 'Use these fields to answer the user. Do not invent missing values.',
+      };
+    }
+
+    if (type === 'goal') {
+      if (id == null || String(id).trim() === '') {
+        return { ok: false, error: 'id_required', message: 'goal id is required.' };
+      }
+      try {
+        const raw = await getGoal({ goalId: id, token: ctx.token });
+        const g = raw?.goal || raw;
+        if (!g || typeof g !== 'object' || (g.goalid == null && !g.title)) {
+          return { ok: false, error: 'not_found', message: `No goal found for id ${id}.` };
+        }
+        const target = Number(g.target_amount) || 0;
+        const accumulated = Number(g.accumulated_amount) || 0;
+        return {
+          ok: true,
+          entity: {
+            type: 'goal',
+            id: g.goalid ?? id,
+            title: g.title || g.display_name || null,
+            target_amount: target,
+            accumulated_amount: accumulated,
+            progress_pct: target > 0 ? Math.min(100, Math.round((accumulated / target) * 100)) : 0,
+            status: g.status || null,
+            end_date: g.end_date ? String(g.end_date).slice(0, 10) : null,
+            frequency: g.frequency != null ? String(g.frequency) : null,
+          },
+          note: 'Use these exact goal numbers. Prefer getGoals if you need the full list.',
+        };
+      } catch (e) {
+        return { ok: false, error: 'lookup_failed', message: e.message || 'Goal lookup failed.' };
+      }
+    }
+
+    if (type === 'day') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return { ok: false, error: 'date_required', message: 'type=day requires date as YYYY-MM-DD.' };
+      }
+      if (!ctx.accountId) {
+        return { ok: false, error: 'no_account', message: 'No account selected.' };
+      }
+      try {
+        const txs = await getUpcomingByAccountAndRange(ctx.accountId, date, date);
+        const list = Array.isArray(txs) ? txs : [];
+        const top = list.slice(0, 8).map((t) => ({
+          id: t.transactionid ?? t.id,
+          title: t.display_name || t.title || t.merchant_name || 'Transaction',
+          amount: t.amount != null ? Number(t.amount) : null,
+        }));
+        return {
+          ok: true,
+          entity: {
+            type: 'day',
+            date,
+            txCount: list.length,
+            topTransactions: top,
+          },
+          note: 'Compact day sample only — not a full calendar dump. Prefer ON-SCREEN topVisibleTx when present.',
+        };
+      } catch (e) {
+        return { ok: false, error: 'lookup_failed', message: e.message || 'Day lookup failed.' };
+      }
+    }
+
+    return {
+      ok: false,
+      error: 'unsupported',
+      message: 'Provide type=transaction|goal|day with id and/or date from ON-SCREEN CONTEXT / uiReferent.',
+    };
   }
 };
 

@@ -457,6 +457,32 @@
   {
     "type": "function",
     "function": {
+      "name": "getFocusedEntityDetails",
+      "description": "READ tool: fetch fuller details for the on-screen focused entity (or last uiReferent) when ON-SCREEN CONTEXT lacks a field the user asked about (e.g. frequency, description, goal progress). Prefer the snapshot first — only call this when a needed detail is missing. Do NOT use this to invent UI state. Supports type transaction|goal|day.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["transaction", "goal", "day"],
+            "description": "Entity kind. Defaults to transaction when id is provided."
+          },
+          "id": {
+            "type": "string",
+            "description": "transactionid or goalid from focusedEntity / uiReferent."
+          },
+          "date": {
+            "type": "string",
+            "description": "YYYY-MM-DD for type=day, or to help locate a transaction."
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "openTransactionSearch",
       "description": "NON-WRITING UI action: opens the Keacast transaction search panel on the user's screen, optionally pre-filled with a search term that runs immediately. Use when the user asks you to open search or to find/look up/show transactions IN THE APP (e.g. 'search for my Uber transactions', 'open search', 'pull up my Netflix charges'). The chat window minimizes and the search results appear front and center. This does NOT return transaction data to you — when YOU need the data to answer a question, use the read tools (getUserTransactions, getUpcomingTransactions, getRecurringForecasts) instead. After calling this, tell the user briefly that the search is opening; do not invent result counts or amounts.",
       "parameters": {
