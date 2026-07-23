@@ -56,10 +56,29 @@ const CONFIRM_TOOL = 'confirmTransaction';
 // Simulation ("what-if") propose tools. These never write — each returns a
 // structured simOp the frontend applies to its client-side simulation overlay.
 const SIM_PROPOSE_TOOLS = new Set(['proposeSimulationAdd', 'proposeSimulationModify', 'proposeSimulationRemove']);
-// Non-writing UI-action tool: asks the CLIENT to open its transaction search
-// panel (optionally pre-filled). Handled inline in executeToolCalls — it has no
-// functionMap executor; the action rides back to the client as uiActions.
+// Non-writing UI-action tools: ask the CLIENT to open/navigate panels.
+// Handled inline in executeToolCalls — no functionMap executors; actions ride
+// back to the client as uiActions.
 const UI_SEARCH_TOOL = 'openTransactionSearch';
+const UI_CALENDAR_DAY_TOOL = 'openCalendarDay';
+const UI_HIGHLIGHT_TX_TOOL = 'highlightTransaction';
+const UI_NAVIGATE_TOOL = 'navigateTo';
+const UI_ACTION_TOOLS = new Set([
+  UI_SEARCH_TOOL,
+  UI_CALENDAR_DAY_TOOL,
+  UI_HIGHLIGHT_TX_TOOL,
+  UI_NAVIGATE_TOOL,
+]);
+const ALLOWED_UI_NAV_ROUTES = new Set([
+  '/calendar',
+  '/insights',
+  '/profile',
+  '/settings',
+  '/financial-feed',
+  '/feed',
+  '/recurring',
+]);
+const UI_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // While the client is in Simulation Mode, ALL real writes are refused in code
 // (deleteTransaction included — it isn't in WRITE_TOOLS' confirm gate but it
 // still mutates real data). The model is redirected to the propose tools.
@@ -1832,7 +1851,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         continue;
       }
 
-      // ── Non-writing UI action: open the client's transaction search panel ──
+      // ── Non-writing UI actions: open/navigate client panels ──
       if (name === UI_SEARCH_TOOL) {
         const term = typeof args.search_term === 'string' ? args.search_term.trim() : '';
         uiActions.push({ type: 'open_search', search_term: term || null });
@@ -1841,6 +1860,75 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           opened: 'transaction_search',
           search_term: term || null,
           note: `The transaction search panel is opening on the user's screen${term ? ` pre-filled with "${term}"` : ''}. Briefly tell the user it is opening — do NOT invent result counts or amounts.`
+        }) });
+        continue;
+      }
+
+      if (name === UI_CALENDAR_DAY_TOOL) {
+        const date = typeof args.date === 'string' ? args.date.trim() : '';
+        if (!UI_DATE_RE.test(date)) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: false,
+            error: 'date_required',
+            message: 'openCalendarDay requires date as YYYY-MM-DD.',
+          }) });
+          continue;
+        }
+        uiActions.push({ type: 'open_calendar_day', date });
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          ok: true,
+          opened: 'calendar_day',
+          date,
+          note: `The calendar day ${date} is opening on the user's screen. Briefly tell them it is opening — do NOT invent balances or transactions.`
+        }) });
+        continue;
+      }
+
+      if (name === UI_HIGHLIGHT_TX_TOOL) {
+        const transactionId = args.transactionId != null ? args.transactionId
+          : (args.transactionid != null ? args.transactionid : null);
+        const dateRaw = typeof args.date === 'string' ? args.date.trim() : '';
+        const date = UI_DATE_RE.test(dateRaw) ? dateRaw : null;
+        if (transactionId == null || String(transactionId).trim() === '') {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: false,
+            error: 'transactionId_required',
+            message: 'highlightTransaction requires transactionId.',
+          }) });
+          continue;
+        }
+        uiActions.push({
+          type: 'highlight_transaction',
+          transactionId,
+          date,
+        });
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          ok: true,
+          opened: 'highlight_transaction',
+          transactionId,
+          date,
+          note: `The app is opening the calendar to highlight transaction ${transactionId}${date ? ` on ${date}` : ''}. Briefly tell the user it is opening — do NOT invent amounts.`
+        }) });
+        continue;
+      }
+
+      if (name === UI_NAVIGATE_TOOL) {
+        let route = typeof args.route === 'string' ? args.route.trim() : '';
+        if (!route.startsWith('/')) route = `/${route}`;
+        if (!ALLOWED_UI_NAV_ROUTES.has(route)) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: false,
+            error: 'route_not_allowed',
+            message: `navigateTo only allows: ${[...ALLOWED_UI_NAV_ROUTES].join(', ')}`,
+          }) });
+          continue;
+        }
+        uiActions.push({ type: 'navigate_to', route });
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          ok: true,
+          opened: 'navigate',
+          route,
+          note: `Navigating the user to ${route}. Briefly tell them you are taking them there — do NOT invent what is on that page.`
         }) });
         continue;
       }
@@ -2507,6 +2595,7 @@ exports.chat = async (req, res) => {
       3. PROPOSE, THEN CONFIRM: state exactly what you found and what will change ("Delete 'Food and Beverage', $35 weekly starting 2026-07-22?"). For a RECURRING transaction being deleted, ask whether to remove just that occurrence or the entire series. Wait for the user's confirmation on their next message, then call confirmTransaction followed by the write tool.
       4. deleteTransaction scope: pass scope:'single' with transactionid for one occurrence, or scope:'group' with groupid to remove the whole recurring series.
     - OPEN THE APP'S SEARCH (openTransactionSearch): When the user asks you to open search or to find/pull up/show transactions IN THE APP ("search for my Uber transactions", "show me my Netflix charges", "open search"), call openTransactionSearch with an optional search_term — the app minimizes the chat and opens its search panel front and center with the results. This tool returns NO data to you; when you need transaction data to ANSWER a question yourself, use the read tools instead. After calling it, just tell the user the search is opening — never invent counts or amounts.
+    - OPEN / NAVIGATE THE APP UI (openCalendarDay / highlightTransaction / navigateTo): When the user asks to show a calendar day, open a specific charge, or go to a screen IN THE APP, call the matching UI tool. Prefer focusedEntity / last uiReferent for "that"/"it". These return NO data — briefly say the panel/page is opening; never invent balances, lists, or page contents.
     - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:home_repair" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
 
     FINANCIAL PLANNING PLAYBOOK (follow this structure whenever the user states or implies a goal, asks "can I afford X", asks how to save/pay off/plan for something, or asks how to improve their cash flow):

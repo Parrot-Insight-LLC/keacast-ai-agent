@@ -471,6 +471,56 @@
   {
     "type": "function",
     "function": {
+      "name": "openCalendarDay",
+      "description": "NON-WRITING UI action: navigates to the calendar and opens the day-detail popup for a specific date. Use when the user asks to show/open/go to a calendar day IN THE APP (e.g. 'show me July 23 on my calendar', 'open that day'). This returns NO transaction data — briefly tell the user the day is opening; do not invent balances or charges.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "date": { "type": "string", "description": "Calendar day to open in YYYY-MM-DD form." }
+        },
+        "required": ["date"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "highlightTransaction",
+      "description": "NON-WRITING UI action: opens the calendar day for a transaction and focuses/highlights that transaction in the day popup. Use when the user asks to open/show a specific charge IN THE APP (e.g. 'open that Uber charge', 'show me transaction 123'). Prefer the focusedEntity / last uiReferent id and date when the user says 'that'/'it'. This returns NO data — briefly tell the user it is opening; do not invent amounts.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "transactionId": {
+            "type": "string",
+            "description": "The transaction id to highlight (numeric ids as strings are fine)."
+          },
+          "date": { "type": "string", "description": "Optional YYYY-MM-DD of the transaction. Strongly preferred when known so the correct day opens." }
+        },
+        "required": ["transactionId"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "navigateTo",
+      "description": "NON-WRITING UI action: navigates the Keacast app to a main screen. Use when the user asks to go to a page IN THE APP (e.g. 'go to insights', 'open my profile', 'take me to the feed'). Allowed routes: /calendar, /insights, /profile, /settings, /financial-feed (or /feed), /recurring. Briefly tell the user you are navigating; do not invent page contents.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "description": "App route to open.",
+            "enum": ["/calendar", "/insights", "/profile", "/settings", "/financial-feed", "/feed", "/recurring"]
+          }
+        },
+        "required": ["route"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "deleteTransaction",
       "description": "Deletes a FORECASTED transaction (or a whole recurring series) from the user's account. This writes real data and is confirm-gated in code: first FIND the transaction (check the RECENT WRITES THIS SESSION block for ids of transactions you just created, else look it up via getUpcomingTransactions with a date window around the date the user mentioned, or getRecurringForecasts), show the user exactly what you found (title, amount, date), and — if it is recurring — ask whether to delete just that occurrence or the entire series. Only after the user explicitly confirms (call confirmTransaction) call this tool. Use scope 'single' with transactionid for one occurrence; scope 'group' with groupid to delete every occurrence of the series. Never claim a transaction doesn't exist until a lookup with a correct date window returned no match. Only forecasted transactions (forecast_type 'F') can be deleted — actual transactions ('A') cannot.",
       "parameters": {
