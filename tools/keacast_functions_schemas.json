@@ -457,14 +457,30 @@
   {
     "type": "function",
     "function": {
-      "name": "deleteTransaction",
-      "description": "Deletes a transaction from the user's account. If the transaction is not found then return a message saying 'Transaction not found'. Always confirm with the user before deleting a transaction or a group of transactions. If the user is not sure about deleting a transaction then ask them to confirm their decision. Always list out the deleted transactions and the number of transactions deleted. Transactions can be deleted by their transactionid. If the user does not provide a transactionid then ask the user to provide it, else use the relevant information to find the transactionid found in context. Also you can only delete forecasted transaction and not actual transactions. If forecast_type is 'A' then return a message saying 'Transaction is an actual transaction and cannot be deleted'. If forecast_type is 'F' then delete the transaction.",
+      "name": "openTransactionSearch",
+      "description": "NON-WRITING UI action: opens the Keacast transaction search panel on the user's screen, optionally pre-filled with a search term that runs immediately. Use when the user asks you to open search or to find/look up/show transactions IN THE APP (e.g. 'search for my Uber transactions', 'open search', 'pull up my Netflix charges'). The chat window minimizes and the search results appear front and center. This does NOT return transaction data to you — when YOU need the data to answer a question, use the read tools (getUserTransactions, getUpcomingTransactions, getRecurringForecasts) instead. After calling this, tell the user briefly that the search is opening; do not invent result counts or amounts.",
       "parameters": {
         "type": "object",
         "properties": {
-          "transactionid": { "type": "number", "description": "The id of the forecasted transaction to delete." }
+          "search_term": { "type": "string", "description": "Text to pre-fill and run in the search box (merchant name, transaction title, category, amount, etc.). Omit to just open the empty search panel." }
         },
-        "required": ["transactionid"]
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "deleteTransaction",
+      "description": "Deletes a FORECASTED transaction (or a whole recurring series) from the user's account. This writes real data and is confirm-gated in code: first FIND the transaction (check the RECENT WRITES THIS SESSION block for ids of transactions you just created, else look it up via getUpcomingTransactions with a date window around the date the user mentioned, or getRecurringForecasts), show the user exactly what you found (title, amount, date), and — if it is recurring — ask whether to delete just that occurrence or the entire series. Only after the user explicitly confirms (call confirmTransaction) call this tool. Use scope 'single' with transactionid for one occurrence; scope 'group' with groupid to delete every occurrence of the series. Never claim a transaction doesn't exist until a lookup with a correct date window returned no match. Only forecasted transactions (forecast_type 'F') can be deleted — actual transactions ('A') cannot.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "transactionid": { "type": "number", "description": "The id of the forecasted transaction occurrence to delete (required for scope 'single')." },
+          "scope": { "type": "string", "enum": ["single", "group"], "description": "'single' (default) deletes one occurrence by transactionid; 'group' deletes the ENTIRE recurring series by groupid." },
+          "groupid": { "type": "string", "description": "The recurring series' group id (required for scope 'group'). Found on transactions returned by the read tools and in RECENT WRITES." }
+        },
+        "required": []
       }
     }
   }

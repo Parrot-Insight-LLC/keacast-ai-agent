@@ -16,7 +16,7 @@ const {
   getUpcomingByAccountAndRangeCount,
   getTransactionSummary
 } = require('../services/transactions.service');
-const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction, getTransactionById, updateTransaction, getGoals, getGoal, previewGoalCadence, createGoal, updateGoal, deleteGoal, rememberFact, recallFacts } = require('./keacast_tool_layer');
+const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction, deleteGroupTransactions, getTransactionById, updateTransaction, getGoals, getGoal, previewGoalCadence, createGoal, updateGoal, deleteGoal, rememberFact, recallFacts } = require('./keacast_tool_layer');
 const moment = require('moment');
 
 // Smart data loading strategy to prevent memory issues
@@ -28,6 +28,26 @@ const SMART_LIMITS = {
 };
 
 const FREQUENCY_ONCE = 2;
+
+// Anchor a date to UTC midnight of its CALENDAR DATE. The backend derives the
+// stored date via `start.split('T')[0]`, so only the date part of the ISO
+// string matters — but building it with server-local moment() shifted the date
+// across the midnight boundary on non-UTC hosts (proposed July 16, stored
+// July 15). Take the literal YYYY-MM-DD prefix when present; otherwise parse
+// and format, falling back to the provided moment.
+function toDateAnchoredISO(value, fallbackMoment) {
+  const s = String(value || '');
+  const prefix = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  let dateStr;
+  if (prefix && moment(prefix[1], 'YYYY-MM-DD', true).isValid()) {
+    dateStr = prefix[1];
+  } else if (value && moment(value).isValid()) {
+    dateStr = moment(value).format('YYYY-MM-DD');
+  } else {
+    dateStr = fallbackMoment.format('YYYY-MM-DD');
+  }
+  return `${dateStr}T00:00:00.000Z`;
+}
 
 // Snap a model-chosen category to the user's real category list (from
 // ctx.categoryNames) so we never persist an invented category. Case-insensitive
@@ -83,19 +103,20 @@ function normalizeCreateTransactionInput(args = {}, ctx = {}) {
   out.frequency = freq;
 
   // start: default to the user's localized "today" (ctx.currentDate), else now.
+  // Dates are anchored to the literal calendar date (UTC midnight) so a
+  // server-local toISOString() can never shift them across a day boundary.
   const today = ctx.currentDate && moment(ctx.currentDate).isValid()
     ? moment(ctx.currentDate)
     : moment();
-  const start = out.start && moment(out.start).isValid() ? moment(out.start) : today.clone();
-  out.start = start.toISOString();
+  out.start = toDateAnchoredISO(out.start, today);
+  const start = moment(out.start.slice(0, 10), 'YYYY-MM-DD');
 
   // end: one-time => same day; recurring => provided end or a 1-year horizon so
   // the backend generates a sensible series instead of a single row.
   if (freq === FREQUENCY_ONCE) {
-    out.end = start.toISOString();
+    out.end = out.start;
   } else {
-    const end = out.end && moment(out.end).isValid() ? moment(out.end) : start.clone().add(1, 'year');
-    out.end = end.toISOString();
+    out.end = toDateAnchoredISO(out.end, start.clone().add(1, 'year'));
   }
 
   // Human-facing text + misc fields: fill from context with safe fallbacks.
@@ -261,8 +282,8 @@ async function buildUpdateTransactionInput(args = {}, ctx = {}, preloadedExistin
     merged.amount = type === 'expense' ? -mag : mag;
   }
 
-  if (args.start && moment(args.start).isValid()) merged.start = moment(args.start).toISOString();
-  if (args.end && moment(args.end).isValid()) merged.end = moment(args.end).toISOString();
+  if (args.start && moment(args.start).isValid()) merged.start = toDateAnchoredISO(args.start, moment(args.start));
+  if (args.end && moment(args.end).isValid()) merged.end = toDateAnchoredISO(args.end, moment(args.end));
 
   if (args.frequency !== undefined && Number.isFinite(Number(args.frequency))) {
     // Recurrence lives ONLY in `frequency`. Never touch forecast_type here:
@@ -500,15 +521,32 @@ const functionMap = {
 
   async deleteTransaction(args, ctx) {
     // Identity comes from ctx; the schema sends `transactionid` (older model
-    // outputs may use transaction_id).
+    // outputs may use transaction_id). scope='group' deletes EVERY occurrence
+    // of a recurring series via its groupid; default deletes one occurrence.
     const { userId, token } = ctx;
+    const scope = String(args.scope || 'single').toLowerCase();
+    if (scope === 'group') {
+      const groupId = args.groupid || args.group_id;
+      if (!groupId) throw new Error('groupid is required to delete a recurring series (scope=group). Find it via getRecurringForecasts/getUpcomingTransactions or the RECENT WRITES block, or delete a single occurrence by transactionid instead.');
+      const result = await deleteGroupTransactions({ userId, groupId, token });
+      return {
+        success: true,
+        action: 'delete',
+        scope: 'group',
+        transaction_id: null,
+        group_id: groupId,
+        message: (result && result.message) || 'Recurring transaction series has been deleted.',
+      };
+    }
     const transactionId = args.transactionid || args.transaction_id || ctx.id;
     if (!transactionId) throw new Error('transactionid is required to delete a transaction');
     const result = await deleteTransaction({ userId, transactionId, token });
     return {
       success: true,
       action: 'delete',
+      scope: 'single',
       transaction_id: transactionId,
+      group_id: args.groupid || args.group_id || null,
       message: (result && result.message) || 'Transaction has been deleted.',
     };
   },
@@ -770,4 +808,4 @@ const functionMap = {
   }
 };
 
-module.exports = { functionMap };
+module.exports = { functionMap, __testables: { normalizeCreateTransactionInput, toDateAnchoredISO } };

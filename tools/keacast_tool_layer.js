@@ -104,6 +104,14 @@ async function deleteTransaction({ userId, transactionId, token }) {
   return response.data;
 }
 
+// Delete EVERY occurrence of a recurring series by its groupid
+// (DELETE /transaction/deletegroup/:userid/:id — id is the groupid).
+async function deleteGroupTransactions({ userId, groupId, token }) {
+  const url = `${BASE_URL}/transaction/deletegroup/${userId}/${groupId}`;
+  const response = await axios.delete(url, AUTH_HEADER(token));
+  return response.data;
+}
+
 // Fetch a single transaction by id (SELECT *). Used by updateTransaction to
 // merge partial LLM edits over the existing row so unspecified columns aren't
 // wiped by the full-field UPDATE on the backend.
@@ -219,6 +227,7 @@ module.exports = {
   getBalances,
   createTransaction,
   deleteTransaction,
+  deleteGroupTransactions,
   getTransactionById,
   updateTransaction,
   getGoals,

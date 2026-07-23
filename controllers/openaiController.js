@@ -56,6 +56,10 @@ const CONFIRM_TOOL = 'confirmTransaction';
 // Simulation ("what-if") propose tools. These never write — each returns a
 // structured simOp the frontend applies to its client-side simulation overlay.
 const SIM_PROPOSE_TOOLS = new Set(['proposeSimulationAdd', 'proposeSimulationModify', 'proposeSimulationRemove']);
+// Non-writing UI-action tool: asks the CLIENT to open its transaction search
+// panel (optionally pre-filled). Handled inline in executeToolCalls — it has no
+// functionMap executor; the action rides back to the client as uiActions.
+const UI_SEARCH_TOOL = 'openTransactionSearch';
 // While the client is in Simulation Mode, ALL real writes are refused in code
 // (deleteTransaction included — it isn't in WRITE_TOOLS' confirm gate but it
 // still mutates real data). The model is redirected to the propose tools.
@@ -993,8 +997,46 @@ function emptyDialogueState() {
     pendingConfirmation: false,
     committed: false,
     lastCommitSignature: null,
+    // Rolling log of writes committed this session ({ action, transaction_id,
+    // group_id, title, amount, category, start, frequency }). Persisted with
+    // the dialogue state and surfaced to the model so "delete the expense you
+    // just created" resolves to a real id without a lookup (tool results are
+    // NOT kept in conversation history, so this is the only survivor).
+    recentWrites: [],
     updatedAt: null,
   };
+}
+
+const MAX_RECENT_WRITES = 5;
+
+function recordRecentWrite(state, entry) {
+  if (!state || !entry) return;
+  if (!Array.isArray(state.recentWrites)) state.recentWrites = [];
+  state.recentWrites.push({ ...entry, at: new Date().toISOString() });
+  if (state.recentWrites.length > MAX_RECENT_WRITES) {
+    state.recentWrites = state.recentWrites.slice(-MAX_RECENT_WRITES);
+  }
+}
+
+// Compact system-prompt block listing this session's committed writes so the
+// model can target them for update/delete by real id.
+function buildRecentWritesBlock(state) {
+  const writes = Array.isArray(state?.recentWrites) ? state.recentWrites : [];
+  if (writes.length === 0) return '';
+  const lines = ['RECENT WRITES THIS SESSION (background — transactions/goals you already created, updated, or deleted for this user; use these ids directly when the user refers to them):'];
+  for (const w of writes) {
+    const parts = [`${w.action || 'write'}`];
+    if (w.title) parts.push(`"${String(w.title).slice(0, 40)}"`);
+    if (w.amount != null && Number.isFinite(Number(w.amount))) parts.push(`$${Math.abs(Number(w.amount))}`);
+    if (w.frequency != null) parts.push(frequencyLabel(w.frequency));
+    if (w.start) parts.push(`start ${String(w.start).slice(0, 10)}`);
+    if (w.category) parts.push(String(w.category));
+    if (w.transaction_id != null) parts.push(`transactionid=${w.transaction_id}`);
+    if (w.group_id != null) parts.push(`groupid=${w.group_id}`);
+    if (w.goal_id != null) parts.push(`goalid=${w.goal_id}`);
+    lines.push(`- ${parts.join(', ')}`);
+  }
+  return truncateText(lines.join('\n'), 900);
 }
 
 // Fail-soft load: any Redis hiccup yields a fresh empty state so chat never breaks.
@@ -1219,6 +1261,120 @@ function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+// Backend frequency codes (see cashflow-backend-api TRANSACTION_API_CONCISE.md):
+// 1=daily, 2=once, 7=weekly, 14=biweekly, 15/16=semi-monthly, 28-31=monthly,
+// 60=bimonthly, 91=quarterly, 182=semi-annually, 365=annually.
+// Order matters: compound cadences ("bi-weekly", "semi-annually", "every other
+// month") must be tested before the plain word they contain.
+const RECURRENCE_PATTERNS = [
+  [/\b(bi-?weekly|every\s+(2|two|other)\s+weeks?)\b/i, 14],
+  [/\b(semi-?monthly|twice\s+a\s+month)\b/i, 15],
+  [/\b(bi-?monthly|every\s+(2|two|other)\s+months?)\b/i, 60],
+  [/\b(semi-?annually|twice\s+a\s+year|every\s+(6|six)\s+months)\b/i, 182],
+  [/\b(quarterly|every\s+(3|three)\s+months)\b/i, 91],
+  [/\b(annually|yearly|every\s+year|each\s+year|per\s+year)\b/i, 365],
+  [/\b(weekly|every\s+week|each\s+week|per\s+week)\b/i, 7],
+  [/\b(monthly|every\s+month|each\s+month|per\s+month)\b/i, 30],
+  [/\b(daily|every\s+day|each\s+day)\b/i, 1],
+  [/\bevery\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?\b/i, 7],
+  [/\bon\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s\b/i, 7], // plural weekday = weekly
+  [/\bone[-\s]?time\b/i, 2],
+];
+
+function frequencyLabel(freq) {
+  const f = Number(freq);
+  if (f === 1) return 'daily';
+  if (f === 7) return 'weekly';
+  if (f === 14) return 'bi-weekly';
+  if (f === 15 || f === 16) return 'semi-monthly';
+  if (f >= 28 && f <= 31) return 'monthly';
+  if (f === 60) return 'bi-monthly';
+  if (f === 91) return 'quarterly';
+  if (f === 182 || f === 183) return 'semi-annually';
+  if (f === 365 || f === 366) return 'annually';
+  return 'one-time';
+}
+
+// Next occurrence of `weekdayIdx` (0=Sunday) ON OR AFTER `fromMoment`.
+function nextWeekdayOnOrAfter(fromMoment, weekdayIdx) {
+  const m = fromMoment.clone();
+  const diff = (weekdayIdx - m.day() + 7) % 7;
+  return m.add(diff, 'days');
+}
+
+// Resolve the concrete date a proposal message refers to, relative to the
+// user's localized `today`. Handles the formats the assistant actually writes:
+// ISO (2026-07-22), month-name ("July 22nd, 2026" / "July 22"), "today",
+// "tomorrow", and weekday references ("next Wednesday", "this Friday",
+// "on Wednesdays"). Returns 'YYYY-MM-DD' or null.
+function extractDateFromText(text, today) {
+  const t = String(text || '');
+
+  const iso = t.match(/\b20\d{2}-\d{2}-\d{2}\b/);
+  if (iso && moment(iso[0], 'YYYY-MM-DD', true).isValid()) return iso[0];
+
+  const monthRe = new RegExp(`\\b(${MONTH_NAMES.join('|')})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(20\\d{2}))?\\b`, 'i');
+  const md = t.match(monthRe);
+  if (md) {
+    const monthIdx = MONTH_NAMES.indexOf(md[1].toLowerCase());
+    const day = Number(md[2]);
+    let candidate = moment({ year: md[3] ? Number(md[3]) : today.year(), month: monthIdx, date: day });
+    if (candidate.isValid()) {
+      // No explicit year and the date already passed => the user means next year.
+      if (!md[3] && candidate.isBefore(today, 'day')) candidate = candidate.add(1, 'year');
+      return candidate.format('YYYY-MM-DD');
+    }
+  }
+
+  if (/\btomorrow\b/i.test(t)) return today.clone().add(1, 'day').format('YYYY-MM-DD');
+  if (/\b(today|tonight|this evening)\b/i.test(t)) return today.format('YYYY-MM-DD');
+
+  const wd = t.match(new RegExp(`\\b(?:next|this|on|starting)\\s+(${WEEKDAY_NAMES.join('|')})s?\\b`, 'i'));
+  if (wd) {
+    const idx = WEEKDAY_NAMES.indexOf(wd[1].toLowerCase());
+    let candidate = nextWeekdayOnOrAfter(today, idx);
+    // "next Wednesday" when today IS Wednesday means a week out.
+    if (/^next$/i.test(wd[0].split(/\s+/)[0]) && candidate.isSame(today, 'day')) {
+      candidate = candidate.add(7, 'days');
+    }
+    return candidate.format('YYYY-MM-DD');
+  }
+
+  return null;
+}
+
+// Conservative title extraction from a proposal sentence: an explicit
+// `titled "X"`, else a capitalized merchant/item after "at"/"from"/"for"
+// ("at Racetrac", "from Netflix", "for Food and Beverage"). Weekday/month
+// words and generic type words are rejected so "for Wednesdays" or "for July
+// 22nd" never becomes a title.
+function extractTitleFromText(text) {
+  const t = String(text || '');
+  const banned = new Set([...WEEKDAY_NAMES, ...MONTH_NAMES, 'expense', 'income', 'transaction', 'forecast']);
+  const clean = (s) => {
+    const out = String(s || '').trim().replace(/["'.,;:]+$/g, '').trim();
+    if (!out || out.length < 2 || out.length > 40) return null;
+    const words = out.toLowerCase().split(/\s+/);
+    if (words.every((w) => banned.has(w.replace(/s$/, '')))) return null;
+    return out;
+  };
+
+  const quoted = t.match(/\btitled\s+["']([^"']{2,40})["']/i) || t.match(/["']([^"']{2,40})["']\s+(?:expense|income|transaction)/i);
+  if (quoted) { const v = clean(quoted[1]); if (v) return v; }
+
+  // Capitalized run (1-4 words, allowing "and"/"of"/"the" connectors) after a
+  // merchant-ish preposition.
+  const cap = "[A-Z][\\w&'’.-]*";
+  const run = `${cap}(?:\\s+(?:and|of|the|${cap}))*`;
+  const prep = t.match(new RegExp(`\\b(?:at|from|for)\\s+(${run})`));
+  if (prep) { const v = clean(prep[1]); if (v && v.split(/\s+/).length <= 5) return v; }
+
+  return null;
+}
+
 // Best-effort extraction of the concrete values the assistant proposed in its
 // LAST message. This closes the "proposed $16 Racetrac, created $50 Expense"
 // failure: when the model proposed in prose without staging a draft, the
@@ -1226,11 +1382,15 @@ function escapeRegExp(s) {
 // the normalizer's defaults fill the rest. The transcript proposal is what the
 // user actually saw and confirmed, so it is authoritative over the model's
 // re-estimated args (but never over an explicitly staged draft).
-// Returns null when there's nothing extractable.
-function extractProposalFromMessage(text, categoryNames) {
+// `currentDate` (the user's localized YYYY-MM-DD) anchors relative dates
+// ("tomorrow", "next Wednesday"). Returns null when there's nothing extractable.
+function extractProposalFromMessage(text, categoryNames, currentDate) {
   const t = String(text || '');
   if (!t.trim()) return null;
   const out = { amounts: [] };
+  const today = currentDate && moment(currentDate, 'YYYY-MM-DD', true).isValid()
+    ? moment(currentDate, 'YYYY-MM-DD')
+    : moment();
 
   // Distinct dollar amounts mentioned in the proposal ($16, $1,250.50, ...).
   const amountMatches = t.match(/\$\s*\d[\d,]*(\.\d+)?/g) || [];
@@ -1241,9 +1401,30 @@ function extractProposalFromMessage(text, categoryNames) {
   // adopt directly (a message mixing balances and the proposal has several).
   if (out.amounts.length === 1) out.amount = out.amounts[0];
 
-  // ISO date — the assistant states proposal dates as YYYY-MM-DD per prompt.
-  const iso = t.match(/\b20\d{2}-\d{2}-\d{2}\b/);
-  if (iso && moment(iso[0], 'YYYY-MM-DD', true).isValid()) out.start = iso[0];
+  // Recurrence: proposal wording like "weekly", "every month", "on Wednesdays".
+  for (const [re, code] of RECURRENCE_PATTERNS) {
+    if (re.test(t)) { out.frequency = code; break; }
+  }
+
+  // Date: ISO, month-name ("July 22nd, 2026"), or relative ("tomorrow",
+  // "next Wednesday") resolved against the user's localized today.
+  const date = extractDateFromText(t, today);
+  if (date) out.start = date;
+
+  // Weekday snap for recurring proposals: "weekly on Wednesdays" must start
+  // on a Wednesday. If the resolved/omitted start doesn't land on the named
+  // weekday, move it forward to the next occurrence.
+  const wdMention = t.match(new RegExp(`\\b(${WEEKDAY_NAMES.join('|')})s?\\b`, 'i'));
+  if (out.frequency === 7 && wdMention) {
+    const idx = WEEKDAY_NAMES.indexOf(wdMention[1].toLowerCase());
+    const base = out.start ? moment(out.start, 'YYYY-MM-DD') : today.clone();
+    out.start = nextWeekdayOnOrAfter(base, idx).format('YYYY-MM-DD');
+  }
+
+  // Title: explicit `titled "X"` or a capitalized merchant/item after
+  // at/from/for ("at Racetrac"). Conservative — null when unsure.
+  const title = extractTitleFromText(t);
+  if (title) out.title = title;
 
   // Category: adopt only when exactly one of the user's REAL categories is
   // mentioned, so we never guess between two. Lookarounds instead of \b so
@@ -1266,8 +1447,112 @@ function extractProposalFromMessage(text, categoryNames) {
   if (saysExpense && !saysIncome) out.type = 'Expense';
   else if (saysIncome && !saysExpense) out.type = 'Income';
 
-  const hasSignal = out.amounts.length > 0 || out.start || out.category || out.type;
+  const hasSignal = out.amounts.length > 0 || out.start || out.category || out.type
+    || out.frequency !== undefined || out.title;
   return hasSignal ? out : null;
+}
+
+// Precomputed calendar facts for the system prompt. LLMs are unreliable at
+// date arithmetic ("next Wednesday" from a bare today-string), which produced
+// wrong-date transactions — so every date the model might need is spelled out.
+function buildDateReferenceBlock(currentDate) {
+  const today = currentDate && moment(currentDate, 'YYYY-MM-DD', true).isValid()
+    ? moment(currentDate, 'YYYY-MM-DD')
+    : moment();
+  const lines = [
+    'DATE REFERENCE (precomputed in the user\'s timezone — use these EXACT dates, never do calendar math yourself):',
+    `- today: ${today.format('dddd')} ${today.format('YYYY-MM-DD')}`,
+    `- tomorrow: ${today.clone().add(1, 'day').format('dddd')} ${today.clone().add(1, 'day').format('YYYY-MM-DD')}`,
+  ];
+  for (let idx = 0; idx < 7; idx++) {
+    const d = nextWeekdayOnOrAfter(today.clone().add(1, 'day'), idx);
+    lines.push(`- next ${WEEKDAY_NAMES[idx][0].toUpperCase()}${WEEKDAY_NAMES[idx].slice(1)}: ${d.format('YYYY-MM-DD')}`);
+  }
+  lines.push('When proposing a transaction, ALWAYS state its date in YYYY-MM-DD form (e.g. "on 2026-07-22"), and state the recurrence explicitly ("weekly", "monthly", or "one-time").');
+  return lines.join('\n');
+}
+
+// Compact ON-SCREEN CONTEXT block from the client's uiContext snapshot.
+// Hard-capped so a buggy publisher cannot bloat the system prompt.
+const UI_CONTEXT_BLOCK_MAX_CHARS = 2200;
+
+function buildUiContextBlock(uiContext) {
+  if (!uiContext || typeof uiContext !== 'object') return '';
+
+  const parts = [];
+  if (uiContext.route) parts.push(`route=${String(uiContext.route)}`);
+  if (uiContext.view) parts.push(`view=${String(uiContext.view)}`);
+  if (uiContext.selectedAccountId != null && uiContext.selectedAccountId !== '') {
+    parts.push(`selectedAccountId=${uiContext.selectedAccountId}`);
+  }
+  if (uiContext.focusedDate) parts.push(`focusedDate=${String(uiContext.focusedDate)}`);
+
+  if (uiContext.visibleDateRange && typeof uiContext.visibleDateRange === 'object') {
+    const { start, end } = uiContext.visibleDateRange;
+    if (start || end) parts.push(`visibleRange=${start || '?'}:${end || '?'}`);
+  }
+
+  const fe = uiContext.focusedEntity;
+  if (fe && typeof fe === 'object' && fe.type) {
+    const label = fe.label ? ` "${String(fe.label).slice(0, 60)}"` : '';
+    const amt = (typeof fe.amount === 'number' && Number.isFinite(fe.amount))
+      ? ` ${fe.amount < 0 ? `-$${Math.abs(fe.amount)}` : `$${fe.amount}`}`
+      : '';
+    const date = fe.date ? ` on ${fe.date}` : '';
+    const id = fe.id != null ? `:${fe.id}` : '';
+    const cat = fe.category ? ` cat=${String(fe.category).slice(0, 40)}` : '';
+    parts.push(`focusedEntity=${fe.type}${id}${label}${amt}${date}${cat}`);
+  }
+
+  if (Array.isArray(uiContext.openDialogs) && uiContext.openDialogs.length) {
+    parts.push(`openDialogs=${uiContext.openDialogs.slice(0, 6).map(String).join(',')}`);
+  }
+
+  if (uiContext.filters && typeof uiContext.filters === 'object') {
+    const f = [];
+    if (uiContext.filters.searchTerm) f.push(`search=${String(uiContext.filters.searchTerm).slice(0, 60)}`);
+    if (uiContext.filters.category) f.push(`category=${String(uiContext.filters.category).slice(0, 40)}`);
+    if (uiContext.filters.forecastType) f.push(`forecastType=${uiContext.filters.forecastType}`);
+    if (f.length) parts.push(`filters=${f.join(';')}`);
+  }
+
+  const vs = uiContext.visibleSummary;
+  if (vs && typeof vs === 'object') {
+    if (typeof vs.dayBalance === 'number' && Number.isFinite(vs.dayBalance)) {
+      parts.push(`dayBalance=${vs.dayBalance}`);
+    }
+    if (typeof vs.dayTxCount === 'number' && Number.isFinite(vs.dayTxCount)) {
+      parts.push(`dayTxCount=${vs.dayTxCount}`);
+    }
+    if (Array.isArray(vs.topVisibleTx) && vs.topVisibleTx.length) {
+      parts.push(`topVisibleTx=${vs.topVisibleTx.slice(0, 5).map((t) => String(t).slice(0, 48)).join(' | ')}`);
+    }
+    if (vs.chart) parts.push(`chart=${String(vs.chart).slice(0, 80)}`);
+    if (vs.note) parts.push(`note=${String(vs.note).slice(0, 120)}`);
+  }
+
+  if (uiContext.interactionMode) parts.push(`interactionMode=${uiContext.interactionMode}`);
+  if (uiContext.companionActive === true) parts.push('companionActive=true');
+  if (uiContext.companionActive === false) parts.push('companionActive=false');
+
+  if (parts.length === 0) return '';
+
+  const voiceHint =
+    uiContext.interactionMode === 'voice' || uiContext.companionActive === true
+      ? 'VOICE/COMPANION MODE: Prefer short spoken sentences. Avoid large markdown tables. Lead with the answer, then at most 2 supporting bullets.'
+      : '';
+
+  const body = [
+    'ON-SCREEN CONTEXT (trusted client snapshot of what the user can see NOW.',
+    'Use this to resolve deixis: "this", "that", "here", "today on my calendar",',
+    '"this charge", "what I\'m looking at". Do NOT invent UI state beyond this block.',
+    'If a needed detail is missing, ask one short clarifying question or call a read tool.',
+    'Prefer focusedEntity / focusedDate over generic account context when answering.)',
+    parts.join('; '),
+    voiceHint,
+  ].filter(Boolean).join('\n');
+
+  return truncateText(body, UI_CONTEXT_BLOCK_MAX_CHARS);
 }
 
 // Compact, hard-capped block describing the in-progress action for the system
@@ -1369,6 +1654,7 @@ function buildFactsBlock(facts) {
 // Redact sensitive fields (token, raw message/PII) before logging a chat body.
 function redactChatBodyForLog(body) {
   if (!body || typeof body !== 'object') return {};
+  const ui = body.uiContext && typeof body.uiContext === 'object' ? body.uiContext : null;
   return {
     hasToken: !!body.token,
     sessionId: body.sessionId,
@@ -1381,6 +1667,17 @@ function redactChatBodyForLog(body) {
     mode: body.mode,
     hasSimContext: !!body.simContext,
     hasSimSnapshot: !!body.simSnapshot,
+    // uiContext: keep only coarse navigation fields — never log focused labels/amounts.
+    uiContext: ui
+      ? {
+          route: ui.route,
+          view: ui.view,
+          focusedDate: ui.focusedDate,
+          interactionMode: ui.interactionMode,
+          companionActive: ui.companionActive,
+          hasFocusedEntity: !!(ui.focusedEntity && ui.focusedEntity.type),
+        }
+      : null,
   };
 }
 
@@ -1400,6 +1697,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   // Writes the gate refused this turn ({ tool, reason }) — lets the client know
   // a proposal/confirmation is pending rather than guessing from prose.
   const blockedWrites = [];
+  // Client-side UI actions requested this turn (e.g. open the transaction
+  // search panel). Returned alongside the prose for the frontend to execute.
+  const uiActions = [];
 
   // Execute one batch of tool calls, applying dialogue-state handling + the
   // code-enforced write gate. Returns matching assistant/tool protocol messages.
@@ -1487,6 +1787,19 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         continue;
       }
 
+      // ── Non-writing UI action: open the client's transaction search panel ──
+      if (name === UI_SEARCH_TOOL) {
+        const term = typeof args.search_term === 'string' ? args.search_term.trim() : '';
+        uiActions.push({ type: 'open_search', search_term: term || null });
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          ok: true,
+          opened: 'transaction_search',
+          search_term: term || null,
+          note: `The transaction search panel is opening on the user's screen${term ? ` pre-filled with "${term}"` : ''}. Briefly tell the user it is opening — do NOT invent result counts or amounts.`
+        }) });
+        continue;
+      }
+
       const toolFn = functionMap[name];
       if (!toolFn) {
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: `Unknown tool: ${name}` }) });
@@ -1553,17 +1866,22 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         // prose without staging a draft), the extracted proposal values are
         // authoritative for any slot the draft didn't fill — the user confirmed
         // THOSE values, not whatever the model re-estimates this turn.
+        // `frequency` is included so "weekly on Wednesdays" can't collapse
+        // into a one-time entry when the model omits it on the confirm turn.
         if (ctx.transcriptProposal) {
           const draft = state.draftTransaction || {};
           const draftHas = (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== '';
-          for (const k of ['amount', 'start', 'category', 'type']) {
+          for (const k of ['amount', 'start', 'category', 'type', 'frequency']) {
             const v = ctx.transcriptProposal[k];
             if (v !== undefined && v !== null && !draftHas(k)) effectiveArgs[k] = v;
           }
-          // A generic default title paired with an adopted proposal category
-          // reads better as the category ("Gas") than as "Expense".
-          if (!draftHas('title') && (!effectiveArgs.title || /^(expense|income|transaction)$/i.test(String(effectiveArgs.title).trim())) && ctx.transcriptProposal.category) {
-            effectiveArgs.title = ctx.transcriptProposal.category;
+          // Title: adopt the extracted merchant/item when the model's own title
+          // is missing or generic; else fall back to the category ("Gas") which
+          // reads better than "Expense".
+          const argTitleGeneric = !effectiveArgs.title || /^(expense|income|transaction|planned purchase)$/i.test(String(effectiveArgs.title).trim());
+          if (!draftHas('title') && argTitleGeneric) {
+            if (ctx.transcriptProposal.title) effectiveArgs.title = ctx.transcriptProposal.title;
+            else if (ctx.transcriptProposal.category) effectiveArgs.title = ctx.transcriptProposal.category;
           }
         }
 
@@ -1604,7 +1922,19 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         }
         try {
           const result = await toolFn(effectiveArgs, ctx);
-          let toolContent = JSON.stringify(result ?? {});
+          // Ground the model's confirmation message in what was ACTUALLY
+          // written: restating anything else (a stale draft, a re-estimate)
+          // produced "$45 Planned Purchase" messages for a $25 write.
+          const wroteTitle = result?.title ?? effectiveArgs.title ?? null;
+          const wroteAmount = result?.amount ?? effectiveArgs.amount ?? null;
+          const wroteStart = String(result?.start ?? effectiveArgs.start ?? '').slice(0, 10);
+          const wroteFreq = result?.frequency ?? effectiveArgs.frequency ?? null;
+          const wroteCategory = result?.category ?? effectiveArgs.category ?? null;
+          const grounded = {
+            ...(result ?? {}),
+            note: `WRITE COMMITTED. Your reply MUST restate EXACTLY these values and no others: "${wroteTitle}", $${Math.abs(Number(wroteAmount)) || wroteAmount}, ${frequencyLabel(wroteFreq)}${wroteStart ? `, starting ${wroteStart}` : ''}${wroteCategory ? `, category ${wroteCategory}` : ''} (transaction_id ${result?.transaction_id ?? 'n/a'}${result?.group_id != null ? `, recurring_id ${result.group_id}` : ''}). Do NOT mention any other amount, title, or date as the created transaction.`
+          };
+          let toolContent = JSON.stringify(grounded);
           if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
           // Mark committed + clear the draft so a re-called round can't refire.
           state.lastCommitSignature = sig;
@@ -1614,13 +1944,19 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           state.intent = null;
           // Structured write record for the client (functionMap normalizes the
           // backend response into { action, transaction_id, group_id, ... }).
-          committedWrites.push({
+          const writeRecord = {
             action: result?.action || (name === 'updateTransaction' ? 'update' : 'create'),
             transaction_id: result?.transaction_id ?? null,
             group_id: result?.group_id ?? null,
-            title: result?.title ?? effectiveArgs.title ?? null,
+            title: wroteTitle,
+            amount: wroteAmount,
+            category: wroteCategory,
+            frequency: wroteFreq,
             start: result?.start ?? effectiveArgs.start ?? null,
-          });
+          };
+          committedWrites.push(writeRecord);
+          // Session memory so later turns can update/delete this by real id.
+          recordRecentWrite(state, writeRecord);
           toolResults.push({ id: toolCall.id, name, content: toolContent });
         } catch (err) {
           blockedWrites.push({ tool: name, reason: 'execution_failed' });
@@ -1671,20 +2007,78 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           state.lastCommitSignature = goalSig;
           state.committed = true;
           state.pendingConfirmation = false;
-          committedWrites.push({
+          const goalRecord = {
             action: result?.action || 'goal_write',
             transaction_id: null,
             group_id: null,
             goal_id: result?.goal_id ?? args.goalid ?? null,
             title: result?.title ?? args.title ?? null,
             start: result?.start_date ?? null,
-          });
+          };
+          committedWrites.push(goalRecord);
+          recordRecentWrite(state, goalRecord);
           let toolContent = JSON.stringify(result ?? {});
           if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
           toolResults.push({ id: toolCall.id, name, content: toolContent });
         } catch (err) {
           blockedWrites.push({ tool: name, reason: 'execution_failed' });
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || err?.response?.data?.message || 'Goal tool execution failed' }) });
+        }
+        continue;
+      }
+
+      // ── Delete gate (deleteTransaction) ──────────────────────────────────
+      // Deletion is the most destructive write, so it uses the same
+      // propose→confirm contract enforced in code: the model must first show
+      // the user WHICH transaction it found (title, amount, date — and for
+      // recurring ones, ask single occurrence vs whole series), then delete
+      // only after the confirmation is registered.
+      if (name === 'deleteTransaction') {
+        const proposedEarlier =
+          ctx.pendingConfirmationAtStart === true ||
+          ctx.draftCompleteAtStart === true ||
+          ctx.proposalInTranscript === true;
+        const confirmed = proposedEarlier && ctx.userAffirmative === true;
+        if (!confirmed) {
+          blockedWrites.push({ tool: name, reason: 'confirmation_required' });
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            blocked: true,
+            reason: 'confirmation_required',
+            message: 'Do NOT delete yet. First identify the exact transaction (check RECENT WRITES THIS SESSION, or look it up via getUpcomingTransactions/getRecurringForecasts), show the user its title, amount, and date — and if it is recurring, ask whether to delete just that occurrence or the entire series — then wait for them to explicitly confirm on their next message.'
+          }) });
+          continue;
+        }
+        const delSig = ['delete', String(args.scope || 'single'), String(args.transactionid || args.transaction_id || ''), String(args.groupid || args.group_id || '')].join('|');
+        if (state.lastCommitSignature && delSig === state.lastCommitSignature) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            duplicate: true,
+            message: 'That transaction was just deleted; not deleting again.'
+          }) });
+          continue;
+        }
+        console.log(`[write-audit] tool=${name} user=${ctx.userId} account=${ctx.accountId} deleteArgs=${JSON.stringify(args)}`);
+        try {
+          const result = await toolFn(args, ctx);
+          state.lastCommitSignature = delSig;
+          state.committed = true;
+          state.pendingConfirmation = false;
+          const delRecord = {
+            action: 'delete',
+            transaction_id: result?.transaction_id ?? null,
+            group_id: result?.group_id ?? null,
+            title: args.title ?? null,
+            start: null,
+            scope: result?.scope ?? (args.scope || 'single'),
+          };
+          committedWrites.push(delRecord);
+          recordRecentWrite(state, delRecord);
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ...(result ?? {}),
+            note: 'DELETE COMMITTED. Confirm to the user exactly what was deleted (the transaction/series you proposed) — do not describe any other transaction.'
+          }) });
+        } catch (err) {
+          blockedWrites.push({ tool: name, reason: 'execution_failed' });
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: err?.message || err?.response?.data?.message || 'Delete failed' }) });
         }
         continue;
       }
@@ -1696,17 +2090,6 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         // alongside the final prose (the frontend applies them to the overlay).
         if (SIM_PROPOSE_TOOLS.has(name) && result && result.simOp) {
           proposedSimOps.push(result.simOp);
-        }
-        // deleteTransaction also mutates real data (it lives outside the
-        // confirm gate) — record it so the client reloads account data.
-        if (name === 'deleteTransaction' && result && result.success === true) {
-          committedWrites.push({
-            action: 'delete',
-            transaction_id: result.transaction_id ?? null,
-            group_id: result.group_id ?? null,
-            title: null,
-            start: null,
-          });
         }
         let toolContent = JSON.stringify(result ?? {});
         if (toolContent.length > 13000) {
@@ -1773,7 +2156,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     } catch (error) {
       console.log('Tool loop model call failed:', error.message);
       console.log('Error details:', error.response?.data || error);
-      return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, writes: committedWrites, blocked: blockedWrites };
+      return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, uiActions, writes: committedWrites, blocked: blockedWrites };
     }
 
     const msg = response?.choices?.[0]?.message;
@@ -1783,10 +2166,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       continue;
     }
     console.log('Tool loop: final response received, content length:', msg?.content?.length || 0);
-    return { content: msg?.content || '', raw: response, simOps: proposedSimOps, writes: committedWrites, blocked: blockedWrites };
+    return { content: msg?.content || '', raw: response, simOps: proposedSimOps, uiActions, writes: committedWrites, blocked: blockedWrites };
   }
 
-  return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, writes: committedWrites, blocked: blockedWrites };
+  return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, uiActions, writes: committedWrites, blocked: blockedWrites };
 }
 
 // ----------------------------
@@ -1898,9 +2281,15 @@ exports.chat = async (req, res) => {
     const location = req.body?.location;
     console.log('Location data received:', location);
 
-    // Calculate current date based on user's timezone
-    const currentDate = getCurrentDateInTimezone(location);
-    console.log('Using current date:', currentDate);
+    // The user's "today": prefer the date the client computed in its own real
+    // timezone (clientDate) — the coordinate-based approximation divides
+    // longitude by 15 and is wrong often enough to shift "today"/"tomorrow"
+    // by a day near midnight. Coordinates remain the fallback.
+    const clientDate = req.body?.clientDate;
+    const currentDate = (clientDate && moment(clientDate, 'YYYY-MM-DD', true).isValid())
+      ? clientDate
+      : getCurrentDateInTimezone(location);
+    console.log('Using current date:', currentDate, clientDate ? '(from clientDate)' : '(from coordinates)');
 
     // ── Resolve the selected-account blob via the tool layer ──────────────
     // Mirrors exports.summarization: prefer a client-sent accountSnapshot,
@@ -2041,7 +2430,7 @@ exports.chat = async (req, res) => {
     - When analyzing a user's possible recurring transactions, compare them with the users forecasted transactions and let them know if they have already forecasted for them. We would like the user to add recurring transactions to their forecasts that have not already been added.
     - Also use the possible recurring transactions to help the user understand their financial situation and help them make informed decisions.
     - Creating a transaction should feel effortless. The user does NOT have to provide a title, amount, type, category, date, or frequency. ESTIMATE every field you weren't given from this conversation, the account context, and the user's similar/recurring/recent transactions (e.g. estimate a Netflix expense at their typical streaming amount, a paycheck from their recurring income). Never make the user fill in details just to satisfy the tool.
-    - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction and they have agreed. When you propose, ALWAYS state a SINGLE concrete amount — if your estimate is a range, pick one reasonable figure (such as the midpoint of the range), state it plainly, and ask them to confirm or adjust. Never leave the amount as a range going into the confirmation. On the turn the user first expresses intent, do NOT call the tool — propose the concrete details and ask them to confirm or adjust. EVERY TIME you propose a transaction in prose you MUST also call updateDraftTransaction in that same turn with those exact values (pendingConfirmation:true) — a proposal that was never staged is the #1 cause of the wrong transaction being created later. Only call createTransaction after they agree. If they tweak a value, restate the updated proposal and confirm again.
+    - VERIFY BEFORE CREATING: createTransaction writes real data, so you MUST NOT call it until you have shown the user the full proposed transaction and they have agreed. When you propose, ALWAYS state a SINGLE concrete amount — if your estimate is a range, pick one reasonable figure (such as the midpoint of the range), state it plainly, and ask them to confirm or adjust. Never leave the amount as a range going into the confirmation. On the turn the user first expresses intent, do NOT call the tool — propose the concrete details and ask them to confirm or adjust. EVERY TIME you propose a transaction in prose you MUST also call updateDraftTransaction in that same turn with those exact values — title, type, amount, category, start (YYYY-MM-DD from the DATE REFERENCE block), and frequency if recurring — with pendingConfirmation:true. A proposal that was never staged is the #1 cause of the wrong transaction being created later, and an unstaged frequency is how "weekly" collapses into a one-time entry. Only call createTransaction after they agree. If they tweak a value, restate the updated proposal and confirm again.
     - CONFIRMATION HANDLING: Treat the user's reply as confirmation to create the transaction you just proposed whenever it is affirmative OR an add/create instruction — e.g. "yes", "yes please", "go ahead", "do it", "confirm", "sounds good", "please add this", "please add this forecast", "add it", "add that", "create it", "log it", "put it in my forecast", or any natural equivalent. When you get any of these and your previous message proposed (or discussed) exactly one transaction, FIRST call confirmTransaction (this registers the confirmation), THEN immediately call createTransaction, copying the EXACT values from your previous proposal message — the same amount, the same date, the same category, the same title. NEVER re-estimate, round, or substitute a value on the confirmation turn: if you proposed "$16 at Racetrac tomorrow" you must create exactly $16, Racetrac, tomorrow's date (a mismatched amount will be refused by the server). If the user confirmed but adjusted a value ("yes, but make it $45"), call updateDraftTransaction with the adjusted value BEFORE confirmTransaction. Do NOT start over and do NOT re-ask for details you already proposed.
     - NEVER reply with "which forecast/transaction would you like to add?" when your own previous turn already identified exactly one thing (e.g. you just asked "would you like to create a transaction for the item we discussed?"). "This forecast"/"this transaction" unambiguously refers to that item — create it. The ONLY time you may ask a clarifying question is if you genuinely proposed two or more clearly different transactions in the same breath. Also note: in Keacast "add this as a forecast" / "add this forecast" means CREATE a new forecasted transaction for the item just discussed — it does NOT mean look up an existing forecast, so do NOT call read tools (getRecurringForecasts/getUpcomingTransactions) to "find" it.
     - STAY ON TOPIC: The transaction you create must be the one that was actually being DISCUSSED with the user (the item you just proposed in this conversation). NEVER substitute an unrelated item that merely appears in the account context or the "Recent posted"/"Upcoming forecasted" lists (e.g. a paycheck). The CURRENT CONTEXT block is reference data only — it is never the thing to create unless the user explicitly asked for it.
@@ -2057,7 +2446,12 @@ exports.chat = async (req, res) => {
     - LOCK CONFIRMED VALUES — NO DRIFT: Once you have proposed specific values (a specific start date and amount), those values are LOCKED. Do NOT re-estimate or change an already-proposed field on later turns (a common bug was a November date silently becoming August). When the user confirms, call createTransaction with the EXACT values from the DIALOGUE STATE draft — same date, same amount, same category. Only change a value if the user explicitly asks to; then update the draft first via updateDraftTransaction and re-confirm.
     - CATEGORY MUST BE REAL: Always choose the category from the user's AVAILABLE CATEGORIES list shown in context — pick the closest existing match for the item being created. Never invent a category that isn't in that list. If none fits well, pick the nearest general one from the list.
     - The confirm-before-write rule is enforced in code: createTransaction/updateTransaction will be REFUSED unless you proposed a complete transaction on a prior turn and the confirmation was registered. So the flow is exactly TWO turns: (1) propose with a single concrete amount + a real category (stage it via updateDraftTransaction with pendingConfirmation:true), (2) when the user's next message confirms it, call confirmTransaction and then IMMEDIATELY createTransaction with the locked draft values — do NOT re-propose or ask for confirmation a second/third time. Only if a write is genuinely refused should you show the proposal again.
-    - updateTransaction edits an EXISTING forecasted transaction (by transactionid) — same rule: propose the change, get confirmation, then call it.
+    - UPDATING & DELETING EXISTING TRANSACTIONS (updateTransaction / deleteTransaction — both confirm-gated in code):
+      1. FIND THE ID FIRST. Check the RECENT WRITES THIS SESSION block — if the user refers to something you just created ("delete the expense you just added"), its transactionid/groupid is right there; use it directly. Otherwise look it up: call getUpcomingTransactions with a date window bracketing the date the user mentioned (a few days on each side) or getRecurringForecasts for recurring items, and match on title/category/amount. NEVER claim a transaction doesn't exist until a lookup with a correct date window came back empty.
+      2. If the lookup returns MULTIPLE plausible matches, list them briefly (title, amount, date) and ask which one — never guess.
+      3. PROPOSE, THEN CONFIRM: state exactly what you found and what will change ("Delete 'Food and Beverage', $35 weekly starting 2026-07-22?"). For a RECURRING transaction being deleted, ask whether to remove just that occurrence or the entire series. Wait for the user's confirmation on their next message, then call confirmTransaction followed by the write tool.
+      4. deleteTransaction scope: pass scope:'single' with transactionid for one occurrence, or scope:'group' with groupid to remove the whole recurring series.
+    - OPEN THE APP'S SEARCH (openTransactionSearch): When the user asks you to open search or to find/pull up/show transactions IN THE APP ("search for my Uber transactions", "show me my Netflix charges", "open search"), call openTransactionSearch with an optional search_term — the app minimizes the chat and opens its search panel front and center with the results. This tool returns NO data to you; when you need transaction data to ANSWER a question yourself, use the read tools instead. After calling it, just tell the user the search is opening — never invent counts or amounts.
     - LONG-TERM MEMORY: The LONG-TERM MEMORY block lists durable facts you saved before. When the user states something durable and useful for future advice (a savings goal, a planned project and its estimated cost, income cadence, risk tolerance, a stated preference), call rememberFact to persist it (a short mem_key like "goal:emergency_fund" or "plan:home_repair" and a concise mem_value; set importance 1-10). Only save facts the user actually stated or clearly implied — never guesses. Do not save transient chit-chat. You may call recallFacts if you need more of the user's saved facts than are shown.
 
     FINANCIAL PLANNING PLAYBOOK (follow this structure whenever the user states or implies a goal, asks "can I afford X", asks how to save/pay off/plan for something, or asks how to improve their cash flow):
@@ -2098,6 +2492,11 @@ exports.chat = async (req, res) => {
     const factsBlock = buildFactsBlock(longTermFacts);
     const summaryBlock = buildSummaryBlock(rollingSummary);
     const dialogueBlock = buildDialogueStateBlock(dialogueState);
+    const dateRefBlock = buildDateReferenceBlock(currentDate);
+    const uiContextBlock = buildUiContextBlock(
+      req.body?.uiContext && typeof req.body.uiContext === 'object' ? req.body.uiContext : null
+    );
+    const recentWritesBlock = buildRecentWritesBlock(dialogueState);
     // Active savings goals ride along in the selected-account blob — surface
     // them permanently so planning advice always accounts for money already
     // earmarked toward goals (no tool round-trip needed).
@@ -2108,10 +2507,13 @@ exports.chat = async (req, res) => {
           1200
         )
       : '';
+    systemContent += `\n\n---\n${dateRefBlock}`;
+    if (uiContextBlock) systemContent += `\n\n---\n${uiContextBlock}`;
     if (categoriesBlock) systemContent += `\n\n---\n${categoriesBlock}`;
     if (goalsBlock) systemContent += `\n\n---\n${goalsBlock}`;
     if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
     if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
+    if (recentWritesBlock) systemContent += `\n\n---\n${recentWritesBlock}`;
     if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
     // Goals feature availability steers whether the model may offer goal writes.
     if (goalsAvailable) {
@@ -2237,7 +2639,7 @@ exports.chat = async (req, res) => {
     // is missing slots). Prevents the model's re-estimated args + normalizer
     // defaults from creating a different transaction than the one proposed.
     const transcriptProposal = proposalInTranscript
-      ? extractProposalFromMessage(lastAssistantTurnText(history), categoryNames)
+      ? extractProposalFromMessage(lastAssistantTurnText(history), categoryNames, currentDate)
       : null;
 
     const ctx = {
@@ -2363,6 +2765,9 @@ exports.chat = async (req, res) => {
       // Structured simulation proposals from the proposeSimulation* tools.
       // The frontend applies these to its client-side simulation overlay.
       simOps: Array.isArray(result?.simOps) ? result.simOps : [],
+      // Client UI actions requested via tools (e.g. open the transaction
+      // search panel, optionally pre-filled with a search term).
+      uiActions: Array.isArray(result?.uiActions) ? result.uiActions : [],
       transactionResult,
       error: result?.error,
     });
@@ -4271,6 +4676,14 @@ exports.__testables = {
   transcriptShowsPendingProposal,
   lastAssistantTurnText,
   extractProposalFromMessage,
+  extractDateFromText,
+  extractTitleFromText,
+  frequencyLabel,
+  nextWeekdayOnOrAfter,
+  buildDateReferenceBlock,
+  buildUiContextBlock,
+  buildRecentWritesBlock,
+  recordRecentWrite,
   draftSignature,
   computeDraftMissingFields,
   isDraftProposable,
