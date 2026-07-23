@@ -548,20 +548,24 @@
     "type": "function",
     "function": {
       "name": "selectAccount",
-      "description": "NON-WRITING UI action: switches the app's currently selected account. Use when the user clearly asks to change/switch accounts IN THE APP (e.g. 'switch to Checking', 'use my savings account', 'look at account 12'). Prefer AVAILABLE ACCOUNTS / uiContext.availableAccounts for id resolution; if ambiguous, ask which first. If no target is given, list AVAILABLE ACCOUNTS and ask. This returns NO balances or transactions — briefly confirm the switch is happening and invite a follow-up after the app reloads; do NOT invent the new account's data from the previous account context.",
+      "description": "NON-WRITING UI action: switches the app's currently selected account. Use when the user clearly asks to change/switch accounts IN THE APP. IMPORTANT: 'account number 14' / 'open account #14' means list position #14 in AVAILABLE ACCOUNTS (accountNumber), NOT database id 14. Match spoken/typed names against accountname OR bankaccount_name while IGNORING emoji characters. If ambiguous, ask which first. If no target is given, list AVAILABLE ACCOUNTS and ask. Returns NO balances — briefly confirm the switch; do not invent the new account's data.",
       "parameters": {
         "type": "object",
         "properties": {
+          "accountNumber": {
+            "type": "integer",
+            "description": "1-based position in AVAILABLE ACCOUNTS (#N). Use this when the user says 'account number N' / 'the Nth account' / 'open account #N'."
+          },
           "accountId": {
             "type": "string",
-            "description": "The account id to select (numeric ids as strings are fine). Must match an id from AVAILABLE ACCOUNTS when that list is present."
+            "description": "Database account id from AVAILABLE ACCOUNTS (id …). Prefer accountNumber for list-position requests."
           },
           "accountName": {
             "type": "string",
-            "description": "Optional display name for confirmation messaging only — the client switches by accountId, never by name."
+            "description": "Optional name hint (emoji optional; matching ignores emoji). May be accountname or bankaccount_name."
           }
         },
-        "required": ["accountId"]
+        "required": []
       }
     }
   },

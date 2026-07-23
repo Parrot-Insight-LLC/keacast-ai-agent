@@ -1623,7 +1623,7 @@ function buildUiContextBlock(uiContext) {
 
 // Compact AVAILABLE ACCOUNTS block from uiContext.availableAccounts.
 // Hard-capped so a buggy publisher cannot bloat the system prompt.
-const AVAILABLE_ACCOUNTS_BLOCK_MAX_CHARS = 800;
+const AVAILABLE_ACCOUNTS_BLOCK_MAX_CHARS = 1800;
 
 function buildAvailableAccountsBlock(uiContext) {
   if (!uiContext || typeof uiContext !== 'object') return '';
@@ -1631,23 +1631,30 @@ function buildAvailableAccountsBlock(uiContext) {
   if (!list || list.length === 0) return '';
 
   const lines = [];
-  for (const a of list.slice(0, 12)) {
+  for (const a of list.slice(0, 50)) {
     if (!a || a.id == null || a.id === '') continue;
+    const idx = a.index != null && Number(a.index) > 0 ? Number(a.index) : (lines.length + 1);
     const name = String(a.name || `Account ${a.id}`).trim().slice(0, 48) || `Account ${a.id}`;
+    const bank = a.bankAccountName ? String(a.bankAccountName).trim().slice(0, 48) : '';
+    const label = bank && bank.toLowerCase() !== name.toLowerCase() ? `${name} / ${bank}` : name;
     const bits = [];
     if (a.type) bits.push(String(a.type).slice(0, 24));
     if (a.institution) bits.push(String(a.institution).slice(0, 40));
     const meta = bits.length ? ` (${bits.join(', ')})` : '';
     const sel = a.selected === true ? ' [SELECTED]' : '';
-    lines.push(`- ${name} (id ${a.id})${meta}${sel}`);
+    lines.push(`- #${idx} ${label} (id ${a.id})${meta}${sel}`);
   }
   if (lines.length === 0) return '';
 
   return truncateText(
     [
       'AVAILABLE ACCOUNTS (user\'s accounts in the app; switch with selectAccount):',
+      'List position #N is "account number N" (NOT the database id). Names have emoji stripped.',
+      'Match by #index, accountname, OR bankaccount_name (ignore emoji in the user\'s words too).',
       ...lines,
-      'If the user asks to switch, call selectAccount with the matching id. If multiple names match, ask which. Do not invent accounts not listed.',
+      'If the user says "open account number 14", call selectAccount with accountNumber:14 (the #14 row).',
+      'If they name an account, match name/bankAccountName ignoring emoji; if multiple match, ask which.',
+      'Prefer accountNumber for list-position requests; otherwise pass accountId from this list.',
       'After selectAccount, do NOT invent the new account\'s balances/transactions from the previous account context — say the app is switching and invite a follow-up.',
     ].join('\n'),
     AVAILABLE_ACCOUNTS_BLOCK_MAX_CHARS
@@ -1975,29 +1982,54 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       }
 
       if (name === UI_SELECT_ACCOUNT_TOOL) {
-        const rawId = args.accountId != null ? args.accountId
-          : (args.accountid != null ? args.accountid : null);
-        const idNum = Number(rawId);
-        if (rawId == null || String(rawId).trim() === '' || !Number.isFinite(idNum) || idNum <= 0) {
-          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
-            ok: false,
-            error: 'invalid_account_id',
-            message: 'selectAccount requires a positive numeric accountId from AVAILABLE ACCOUNTS.',
-          }) });
-          continue;
-        }
-        const accountId = Number.isInteger(idNum) ? idNum : String(rawId).trim();
-        // Optional hardening: when the client sent availableAccounts, refuse unknown ids.
         const avail = ctx.uiContext && Array.isArray(ctx.uiContext.availableAccounts)
           ? ctx.uiContext.availableAccounts
           : null;
+        const rawNumber = args.accountNumber != null ? args.accountNumber
+          : (args.account_number != null ? args.account_number : null);
+        const accountNumber = rawNumber != null && Number.isFinite(Number(rawNumber))
+          ? Math.trunc(Number(rawNumber))
+          : null;
+
+        let accountId = null;
+        // "Account number N" = 1-based list position in AVAILABLE ACCOUNTS.
+        if (accountNumber != null && accountNumber > 0 && avail && avail.length > 0) {
+          const byIndex = avail.find((a) => a && Number(a.index) === accountNumber)
+            || avail[accountNumber - 1];
+          if (byIndex && byIndex.id != null) {
+            accountId = byIndex.id;
+          } else {
+            toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+              ok: false,
+              error: 'account_number_out_of_range',
+              message: `accountNumber ${accountNumber} is not in AVAILABLE ACCOUNTS (1..${avail.length}). Ask which account, or use a valid #index.`,
+            }) });
+            continue;
+          }
+        }
+
+        if (accountId == null) {
+          const rawId = args.accountId != null ? args.accountId
+            : (args.accountid != null ? args.accountid : null);
+          const idNum = Number(rawId);
+          if (rawId == null || String(rawId).trim() === '' || !Number.isFinite(idNum) || idNum <= 0) {
+            toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+              ok: false,
+              error: 'invalid_account_id',
+              message: 'selectAccount requires accountNumber (list position #N) or a positive accountId from AVAILABLE ACCOUNTS.',
+            }) });
+            continue;
+          }
+          accountId = Number.isInteger(idNum) ? idNum : String(rawId).trim();
+        }
+
         if (avail && avail.length > 0) {
           const allowed = avail.some((a) => a && Number(a.id) === Number(accountId));
           if (!allowed) {
             toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
               ok: false,
               error: 'account_not_in_list',
-              message: 'That accountId is not in AVAILABLE ACCOUNTS. List the available accounts and ask which one, or pick a matching id from the list.',
+              message: 'That accountId is not in AVAILABLE ACCOUNTS. Use accountNumber for list position, or pick an id from the list.',
             }) });
             continue;
           }
@@ -2007,13 +2039,17 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         for (let i = uiActions.length - 1; i >= 0; i--) {
           if (uiActions[i] && uiActions[i].type === 'select_account') uiActions.splice(i, 1);
         }
-        uiActions.push({ type: 'select_account', accountId });
+        const action = { type: 'select_account', accountId };
+        if (accountNumber != null && accountNumber > 0) action.accountNumber = accountNumber;
+        if (accountName) action.accountName = accountName;
+        uiActions.push(action);
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
           ok: true,
           action: 'select_account',
           accountId,
+          accountNumber: accountNumber || null,
           accountName: accountName || null,
-          note: `The app is switching to account ${accountId}${accountName ? ` (${accountName})` : ''}. Briefly confirm the switch is happening. Do NOT invent balances or transactions for the new account from the previous account context — invite the user to ask again after it loads.`,
+          note: `The app is switching to account ${accountId}${accountNumber ? ` (list #${accountNumber})` : ''}${accountName ? ` (${accountName})` : ''}. Briefly confirm the switch is happening. Do NOT invent balances or transactions for the new account from the previous account context — invite the user to ask again after it loads.`,
         }) });
         continue;
       }
