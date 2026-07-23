@@ -67,11 +67,13 @@ const UI_SEARCH_TOOL = 'openTransactionSearch';
 const UI_CALENDAR_DAY_TOOL = 'openCalendarDay';
 const UI_HIGHLIGHT_TX_TOOL = 'highlightTransaction';
 const UI_NAVIGATE_TOOL = 'navigateTo';
+const UI_SELECT_ACCOUNT_TOOL = 'selectAccount';
 const UI_ACTION_TOOLS = new Set([
   UI_SEARCH_TOOL,
   UI_CALENDAR_DAY_TOOL,
   UI_HIGHLIGHT_TX_TOOL,
   UI_NAVIGATE_TOOL,
+  UI_SELECT_ACCOUNT_TOOL,
 ]);
 const ALLOWED_UI_NAV_ROUTES = new Set([
   '/calendar',
@@ -1619,6 +1621,39 @@ function buildUiContextBlock(uiContext) {
   return truncateText(body, UI_CONTEXT_BLOCK_MAX_CHARS);
 }
 
+// Compact AVAILABLE ACCOUNTS block from uiContext.availableAccounts.
+// Hard-capped so a buggy publisher cannot bloat the system prompt.
+const AVAILABLE_ACCOUNTS_BLOCK_MAX_CHARS = 800;
+
+function buildAvailableAccountsBlock(uiContext) {
+  if (!uiContext || typeof uiContext !== 'object') return '';
+  const list = Array.isArray(uiContext.availableAccounts) ? uiContext.availableAccounts : null;
+  if (!list || list.length === 0) return '';
+
+  const lines = [];
+  for (const a of list.slice(0, 12)) {
+    if (!a || a.id == null || a.id === '') continue;
+    const name = String(a.name || `Account ${a.id}`).trim().slice(0, 48) || `Account ${a.id}`;
+    const bits = [];
+    if (a.type) bits.push(String(a.type).slice(0, 24));
+    if (a.institution) bits.push(String(a.institution).slice(0, 40));
+    const meta = bits.length ? ` (${bits.join(', ')})` : '';
+    const sel = a.selected === true ? ' [SELECTED]' : '';
+    lines.push(`- ${name} (id ${a.id})${meta}${sel}`);
+  }
+  if (lines.length === 0) return '';
+
+  return truncateText(
+    [
+      'AVAILABLE ACCOUNTS (user\'s accounts in the app; switch with selectAccount):',
+      ...lines,
+      'If the user asks to switch, call selectAccount with the matching id. If multiple names match, ask which. Do not invent accounts not listed.',
+      'After selectAccount, do NOT invent the new account\'s balances/transactions from the previous account context — say the app is switching and invite a follow-up.',
+    ].join('\n'),
+    AVAILABLE_ACCOUNTS_BLOCK_MAX_CHARS
+  );
+}
+
 // Compact, hard-capped block describing the in-progress action for the system
 // prompt. Returns '' when there's nothing worth injecting.
 function buildDialogueStateBlock(state) {
@@ -1744,6 +1779,8 @@ function redactChatBodyForLog(body) {
           interactionMode: ui.interactionMode,
           companionActive: ui.companionActive,
           hasFocusedEntity: !!(ui.focusedEntity && ui.focusedEntity.type),
+          selectedAccountId: ui.selectedAccountId ?? null,
+          availableAccountCount: Array.isArray(ui.availableAccounts) ? ui.availableAccounts.length : 0,
         }
       : null,
   };
@@ -1933,6 +1970,50 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           opened: 'navigate',
           route,
           note: `Navigating the user to ${route}. Briefly tell them you are taking them there — do NOT invent what is on that page.`
+        }) });
+        continue;
+      }
+
+      if (name === UI_SELECT_ACCOUNT_TOOL) {
+        const rawId = args.accountId != null ? args.accountId
+          : (args.accountid != null ? args.accountid : null);
+        const idNum = Number(rawId);
+        if (rawId == null || String(rawId).trim() === '' || !Number.isFinite(idNum) || idNum <= 0) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: false,
+            error: 'invalid_account_id',
+            message: 'selectAccount requires a positive numeric accountId from AVAILABLE ACCOUNTS.',
+          }) });
+          continue;
+        }
+        const accountId = Number.isInteger(idNum) ? idNum : String(rawId).trim();
+        // Optional hardening: when the client sent availableAccounts, refuse unknown ids.
+        const avail = ctx.uiContext && Array.isArray(ctx.uiContext.availableAccounts)
+          ? ctx.uiContext.availableAccounts
+          : null;
+        if (avail && avail.length > 0) {
+          const allowed = avail.some((a) => a && Number(a.id) === Number(accountId));
+          if (!allowed) {
+            toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+              ok: false,
+              error: 'account_not_in_list',
+              message: 'That accountId is not in AVAILABLE ACCOUNTS. List the available accounts and ask which one, or pick a matching id from the list.',
+            }) });
+            continue;
+          }
+        }
+        const accountName = typeof args.accountName === 'string' ? args.accountName.trim().slice(0, 48) : '';
+        // Latest select_account wins — drop prior select_account actions this turn.
+        for (let i = uiActions.length - 1; i >= 0; i--) {
+          if (uiActions[i] && uiActions[i].type === 'select_account') uiActions.splice(i, 1);
+        }
+        uiActions.push({ type: 'select_account', accountId });
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          ok: true,
+          action: 'select_account',
+          accountId,
+          accountName: accountName || null,
+          note: `The app is switching to account ${accountId}${accountName ? ` (${accountName})` : ''}. Briefly confirm the switch is happening. Do NOT invent balances or transactions for the new account from the previous account context — invite the user to ask again after it loads.`,
         }) });
         continue;
       }
@@ -2551,6 +2632,7 @@ exports.chat = async (req, res) => {
     const dialogueBlock = buildDialogueStateBlock(dialogueState);
     const dateRefBlock = buildDateReferenceBlock(currentDate);
     const uiContextBlock = buildUiContextBlock(uiContextRaw);
+    const availableAccountsBlock = buildAvailableAccountsBlock(uiContextRaw);
     const recentWritesBlock = buildRecentWritesBlock(dialogueState);
     // Active savings goals ride along in the selected-account blob — surface
     // them permanently so planning advice always accounts for money already
@@ -2564,6 +2646,7 @@ exports.chat = async (req, res) => {
       : '';
     systemContent += `\n\n---\n${dateRefBlock}`;
     if (uiContextBlock) systemContent += `\n\n---\n${uiContextBlock}`;
+    if (availableAccountsBlock) systemContent += `\n\n---\n${availableAccountsBlock}`;
     if (categoriesBlock) systemContent += `\n\n---\n${categoriesBlock}`;
     if (goalsBlock) systemContent += `\n\n---\n${goalsBlock}`;
     if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
@@ -2626,6 +2709,7 @@ exports.chat = async (req, res) => {
         : '',
       dateRef: dateRefBlock,
       uiContext: uiContextBlock,
+      availableAccounts: availableAccountsBlock,
       categories: categoriesBlock,
       goals: goalsBlock,
       facts: factsBlock,
@@ -2729,6 +2813,7 @@ exports.chat = async (req, res) => {
       categoryNames,
       simulationMode,
       goalsAvailable,
+      uiContext: uiContextRaw,
     };
     
     // Always try with tools first for data requests, but handle tool calls properly
@@ -4755,6 +4840,7 @@ exports.__testables = {
   nextWeekdayOnOrAfter,
   buildDateReferenceBlock,
   buildUiContextBlock,
+  buildAvailableAccountsBlock,
   buildRecentWritesBlock,
   recordRecentWrite,
   draftSignature,

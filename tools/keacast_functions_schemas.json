@@ -547,6 +547,27 @@
   {
     "type": "function",
     "function": {
+      "name": "selectAccount",
+      "description": "NON-WRITING UI action: switches the app's currently selected account. Use when the user clearly asks to change/switch accounts IN THE APP (e.g. 'switch to Checking', 'use my savings account', 'look at account 12'). Prefer AVAILABLE ACCOUNTS / uiContext.availableAccounts for id resolution; if ambiguous, ask which first. If no target is given, list AVAILABLE ACCOUNTS and ask. This returns NO balances or transactions — briefly confirm the switch is happening and invite a follow-up after the app reloads; do NOT invent the new account's data from the previous account context.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account id to select (numeric ids as strings are fine). Must match an id from AVAILABLE ACCOUNTS when that list is present."
+          },
+          "accountName": {
+            "type": "string",
+            "description": "Optional display name for confirmation messaging only — the client switches by accountId, never by name."
+          }
+        },
+        "required": ["accountId"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "deleteTransaction",
       "description": "Deletes a FORECASTED transaction (or a whole recurring series) from the user's account. This writes real data and is confirm-gated in code: first FIND the transaction (check the RECENT WRITES THIS SESSION block for ids of transactions you just created, else look it up via getUpcomingTransactions with a date window around the date the user mentioned, or getRecurringForecasts), show the user exactly what you found (title, amount, date), and — if it is recurring — ask whether to delete just that occurrence or the entire series. Only after the user explicitly confirms (call confirmTransaction) call this tool. Use scope 'single' with transactionid for one occurrence; scope 'group' with groupid to delete every occurrence of the series. Never claim a transaction doesn't exist until a lookup with a correct date window returned no match. Only forecasted transactions (forecast_type 'F') can be deleted — actual transactions ('A') cannot.",
       "parameters": {
