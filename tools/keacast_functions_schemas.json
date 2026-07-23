@@ -273,7 +273,7 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "intent": { "type": "string", "description": "Short label for what the user is planning, e.g. 'weekly gas budget'." },
+          "intent": { "type": "string", "description": "Short label for what the user is planning, e.g. 'weekly gas budget'. Do not use the example values as the intent, but rather the actual intent of the user." },
           "title": { "type": "string", "description": "Short name for the transaction." },
           "type": { "type": "string", "enum": ["expense", "income"], "description": "expense for money spent, income for money received." },
           "amount": { "type": "number", "description": "Positive magnitude; a SINGLE concrete estimate, never a range." },
