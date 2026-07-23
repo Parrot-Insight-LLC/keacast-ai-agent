@@ -1003,8 +1003,46 @@ function emptyDialogueState() {
     // just created" resolves to a real id without a lookup (tool results are
     // NOT kept in conversation history, so this is the only survivor).
     recentWrites: [],
+    // Last on-screen focused entity (tx/day/feed/category). Survives popup
+    // close so "delete it" / "how much is that?" can resolve after focus clears.
+    // Only overwritten when the client sends a new focusedEntity — never cleared
+    // just because the current turn's uiContext.focusedEntity is null.
+    uiReferent: null,
     updatedAt: null,
   };
+}
+
+/**
+ * Fail-soft: when the client sends a focusedEntity, mirror a tiny referent into
+ * dialogue state. Do NOT clear an existing uiReferent when focusedEntity is null
+ * (popup closed) — that is how closed-popup deixis ("delete it") works.
+ */
+function mirrorUiReferentFromUiContext(dialogueState, uiContext) {
+  if (!dialogueState || typeof dialogueState !== 'object') return;
+  const fe = uiContext && typeof uiContext === 'object' ? uiContext.focusedEntity : null;
+  if (!fe || typeof fe !== 'object' || !fe.type) return;
+  const amount = typeof fe.amount === 'number' && Number.isFinite(fe.amount) ? fe.amount : undefined;
+  dialogueState.uiReferent = {
+    type: String(fe.type).slice(0, 32),
+    id: fe.id != null ? fe.id : undefined,
+    label: fe.label != null ? String(fe.label).slice(0, 80) : undefined,
+    amount,
+    date: fe.date ? String(fe.date).slice(0, 10) : undefined,
+    category: fe.category != null ? String(fe.category).slice(0, 40) : undefined,
+    at: new Date().toISOString(),
+  };
+}
+
+function formatUiReferentLine(ref) {
+  if (!ref || typeof ref !== 'object' || !ref.type) return '';
+  const label = ref.label ? ` "${String(ref.label).slice(0, 60)}"` : '';
+  const amt = (typeof ref.amount === 'number' && Number.isFinite(ref.amount))
+    ? ` ${ref.amount < 0 ? `-$${Math.abs(ref.amount)}` : `$${ref.amount}`}`
+    : '';
+  const date = ref.date ? ` on ${ref.date}` : '';
+  const id = ref.id != null ? `:${ref.id}` : '';
+  const cat = ref.category ? ` cat=${String(ref.category).slice(0, 40)}` : '';
+  return `${ref.type}${id}${label}${amt}${date}${cat}`;
 }
 
 const MAX_RECENT_WRITES = 5;
@@ -1539,13 +1577,16 @@ function buildUiContextBlock(uiContext) {
 
   const voiceHint =
     uiContext.interactionMode === 'voice' || uiContext.companionActive === true
-      ? 'VOICE/COMPANION MODE: Prefer short spoken sentences. Avoid large markdown tables. Lead with the answer, then at most 2 supporting bullets.'
+      ? 'VOICE/COMPANION MODE: Keep the entire reply ≤ ~600 characters. No markdown tables. Lead with the answer, then at most 2 short supporting bullets. Full chat (text mode) may be richer.'
       : '';
 
   const body = [
     'ON-SCREEN CONTEXT (trusted client snapshot of what the user can see NOW.',
     'Use this to resolve deixis: "this", "that", "here", "today on my calendar",',
     '"this charge", "what I\'m looking at". Do NOT invent UI state beyond this block.',
+    'Deixis order: (1) focusedEntity in this block, (2) focusedDate,',
+    '(3) last uiReferent in DIALOGUE STATE, (4) ask one short clarifying question.',
+    'Never invent an unrelated paycheck/merchant when deixis is ambiguous.',
     'If a needed detail is missing, ask one short clarifying question or call a read tool.',
     'Prefer focusedEntity / focusedDate over generic account context when answering.)',
     parts.join('; '),
@@ -1563,9 +1604,10 @@ function buildDialogueStateBlock(state) {
   const hasDraft = draft && Object.keys(draft).some(
     (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== ''
   );
-  if (!state.intent && !hasDraft) return '';
+  const uiRefLine = formatUiReferentLine(state.uiReferent);
+  if (!state.intent && !hasDraft && !uiRefLine) return '';
 
-  const lines = ['DIALOGUE STATE (background — an in-progress action, NOT a message from the user):'];
+  const lines = ['DIALOGUE STATE (background — an in-progress action / last UI referent, NOT a message from the user):'];
   if (state.intent) lines.push(`- intent: ${state.intent}`);
   if (hasDraft) {
     const slotStr = ['title', 'type', 'amount', 'category', 'start', 'frequency']
@@ -1576,9 +1618,12 @@ function buildDialogueStateBlock(state) {
     const missing = computeDraftMissingFields(draft);
     if (missing.length) lines.push(`- missing/uncertain: ${missing.join(', ')}`);
   }
+  if (uiRefLine) {
+    lines.push(`- last uiReferent (use for "that"/"it"/"this" when ON-SCREEN focusedEntity is empty): ${uiRefLine}`);
+  }
   lines.push(`- awaiting user confirmation: ${state.pendingConfirmation ? 'yes' : 'no'}`);
   lines.push(
-    'Guidance: refine slots with updateDraftTransaction as details emerge. Propose a SINGLE concrete amount and ask the user to confirm. Only after the user confirms on a later turn should you call createTransaction with the draft values. Ask only for genuinely missing info.'
+    'Guidance: refine slots with updateDraftTransaction as details emerge. Propose a SINGLE concrete amount and ask the user to confirm. Only after the user confirms on a later turn should you call createTransaction with the draft values. Ask only for genuinely missing info. For deixis, prefer current ON-SCREEN focusedEntity over last uiReferent.'
   );
   return truncateText(lines.join('\n'), DIALOGUE_STATE_MAX_CHARS);
 }
@@ -2243,6 +2288,16 @@ exports.chat = async (req, res) => {
     const userAffirmative = isAffirmativeMessage(message, dialogueState.draftTransaction);
     // Reset the one-shot "committed" flag at the start of each new turn.
     dialogueState.committed = false;
+
+    // Mirror current on-screen focus into dialogueState.uiReferent (fail-soft).
+    // Only overwrites when the client sends a focusedEntity; never clears on null.
+    const uiContextRaw =
+      req.body?.uiContext && typeof req.body.uiContext === 'object' ? req.body.uiContext : null;
+    try {
+      mirrorUiReferentFromUiContext(dialogueState, uiContextRaw);
+    } catch (e) {
+      console.warn('Chat endpoint: uiReferent mirror failed (fail-soft):', e.message);
+    }
     // 2) Rolling short-term summary of older turns (loaded here, refreshed after the turn).
     let rollingSummary = '';
     try {
@@ -2493,9 +2548,7 @@ exports.chat = async (req, res) => {
     const summaryBlock = buildSummaryBlock(rollingSummary);
     const dialogueBlock = buildDialogueStateBlock(dialogueState);
     const dateRefBlock = buildDateReferenceBlock(currentDate);
-    const uiContextBlock = buildUiContextBlock(
-      req.body?.uiContext && typeof req.body.uiContext === 'object' ? req.body.uiContext : null
-    );
+    const uiContextBlock = buildUiContextBlock(uiContextRaw);
     const recentWritesBlock = buildRecentWritesBlock(dialogueState);
     // Active savings goals ride along in the selected-account blob — surface
     // them permanently so planning advice always accounts for money already
@@ -4692,6 +4745,8 @@ exports.__testables = {
   applyDraftAndCategory,
   draftConflictsWithArgs,
   buildDialogueStateBlock,
+  mirrorUiReferentFromUiContext,
+  formatUiReferentLine,
   buildFactsBlock,
   buildSummaryBlock,
   buildGoalsBlock,
