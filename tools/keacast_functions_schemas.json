@@ -530,14 +530,14 @@
     "type": "function",
     "function": {
       "name": "navigateTo",
-      "description": "NON-WRITING UI action: navigates the Keacast app to a main screen. Use when the user asks to go to a page IN THE APP (e.g. 'go to insights', 'open my profile', 'take me to the feed'). Allowed routes: /calendar, /insights, /profile, /settings, /financial-feed (or /feed), /recurring. Briefly tell the user you are navigating; do not invent page contents.",
+      "description": "NON-WRITING UI action: navigates the Keacast app to a main screen. Use when the user asks to go to a page IN THE APP (e.g. 'go to insights', 'open my profile', 'take me to FAQ', 'open satellite accounts'). Allowed routes: /calendar, /insights, /profile, /settings, /financial-feed (or /feed), /recurring, /faq, /satellite, /subscriptions. Briefly tell the user you are navigating; do not invent page contents. Prefer in-app routes over public /features/... marketing pages.",
       "parameters": {
         "type": "object",
         "properties": {
           "route": {
             "type": "string",
             "description": "App route to open.",
-            "enum": ["/calendar", "/insights", "/profile", "/settings", "/financial-feed", "/feed", "/recurring"]
+            "enum": ["/calendar", "/insights", "/profile", "/settings", "/financial-feed", "/feed", "/recurring", "/faq", "/satellite", "/subscriptions"]
           }
         },
         "required": ["route"]

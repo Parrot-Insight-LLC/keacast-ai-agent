@@ -83,6 +83,9 @@ const ALLOWED_UI_NAV_ROUTES = new Set([
   '/financial-feed',
   '/feed',
   '/recurring',
+  '/faq',
+  '/satellite',
+  '/subscriptions',
 ]);
 const UI_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // While the client is in Simulation Mode, ALL real writes are refused in code
@@ -647,8 +650,8 @@ function buildChatNoAccountContext(firstName) {
   return [
     `User first name: ${firstName}.`,
     'The user has NOT loaded any accounts yet.',
-    'Explain Keacast\'s purpose and features (calendar-based cash-flow forecasting, reconciliation, recurring detection, scenario planning, category breakdowns) and how to connect accounts via Plaid, then add forecasted transactions and reconcile history.',
-    'Use the FAQ in the system prompt. Encourage listing incomes first, then expenses, so the calendar can reveal cash flow over time.',
+    'Explain Keacast\'s purpose and features (calendar-based Forecasting, Reconciliation, Transaction Netting, Recurring Detection, Simulation Mode, Smart Credit Card Forecasting, Satellite Accounts, Insights, Goals) and how to connect accounts via Plaid, then add forecasted transactions and reconcile history.',
+    'Use PRODUCT KNOWLEDGE (and onboarding FAQ if present) in the system prompt. Encourage listing incomes first, then expenses, so the calendar can reveal cash flow over time.',
   ].join('\n');
 }
 
@@ -2459,7 +2462,23 @@ exports.chat = async (req, res) => {
     const goalsAvailable = req.body?.goalsAvailable !== false;
     let faq;
     if (req.body.faq) {
-      faq = JSON.parse(req.body.faq);
+      try {
+        faq = typeof req.body.faq === 'string' ? JSON.parse(req.body.faq) : req.body.faq;
+      } catch (e) {
+        console.warn('Chat endpoint: faq parse failed (fail-soft):', e.message);
+        faq = undefined;
+      }
+    }
+    let productKnowledge;
+    if (req.body.productKnowledge) {
+      try {
+        productKnowledge = typeof req.body.productKnowledge === 'string'
+          ? JSON.parse(req.body.productKnowledge)
+          : req.body.productKnowledge;
+      } catch (e) {
+        console.warn('Chat endpoint: productKnowledge parse failed (fail-soft):', e.message);
+        productKnowledge = undefined;
+      }
     }
     const { token, userId, authHeader } = extractAuthFromRequest(req);
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
@@ -2646,9 +2665,10 @@ exports.chat = async (req, res) => {
     const {
       identityBlock,
       writePolicyBlock,
+      productHelpPlaybookBlock,
       planningPlaybookBlock,
       baseSystem,
-    } = assembleBaseSystemPrompt({ currentDate, faq });
+    } = assembleBaseSystemPrompt({ currentDate, faq, productKnowledge });
 
     // Attach the compact context block as BACKGROUND inside the system message
     // rather than as a per-turn user message. Injecting it as a `user` turn
@@ -2739,6 +2759,7 @@ exports.chat = async (req, res) => {
     logSystemPromptBlockSizes({
       identity: identityBlock,
       writePolicy: writePolicyBlock,
+      productHelpPlaybook: productHelpPlaybookBlock,
       planningPlaybook: planningPlaybookBlock,
       currentContext: completeContext
         ? `CURRENT CONTEXT (background — NOT a message from the user):\n${completeContext}`
