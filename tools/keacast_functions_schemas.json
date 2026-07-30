@@ -269,7 +269,7 @@
     "type": "function",
     "function": {
       "name": "updateDraftTransaction",
-      "description": "NON-WRITING scratchpad for slot-filling. Record or refine the fields of a transaction the user is PLANNING as details emerge across the conversation (a planned purchase, an estimated amount, a target month). Only record values that came from THIS conversation. This does NOT create or change any real data — it only updates the assistant's working draft so the user never has to repeat themselves. Call it whenever a new detail appears. Set pendingConfirmation=true ONLY when you have just proposed a complete, concrete transaction (single amount) and are asking the user to confirm on their next message.",
+      "description": "NON-WRITING scratchpad for slot-filling. Record or refine the fields of a transaction the user is PLANNING as details emerge across the conversation (a planned purchase, an estimated amount, a target month). Only record values that came from THIS conversation. This does NOT create or change any real data — it only updates the assistant's working draft so the user never has to repeat themselves. Call it whenever a new detail appears. Set pendingConfirmation=true ONLY when you have just proposed a complete, concrete transaction (single amount) and are asking the user to confirm on their next message. Do NOT use this for savings goals — use updateDraftGoal instead.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -284,6 +284,30 @@
           "merchant_name": { "type": "string" },
           "transactionid": { "type": "number", "description": "Only when staging an edit to an EXISTING transaction (for updateTransaction)." },
           "pendingConfirmation": { "type": "boolean", "description": "Set true ONLY when you have proposed a complete concrete transaction and are awaiting the user's yes/no." }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "updateDraftGoal",
+      "description": "NON-WRITING scratchpad for a savings GOAL the user is planning. Record or refine title, target_amount, end_date, frequency, start_date, category, and per-contribution amount from previewGoalCadence. This does NOT create or change any real data. Set pendingConfirmation=true ONLY when you have just proposed a complete goal and are asking the user to confirm on their next message. Do NOT use updateDraftTransaction for goals.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "intent": { "type": "string", "description": "Short label for the goal plan, e.g. 'emergency fund'." },
+          "title": { "type": "string", "description": "Short goal name." },
+          "target_amount": { "type": "number", "description": "Total amount to save (positive)." },
+          "start_date": { "type": "string", "description": "First contribution date (YYYY-MM-DD)." },
+          "end_date": { "type": "string", "description": "Deadline (YYYY-MM-DD)." },
+          "frequency": { "type": "string", "description": "Contribution cadence code (same as previewGoalCadence / createGoal)." },
+          "category": { "type": "string" },
+          "description": { "type": "string" },
+          "amount_per_row": { "type": "number", "description": "Per-contribution amount from previewGoalCadence." },
+          "goalid": { "type": "number", "description": "Only when staging an edit/delete of an EXISTING goal." },
+          "pendingConfirmation": { "type": "boolean", "description": "Set true ONLY when you have proposed a complete goal and are awaiting the user's yes/no." }
         },
         "required": []
       }
@@ -322,7 +346,7 @@
     "type": "function",
     "function": {
       "name": "createGoal",
-      "description": "Create a REAL savings goal on the user's selected account. The system schedules the contributions between start_date and end_date at the given frequency, and they appear on the user's calendar as forecasted set-asides. This writes real data: like createTransaction, you MUST first propose the full goal (title, target amount, deadline, cadence and the per-contribution amount from previewGoalCadence) and get the user's explicit confirmation on a later turn (call confirmTransaction first when they confirm). Goals are savings-style only. Before proposing, verify the per-contribution amount doesn't push the user's forecasted balances negative — warn them if it would.",
+      "description": "Create a REAL savings goal on the user's selected account. The system schedules the contributions between start_date and end_date at the given frequency, and they appear on the user's calendar as forecasted set-asides. This writes real data: you MUST first propose the full goal (title, target amount, deadline, cadence and the per-contribution amount from previewGoalCadence), stage it via updateDraftGoal with pendingConfirmation:true, and get the user's explicit confirmation on a later turn (call confirmTransaction first when they confirm). Goals are savings-style only. Before proposing, verify the per-contribution amount doesn't push the user's forecasted balances negative — warn them if it would.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -342,7 +366,7 @@
     "type": "function",
     "function": {
       "name": "updateGoal",
-      "description": "Update an EXISTING savings goal by goalid (change its target, deadline, cadence, or name). Writes real data — propose the change and get the user's explicit confirmation on a later turn first (call confirmTransaction when they confirm). Changing target/frequency/dates automatically redistributes the remaining unlocked future contributions. Find the goalid via getGoals.",
+      "description": "Update an EXISTING savings goal by goalid (change its target, deadline, cadence, or name). Writes real data — propose the change, stage it via updateDraftGoal with pendingConfirmation:true, and get the user's explicit confirmation on a later turn first (call confirmTransaction when they confirm). Changing target/frequency/dates automatically redistributes the remaining unlocked future contributions. Find the goalid via getGoals.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -363,7 +387,7 @@
     "type": "function",
     "function": {
       "name": "deleteGoal",
-      "description": "Delete an EXISTING savings goal by goalid (removes its scheduled future contributions from the calendar). Destructive — always confirm with the user on a later turn before calling (call confirmTransaction when they confirm). Find the goalid via getGoals.",
+      "description": "Delete an EXISTING savings goal by goalid (removes its scheduled future contributions from the calendar). Destructive — propose which goal, stage via updateDraftGoal with pendingConfirmation:true, and confirm with the user on a later turn before calling (call confirmTransaction when they confirm). Find the goalid via getGoals.",
       "parameters": {
         "type": "object",
         "properties": {

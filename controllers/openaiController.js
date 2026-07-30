@@ -1,6 +1,6 @@
 // controllers/openaiController.js
 const redis = require('../services/redisService');
-const { queryAzureOpenAI, functionSchemas } = require('../services/openaiService'); // must support tools
+const { queryAzureOpenAI, functionSchemas, filterFunctionSchemas } = require('../services/openaiService'); // must support tools
 const { functionMap } = require('../tools/functionMap'); // <-- use functionMap.js
 const contextCache = require('../services/contextCache.service'); // <-- use context cache service
 const moment = require('moment');
@@ -53,6 +53,8 @@ const WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction']);
 const GOAL_WRITE_TOOLS = new Set(['createGoal', 'updateGoal', 'deleteGoal']);
 // Non-writing tool that stages/refines the draft transaction slots.
 const DRAFT_TOOL = 'updateDraftTransaction';
+// Non-writing tool that stages/refines draft goal slots (separate from transactions).
+const GOAL_DRAFT_TOOL = 'updateDraftGoal';
 // Non-writing tool the model calls when it judges the user's latest message to
 // confirm the pending proposal. This is the PRIMARY confirmation signal for
 // the write gate (the isAffirmativeMessage regex remains as a fallback).
@@ -163,6 +165,17 @@ function selectedAccountToolCacheKey(userId, accountId) {
   const u = normalizeAccountIdForCacheKey(userId);
   const a = normalizeAccountIdForCacheKey(accountId);
   return `summarization:tool:selectedaccount:${u}:${a}`;
+}
+
+// Fail-soft: drop the 5-min selected-account blob after a successful write so
+// the next chat turn's CURRENT CONTEXT / ACTIVE GOALS aren't stale.
+async function invalidateSelectedAccountToolCache(userId, accountId) {
+  if (!userId || accountId === undefined || accountId === null || accountId === '') return;
+  try {
+    await redis.del(selectedAccountToolCacheKey(userId, accountId));
+  } catch (e) {
+    console.warn('Selected-account tool cache invalidate failed:', e.message);
+  }
 }
 
 // Build a cheap, stable fingerprint for the cache key when we have the
@@ -1023,6 +1036,11 @@ function emptyDialogueState() {
     intent: null,
     draftTransaction: {},
     pendingConfirmation: false,
+    // Goal propose→confirm is separate from the transaction draft so a leftover
+    // tx draft cannot unlock createGoal/updateGoal/deleteGoal.
+    draftGoal: {},
+    pendingGoalConfirmation: false,
+    goalIntent: null,
     committed: false,
     lastCommitSignature: null,
     // Rolling log of writes committed this session ({ action, transaction_id,
@@ -1031,6 +1049,9 @@ function emptyDialogueState() {
     // just created" resolves to a real id without a lookup (tool results are
     // NOT kept in conversation history, so this is the only survivor).
     recentWrites: [],
+    // Compact summaries of recent tool outcomes (reads + writes + previews)
+    // for deixis across turns — not full payloads.
+    recentToolOutcomes: [],
     // Last on-screen focused entity (tx/day/feed/category). Survives popup
     // close so "delete it" / "how much is that?" can resolve after focus clears.
     // Only overwritten when the client sends a new focusedEntity — never cleared
@@ -1074,6 +1095,7 @@ function formatUiReferentLine(ref) {
 }
 
 const MAX_RECENT_WRITES = 5;
+const MAX_RECENT_TOOL_OUTCOMES = 8;
 
 function recordRecentWrite(state, entry) {
   if (!state || !entry) return;
@@ -1081,6 +1103,55 @@ function recordRecentWrite(state, entry) {
   state.recentWrites.push({ ...entry, at: new Date().toISOString() });
   if (state.recentWrites.length > MAX_RECENT_WRITES) {
     state.recentWrites = state.recentWrites.slice(-MAX_RECENT_WRITES);
+  }
+}
+
+function compactToolOutcome(name, contentStr) {
+  const out = { name: String(name || '').slice(0, 48) };
+  let parsed = null;
+  try {
+    parsed = typeof contentStr === 'string' ? JSON.parse(contentStr) : contentStr;
+  } catch {
+    return out;
+  }
+  if (!parsed || typeof parsed !== 'object') return out;
+  if (parsed.blocked) {
+    out.blocked = true;
+    if (parsed.reason) out.reason = String(parsed.reason).slice(0, 48);
+    return out;
+  }
+  if (parsed.error) {
+    out.error = String(parsed.error).slice(0, 80);
+    return out;
+  }
+  if (parsed.duplicate) out.duplicate = true;
+  if (parsed.confirmed === true) out.confirmed = true;
+  if (parsed.ok === true) out.ok = true;
+  for (const k of [
+    'transaction_id', 'transactionid', 'group_id', 'groupid',
+    'goal_id', 'goalid', 'title', 'amount', 'target_amount',
+    'start', 'start_date', 'end_date', 'action', 'amount_per_row',
+  ]) {
+    if (parsed[k] !== undefined && parsed[k] !== null && parsed[k] !== '') {
+      const v = parsed[k];
+      out[k] = typeof v === 'string' ? v.slice(0, 60) : v;
+    }
+  }
+  if (parsed.simOp) out.sim = true;
+  if (parsed.draft && typeof parsed.draft === 'object') {
+    out.draftKeys = Object.keys(parsed.draft)
+      .filter((k) => parsed.draft[k] !== undefined && parsed.draft[k] !== null && String(parsed.draft[k]).trim() !== '')
+      .slice(0, 8);
+  }
+  return out;
+}
+
+function recordRecentToolOutcome(state, entry) {
+  if (!state || !entry) return;
+  if (!Array.isArray(state.recentToolOutcomes)) state.recentToolOutcomes = [];
+  state.recentToolOutcomes.push({ ...entry, at: new Date().toISOString() });
+  if (state.recentToolOutcomes.length > MAX_RECENT_TOOL_OUTCOMES) {
+    state.recentToolOutcomes = state.recentToolOutcomes.slice(-MAX_RECENT_TOOL_OUTCOMES);
   }
 }
 
@@ -1100,6 +1171,35 @@ function buildRecentWritesBlock(state) {
     if (w.transaction_id != null) parts.push(`transactionid=${w.transaction_id}`);
     if (w.group_id != null) parts.push(`groupid=${w.group_id}`);
     if (w.goal_id != null) parts.push(`goalid=${w.goal_id}`);
+    lines.push(`- ${parts.join(', ')}`);
+  }
+  return truncateText(lines.join('\n'), 900);
+}
+
+// Compact summaries of recent tool results (lookups, previews, blocked writes)
+// so deixis works across turns without persisting full tool payloads in history.
+function buildRecentToolOutcomesBlock(state) {
+  const outcomes = Array.isArray(state?.recentToolOutcomes) ? state.recentToolOutcomes : [];
+  if (outcomes.length === 0) return '';
+  const lines = ['RECENT TOOL OUTCOMES (background — compact results from prior turns; use for ids/amounts when the user says "that" / "the one we looked up"):'];
+  for (const o of outcomes) {
+    const parts = [o.name || 'tool'];
+    if (o.blocked) parts.push(`blocked:${o.reason || 'yes'}`);
+    if (o.error) parts.push(`err=${o.error}`);
+    if (o.confirmed) parts.push('confirmed');
+    if (o.duplicate) parts.push('duplicate');
+    if (o.sim) parts.push('simOp');
+    if (o.title) parts.push(`"${String(o.title).slice(0, 40)}"`);
+    if (o.amount != null) parts.push(`$${Math.abs(Number(o.amount)) || o.amount}`);
+    if (o.target_amount != null) parts.push(`target $${o.target_amount}`);
+    if (o.amount_per_row != null) parts.push(`per $${o.amount_per_row}`);
+    if (o.start || o.start_date) parts.push(`start ${String(o.start || o.start_date).slice(0, 10)}`);
+    if (o.end_date) parts.push(`end ${String(o.end_date).slice(0, 10)}`);
+    if (o.transaction_id != null || o.transactionid != null) parts.push(`txid=${o.transaction_id ?? o.transactionid}`);
+    if (o.group_id != null || o.groupid != null) parts.push(`gid=${o.group_id ?? o.groupid}`);
+    if (o.goal_id != null || o.goalid != null) parts.push(`goalid=${o.goal_id ?? o.goalid}`);
+    if (o.action) parts.push(String(o.action));
+    if (Array.isArray(o.draftKeys) && o.draftKeys.length) parts.push(`draft[${o.draftKeys.join(',')}]`);
     lines.push(`- ${parts.join(', ')}`);
   }
   return truncateText(lines.join('\n'), 900);
@@ -1133,11 +1233,23 @@ async function saveDialogueState(userId, state) {
 // Slots we consider "core" for a proposable transaction. `title`/`amount`/
 // `type` are the minimum needed to confirm; the rest are estimated downstream.
 const DRAFT_CORE_SLOTS = ['title', 'type', 'amount', 'start'];
+// Core slots for a proposable savings goal (mirrors createGoal required fields).
+const GOAL_DRAFT_CORE_SLOTS = ['title', 'target_amount', 'end_date', 'frequency'];
 
 function computeDraftMissingFields(draft) {
   const missing = [];
   if (!draft || typeof draft !== 'object') return DRAFT_CORE_SLOTS.slice();
   for (const slot of DRAFT_CORE_SLOTS) {
+    const v = draft[slot];
+    if (v === undefined || v === null || String(v).trim() === '') missing.push(slot);
+  }
+  return missing;
+}
+
+function computeGoalDraftMissingFields(draft) {
+  const missing = [];
+  if (!draft || typeof draft !== 'object') return GOAL_DRAFT_CORE_SLOTS.slice();
+  for (const slot of GOAL_DRAFT_CORE_SLOTS) {
     const v = draft[slot];
     if (v === undefined || v === null || String(v).trim() === '') missing.push(slot);
   }
@@ -1153,6 +1265,14 @@ function isDraftProposable(draft) {
     (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== ''
   );
   return hasSlots && computeDraftMissingFields(draft).length === 0;
+}
+
+function isGoalDraftProposable(draft) {
+  if (!draft || typeof draft !== 'object') return false;
+  const hasSlots = Object.keys(draft).some(
+    (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== ''
+  );
+  return hasSlots && computeGoalDraftMissingFields(draft).length === 0;
 }
 
 // Stable signature for a draft/create payload so a multi-round loop (or a retry)
@@ -1317,9 +1437,26 @@ function transcriptShowsPendingProposal(history) {
   const lastAssistant = lastAssistantTurnText(history);
   if (!lastAssistant) return false;
   const t = lastAssistant.toLowerCase();
+  // Goal proposals are handled by transcriptShowsPendingGoalProposal so a
+  // goal confirm ask does not unlock createTransaction.
+  if (/\b(savings\s+)?goal\b/.test(t) && !/\b(transaction|forecast|expense|income)\b/.test(t)) {
+    return false;
+  }
   const hasAmount = /(^|[^\w])\$\s*\d/.test(lastAssistant) || /\b\d[\d,]*(\.\d+)?\s*(dollars|bucks)\b/.test(t);
   const asksToConfirm =
     /\b(confirm|shall i|should i|would you like|want me to|do you want|sound good|look good|looks right|is (this|that) (right|correct|ok|okay)|ready to (add|create)|go ahead)\b/.test(t);
+  return hasAmount && asksToConfirm;
+}
+
+// True when the last assistant turn looks like a savings-goal propose→confirm ask.
+function transcriptShowsPendingGoalProposal(history) {
+  const lastAssistant = lastAssistantTurnText(history);
+  if (!lastAssistant) return false;
+  const t = lastAssistant.toLowerCase();
+  if (!/\b(savings\s+)?goal\b/.test(t)) return false;
+  const hasAmount = /(^|[^\w])\$\s*\d/.test(lastAssistant) || /\b\d[\d,]*(\.\d+)?\s*(dollars|bucks)\b/.test(t);
+  const asksToConfirm =
+    /\b(confirm|shall i|should i|would you like|want me to|do you want|sound good|look good|looks right|is (this|that) (right|correct|ok|okay)|ready to (add|create)|go ahead|create (this |the )?goal|save (this |the )?goal)\b/.test(t);
   return hasAmount && asksToConfirm;
 }
 
@@ -1672,8 +1809,12 @@ function buildDialogueStateBlock(state) {
   const hasDraft = draft && Object.keys(draft).some(
     (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== ''
   );
+  const goalDraft = state.draftGoal || {};
+  const hasGoalDraft = goalDraft && Object.keys(goalDraft).some(
+    (k) => goalDraft[k] !== undefined && goalDraft[k] !== null && String(goalDraft[k]).trim() !== ''
+  );
   const uiRefLine = formatUiReferentLine(state.uiReferent);
-  if (!state.intent && !hasDraft && !uiRefLine) return '';
+  if (!state.intent && !state.goalIntent && !hasDraft && !hasGoalDraft && !uiRefLine) return '';
 
   const lines = ['DIALOGUE STATE (background — an in-progress action / last UI referent, NOT a message from the user):'];
   if (state.intent) lines.push(`- intent: ${state.intent}`);
@@ -1686,12 +1827,23 @@ function buildDialogueStateBlock(state) {
     const missing = computeDraftMissingFields(draft);
     if (missing.length) lines.push(`- missing/uncertain: ${missing.join(', ')}`);
   }
+  if (state.goalIntent) lines.push(`- goal intent: ${state.goalIntent}`);
+  if (hasGoalDraft) {
+    const slotStr = ['title', 'target_amount', 'start_date', 'end_date', 'frequency', 'category', 'amount_per_row', 'goalid']
+      .filter((k) => goalDraft[k] !== undefined && goalDraft[k] !== null && String(goalDraft[k]).trim() !== '')
+      .map((k) => `${k}=${goalDraft[k]}`)
+      .join(', ');
+    lines.push(`- draft goal: ${slotStr || '(no slots yet)'}`);
+    const missing = computeGoalDraftMissingFields(goalDraft);
+    if (missing.length) lines.push(`- goal missing/uncertain: ${missing.join(', ')}`);
+  }
   if (uiRefLine) {
     lines.push(`- last uiReferent (use for "that"/"it"/"this" when ON-SCREEN focusedEntity is empty): ${uiRefLine}`);
   }
-  lines.push(`- awaiting user confirmation: ${state.pendingConfirmation ? 'yes' : 'no'}`);
+  lines.push(`- awaiting transaction confirmation: ${state.pendingConfirmation ? 'yes' : 'no'}`);
+  lines.push(`- awaiting goal confirmation: ${state.pendingGoalConfirmation ? 'yes' : 'no'}`);
   lines.push(
-    'Guidance: refine slots with updateDraftTransaction as details emerge. Propose a SINGLE concrete amount and ask the user to confirm. Only after the user confirms on a later turn should you call createTransaction with the draft values. Ask only for genuinely missing info. For deixis, prefer current ON-SCREEN focusedEntity over last uiReferent.'
+    'Guidance: refine transaction slots with updateDraftTransaction; refine goal slots with updateDraftGoal. Propose a SINGLE concrete amount and ask the user to confirm. Only after the user confirms on a later turn should you call the matching write tool. Transaction and goal drafts are independent — do not use one to unlock the other. For deixis, prefer current ON-SCREEN focusedEntity over last uiReferent.'
   );
   return truncateText(lines.join('\n'), DIALOGUE_STATE_MAX_CHARS);
 }
@@ -1846,7 +1998,11 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           if (v !== undefined && v !== null && String(v).trim() !== '') state.draftTransaction[k] = v;
         }
         if (intent && String(intent).trim()) state.intent = String(intent).trim();
-        if (proposed) state.pendingConfirmation = true;
+        if (proposed) {
+          state.pendingConfirmation = true;
+          // Isolating: a transaction proposal clears any pending goal confirm.
+          state.pendingGoalConfirmation = false;
+        }
         const missing = computeDraftMissingFields(state.draftTransaction);
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
           ok: true,
@@ -1861,15 +2017,54 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         continue;
       }
 
+      // ── Non-writing goal draft tool: merge slots into dialogue state ─────
+      if (name === GOAL_DRAFT_TOOL) {
+        draftUpdates++;
+        if (draftUpdates > MAX_DRAFT_UPDATES_PER_TURN) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: 'Draft already refined several times this turn; proceed to propose/confirm or ask the user.' }) });
+          continue;
+        }
+        if (!state.draftGoal || typeof state.draftGoal !== 'object') state.draftGoal = {};
+        const incoming = { ...args };
+        const intent = incoming.intent; delete incoming.intent;
+        const proposed = incoming.pendingConfirmation === true; delete incoming.pendingConfirmation;
+        delete incoming.userId; delete incoming.accountId;
+        for (const [k, v] of Object.entries(incoming)) {
+          if (v !== undefined && v !== null && String(v).trim() !== '') state.draftGoal[k] = v;
+        }
+        if (intent && String(intent).trim()) state.goalIntent = String(intent).trim();
+        if (proposed) {
+          state.pendingGoalConfirmation = true;
+          // Isolating: a goal proposal clears any pending transaction confirm.
+          state.pendingConfirmation = false;
+        }
+        const missing = computeGoalDraftMissingFields(state.draftGoal);
+        toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+          ok: true,
+          draft: state.draftGoal,
+          intent: state.goalIntent,
+          missingFields: missing,
+          pendingConfirmation: state.pendingGoalConfirmation,
+          note: missing.length
+            ? 'Goal draft saved. Fill missing fields (use previewGoalCadence for amount_per_row) and propose, or ask only for what you cannot infer.'
+            : 'Goal draft is complete. Propose the concrete goal and ask the user to confirm before createGoal/updateGoal/deleteGoal.'
+        }) });
+        continue;
+      }
+
       // ── Non-writing confirmation signal: the model judged the user's latest
       // message to confirm the pending proposal. This is the PRIMARY way the
       // write gate is armed — far more robust than the regex fallback, which
       // can't cover every natural phrasing ("yeah let's do that", emoji, etc.).
       if (name === CONFIRM_TOOL) {
-        const proposalExists =
+        const txProposalExists =
           ctx.pendingConfirmationAtStart === true ||
           ctx.draftCompleteAtStart === true ||
           ctx.proposalInTranscript === true;
+        const goalProposalExists =
+          ctx.pendingGoalConfirmationAtStart === true ||
+          ctx.goalDraftCompleteAtStart === true ||
+          ctx.goalProposalInTranscript === true;
         // The confirmation must resolve to concrete values from SOMEWHERE the
         // user actually saw: the staged draft, or values extractable from the
         // proposal message itself. Without either, a follow-up write would run
@@ -1879,14 +2074,33 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           (k) => draftObj[k] !== undefined && draftObj[k] !== null && String(draftObj[k]).trim() !== ''
         );
         const transcriptHasValues = !!(ctx.transcriptProposal && (ctx.transcriptProposal.amount !== undefined || ctx.transcriptProposal.amounts?.length));
-        if (proposalExists && (draftHasSlots || transcriptHasValues)) {
+        const goalDraftObj = state.draftGoal || {};
+        const goalDraftHasSlots = GOAL_DRAFT_CORE_SLOTS.some(
+          (k) => goalDraftObj[k] !== undefined && goalDraftObj[k] !== null && String(goalDraftObj[k]).trim() !== ''
+        );
+        if (goalProposalExists && (goalDraftHasSlots || ctx.goalProposalInTranscript === true)) {
           ctx.userAffirmative = true;
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             ok: true,
             confirmed: true,
+            kind: 'goal',
+            message: 'Goal confirmation registered. Now call createGoal/updateGoal/deleteGoal with the EXACT values you proposed — do NOT re-estimate, and do not re-ask the user.'
+          }) });
+        } else if (txProposalExists && (draftHasSlots || transcriptHasValues)) {
+          ctx.userAffirmative = true;
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: true,
+            confirmed: true,
+            kind: 'transaction',
             message: 'Confirmation registered. Now call createTransaction (or updateTransaction) with the EXACT values you proposed to the user — same amount, same date, same category, same title. Do NOT re-estimate anything, and do not re-ask the user.'
           }) });
-        } else if (proposalExists) {
+        } else if (goalProposalExists) {
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            ok: false,
+            confirmed: false,
+            message: 'The proposed goal values were never staged. Call updateDraftGoal NOW with the exact values you proposed (title, target_amount, end_date, frequency), then call confirmTransaction again in the same turn.'
+          }) });
+        } else if (txProposalExists) {
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             ok: false,
             confirmed: false,
@@ -1896,7 +2110,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             ok: false,
             confirmed: false,
-            message: 'No pending proposal found to confirm. Propose the full transaction first (updateDraftTransaction with a SINGLE concrete amount, then ask the user to confirm on their next message).'
+            message: 'No pending proposal found to confirm. Propose the full transaction (updateDraftTransaction) or goal (updateDraftGoal) first, then ask the user to confirm on their next message.'
           }) });
         }
         continue;
@@ -2214,6 +2428,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           committedWrites.push(writeRecord);
           // Session memory so later turns can update/delete this by real id.
           recordRecentWrite(state, writeRecord);
+          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId);
           toolResults.push({ id: toolCall.id, name, content: toolContent });
         } catch (err) {
           blockedWrites.push({ tool: name, reason: 'execution_failed' });
@@ -2223,8 +2438,8 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       }
 
       // ── Goal write gate (createGoal / updateGoal / deleteGoal) ───────────
-      // Same propose→confirm contract as transactions, but WITHOUT the
-      // transaction-draft merge (goal fields are unrelated to the draft slots).
+      // Same propose→confirm contract as transactions, but armed only by GOAL
+      // dialogue state / goal transcript proposal (never by the tx draft).
       if (GOAL_WRITE_TOOLS.has(name)) {
         if (ctx.goalsAvailable === false) {
           blockedWrites.push({ tool: name, reason: 'goals_not_available' });
@@ -2236,16 +2451,16 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           continue;
         }
         const proposedEarlier =
-          ctx.pendingConfirmationAtStart === true ||
-          ctx.draftCompleteAtStart === true ||
-          ctx.proposalInTranscript === true;
+          ctx.pendingGoalConfirmationAtStart === true ||
+          ctx.goalDraftCompleteAtStart === true ||
+          ctx.goalProposalInTranscript === true;
         const confirmed = proposedEarlier && ctx.userAffirmative === true;
         if (!confirmed) {
           blockedWrites.push({ tool: name, reason: 'confirmation_required' });
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             blocked: true,
             reason: 'confirmation_required',
-            message: 'Do NOT write yet. First show the user the full proposed goal (title, target amount, deadline, cadence, and the per-contribution amount from previewGoalCadence) and wait for them to explicitly confirm on their next message.'
+            message: 'Do NOT write yet. First show the user the full proposed goal (title, target amount, deadline, cadence, and the per-contribution amount from previewGoalCadence), stage it with updateDraftGoal (pendingConfirmation:true), and wait for them to explicitly confirm on their next message.'
           }) });
           continue;
         }
@@ -2263,7 +2478,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           const result = await toolFn(args, ctx);
           state.lastCommitSignature = goalSig;
           state.committed = true;
-          state.pendingConfirmation = false;
+          state.pendingGoalConfirmation = false;
+          state.draftGoal = {};
+          state.goalIntent = null;
           const goalRecord = {
             action: result?.action || 'goal_write',
             transaction_id: null,
@@ -2274,6 +2491,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           };
           committedWrites.push(goalRecord);
           recordRecentWrite(state, goalRecord);
+          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId);
           let toolContent = JSON.stringify(result ?? {});
           if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
           toolResults.push({ id: toolCall.id, name, content: toolContent });
@@ -2329,6 +2547,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           };
           committedWrites.push(delRecord);
           recordRecentWrite(state, delRecord);
+          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId);
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             ...(result ?? {}),
             note: 'DELETE COMMITTED. Confirm to the user exactly what was deleted (the transaction/series you proposed) — do not describe any other transaction.'
@@ -2361,6 +2580,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 
     const assistantToolMessage = { role: 'assistant', content: null, tool_calls: batch };
     const toolMessages = toolResults.map(tr => ({ role: 'tool', tool_call_id: tr.id, content: tr.content }));
+    for (const tr of toolResults) {
+      recordRecentToolOutcome(state, compactToolOutcome(tr.name, tr.content));
+    }
     return { assistantToolMessage, toolMessages, toolResults };
   };
 
@@ -2397,6 +2619,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   let messages = [...originalMessages];
   let batch = toolCalls;
   let lastToolResults = [];
+  const toolsForTurn = Array.isArray(ctx.toolsForTurn) && ctx.toolsForTurn.length > 0
+    ? ctx.toolsForTurn
+    : functionSchemas;
 
   for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
     const { assistantToolMessage, toolMessages, toolResults } = await runBatch(batch);
@@ -2409,7 +2634,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     let response;
     try {
       console.log(`Tool loop round ${round}/${MAX_TOOL_ROUNDS}: calling model with`, convo.length, 'messages (tool_choice:', isLastRound ? 'none' : 'auto', ')');
-      response = await queryAzureOpenAI(convo, { tools: functionSchemas, tool_choice: isLastRound ? 'none' : 'auto' });
+      response = await queryAzureOpenAI(convo, { tools: toolsForTurn, tool_choice: isLastRound ? 'none' : 'auto' });
     } catch (error) {
       console.log('Tool loop model call failed:', error.message);
       console.log('Error details:', error.response?.data || error);
@@ -2509,10 +2734,14 @@ exports.chat = async (req, res) => {
     // ── Kea Assistant memory layers (all fail-soft) ──────────────────────────
     // 1) Dialogue state: in-progress draft transaction + slot-filling.
     const dialogueState = await loadDialogueState(userId);
+    if (!dialogueState.draftGoal || typeof dialogueState.draftGoal !== 'object') dialogueState.draftGoal = {};
+    if (!Array.isArray(dialogueState.recentToolOutcomes)) dialogueState.recentToolOutcomes = [];
     const pendingConfirmationAtStart = dialogueState.pendingConfirmation === true;
     // A complete draft persisted from a prior turn also arms the write gate,
     // so confirmations work even when the model proposed in prose.
     const draftCompleteAtStart = isDraftProposable(dialogueState.draftTransaction);
+    const pendingGoalConfirmationAtStart = dialogueState.pendingGoalConfirmation === true;
+    const goalDraftCompleteAtStart = isGoalDraftProposable(dialogueState.draftGoal);
     const userAffirmative = isAffirmativeMessage(message, dialogueState.draftTransaction);
     // Reset the one-shot "committed" flag at the start of each new turn.
     dialogueState.committed = false;
@@ -2690,6 +2919,7 @@ exports.chat = async (req, res) => {
     const uiContextBlock = buildUiContextBlock(uiContextRaw);
     const availableAccountsBlock = buildAvailableAccountsBlock(uiContextRaw);
     const recentWritesBlock = buildRecentWritesBlock(dialogueState);
+    const recentToolOutcomesBlock = buildRecentToolOutcomesBlock(dialogueState);
     // Active savings goals ride along in the selected-account blob — surface
     // them permanently so planning advice always accounts for money already
     // earmarked toward goals (no tool round-trip needed).
@@ -2708,10 +2938,11 @@ exports.chat = async (req, res) => {
     if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
     if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
     if (recentWritesBlock) systemContent += `\n\n---\n${recentWritesBlock}`;
+    if (recentToolOutcomesBlock) systemContent += `\n\n---\n${recentToolOutcomesBlock}`;
     if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
     // Goals feature availability steers whether the model may offer goal writes.
     if (goalsAvailable) {
-      systemContent += `\n\n---\nGOALS ARE AVAILABLE: You may use getGoals, previewGoalCadence, and (after propose+confirm) createGoal/updateGoal/deleteGoal.`;
+      systemContent += `\n\n---\nGOALS ARE AVAILABLE: You may use getGoals, previewGoalCadence, updateDraftGoal, and (after propose+confirm) createGoal/updateGoal/deleteGoal. Stage goal proposals with updateDraftGoal — never with updateDraftTransaction.`;
     } else {
       systemContent += `\n\n---\nGOALS ARE NOT AVAILABLE on this user's plan. Do NOT offer to create, update, or delete goals (those tools are refused in code). You may still lay out savings plans in prose and mention that the Goals feature is available on upgraded plans.`;
     }
@@ -2727,8 +2958,9 @@ exports.chat = async (req, res) => {
 - Use proposeSimulationAdd to stage a new hypothetical income/expense, proposeSimulationModify to change an existing forecasted transaction (find its transactionid via the read tools if needed), and proposeSimulationRemove to drop one. Map intent: "add / what if I had" => add; "change / raise / lower / move" => modify; "cancel / remove / drop / without" => remove.
 - For recurring forecasts set scope: 'group' for every occurrence, 'groupfrom' for this-and-future, 'single' (default) for one occurrence.
 - These tools do NOT write data and need NO confirmation turn — propose immediately with your best estimates, exactly one tool call per distinct change.
-- NEVER call createTransaction, updateTransaction, or deleteTransaction while Simulation Mode is active (they are refused in code). The user commits or discards the simulation from the banner on their calendar.
-- After proposing, briefly narrate the change and its projected impact on the user's balances.`;
+- NEVER call createTransaction, updateTransaction, deleteTransaction, createGoal, updateGoal, or deleteGoal while Simulation Mode is active (they are refused in code). The user commits or discards the simulation from the banner on their calendar.
+- After proposing, briefly narrate the change and its projected impact on the user's balances.
+- If the user asks to "make it real" / permanently save a change, tell them to leave Simulation Mode (or discard the sim) first; do NOT treat a staged sim op as a confirmed real write.`;
       if (simContext && Number(simContext.opCount) > 0) {
         simBlock += `\nThe simulation currently holds ${Number(simContext.opCount)} staged change(s).`;
       }
@@ -2752,7 +2984,7 @@ exports.chat = async (req, res) => {
       }
       systemContent += `\n\n---\n${simBlock}`;
     } else if (simulationAvailable) {
-      systemContent += `\n\n---\nWHAT-IF SIMULATIONS: When the user asks a hypothetical "what if" question about adding, changing, or removing a transaction (rather than asking you to actually do it), use the proposeSimulation* tools (proposeSimulationAdd / proposeSimulationModify / proposeSimulationRemove). They stage the change on the user's calendar as a reviewable simulation without writing data and need no confirmation turn. Only use createTransaction/updateTransaction/deleteTransaction when the user wants the REAL change made.`;
+      systemContent += `\n\n---\nWHAT-IF SIMULATIONS: When the user asks a hypothetical "what if" question about adding, changing, or removing a transaction (rather than asking you to actually do it), use the proposeSimulation* tools (proposeSimulationAdd / proposeSimulationModify / proposeSimulationRemove). They stage the change on the user's calendar as a reviewable simulation without writing data and need no confirmation turn. Only use createTransaction/updateTransaction/deleteTransaction when the user wants the REAL change made (propose→confirm→write). A prior simulation op is NOT confirmation for a real write — if they later ask to make it permanent, start a fresh propose→confirm cycle.`;
     } else {
       systemContent += `\n\n---\nDo not use the proposeSimulation* tools — this user's plan does not include Simulation Mode. For hypothetical questions, explain the impact in prose instead.`;
     }
@@ -2772,6 +3004,7 @@ exports.chat = async (req, res) => {
       facts: factsBlock,
       summary: summaryBlock,
       recentWrites: recentWritesBlock,
+      recentToolOutcomes: recentToolOutcomesBlock,
       dialogue: dialogueBlock,
       systemTotal: systemContent,
     });
@@ -2780,9 +3013,12 @@ exports.chat = async (req, res) => {
       'facts:', longTermFacts.length,
       'summaryChars:', (rollingSummary || '').length,
       'draftSlots:', Object.keys(dialogueState.draftTransaction || {}).length,
+      'goalDraftSlots:', Object.keys(dialogueState.draftGoal || {}).length,
       'categories:', categoryNames.length,
       'pendingConfirm:', pendingConfirmationAtStart,
       'draftCompleteAtStart:', draftCompleteAtStart,
+      'pendingGoalConfirm:', pendingGoalConfirmationAtStart,
+      'goalDraftCompleteAtStart:', goalDraftCompleteAtStart,
       'affirmative:', userAffirmative);
 
     // Build message array with memory and clean up long messages
@@ -2806,7 +3042,7 @@ exports.chat = async (req, res) => {
     console.log('Chat endpoint: Calling OpenAI (tools enabled) with', messages.length, 'messages');
 
     // Check request size before sending to prevent rate limiting
-    const requestSize = JSON.stringify(messages).length;
+    let requestSize = JSON.stringify(messages).length;
     console.log('Chat endpoint: Request size:', requestSize, 'bytes');
     
     if (requestSize > 750000) { // Increased to 750KB limit to allow more context
@@ -2824,20 +3060,17 @@ exports.chat = async (req, res) => {
         messages.splice(1, messages.length - 2); // Keep only system and current user message
         messages.splice(1, 0, ...history.map(truncateMessage));
         
-        // Recalculate size
-        const newSize = JSON.stringify(messages).length;
-        console.log(`Chat endpoint: Removed oldest message, new size: ${newSize} bytes (attempt ${attempts + 1})`);
-        
-        if (newSize <= 750000) {
-          console.log('Chat endpoint: Successfully reduced size below limit');
-          break;
-        }
+        // Recalculate size and use it in the loop condition
+        requestSize = JSON.stringify(messages).length;
+        console.log(`Chat endpoint: Removed oldest message, new size: ${requestSize} bytes (attempt ${attempts + 1})`);
         
         attempts++;
       }
       
-      if (attempts >= maxAttempts) {
-        console.warn('Chat endpoint: Could not reduce size below limit after', maxAttempts, 'attempts');
+      if (requestSize > 750000) {
+        console.warn('Chat endpoint: Could not reduce size below limit after', attempts, 'attempts');
+      } else if (attempts > 0) {
+        console.log('Chat endpoint: Successfully reduced size below limit');
       }
     }
 
@@ -2848,6 +3081,7 @@ exports.chat = async (req, res) => {
     // Redis-eviction fallback: a proposal visible in the client transcript can
     // arm the write gate even when the dialogue-state draft is gone/incomplete.
     const proposalInTranscript = transcriptShowsPendingProposal(history);
+    const goalProposalInTranscript = transcriptShowsPendingGoalProposal(history);
     // Concrete values from the last assistant proposal — the authoritative
     // payload on the confirmation turn when no draft was staged (or the draft
     // is missing slots). Prevents the model's re-estimated args + normalizer
@@ -2855,6 +3089,12 @@ exports.chat = async (req, res) => {
     const transcriptProposal = proposalInTranscript
       ? extractProposalFromMessage(lastAssistantTurnText(history), categoryNames, currentDate)
       : null;
+
+    const toolsForTurn = filterFunctionSchemas(functionSchemas, {
+      simulationMode,
+      goalsAvailable,
+      simulationAvailable,
+    });
 
     const ctx = {
       userId,
@@ -2864,13 +3104,17 @@ exports.chat = async (req, res) => {
       dialogueState,
       pendingConfirmationAtStart,
       draftCompleteAtStart,
+      pendingGoalConfirmationAtStart,
+      goalDraftCompleteAtStart,
       userAffirmative,
       proposalInTranscript,
+      goalProposalInTranscript,
       transcriptProposal,
       categoryNames,
       simulationMode,
       goalsAvailable,
       uiContext: uiContextRaw,
+      toolsForTurn,
     };
     
     // Always try with tools first for data requests, but handle tool calls properly
@@ -2878,7 +3122,7 @@ exports.chat = async (req, res) => {
     let error;
     try {
       console.log('Attempting to get response with tools...');
-      const responseWithTools = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'auto' });
+      const responseWithTools = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'auto' });
       const choice = responseWithTools?.choices?.[0];
       const msg = choice?.message;
       
@@ -2900,7 +3144,7 @@ exports.chat = async (req, res) => {
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
-        const directResponse = await queryAzureOpenAI(messages, { tools: functionSchemas, tool_choice: 'none' });
+        const directResponse = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'none' });
         const choice = directResponse?.choices?.[0];
         result = { content: choice?.message?.content || '', raw: directResponse };
       } catch (directError) {
@@ -4889,6 +5133,7 @@ exports.__testables = {
   emptyDialogueState,
   isAffirmativeMessage,
   transcriptShowsPendingProposal,
+  transcriptShowsPendingGoalProposal,
   lastAssistantTurnText,
   extractProposalFromMessage,
   extractDateFromText,
@@ -4899,10 +5144,15 @@ exports.__testables = {
   buildUiContextBlock,
   buildAvailableAccountsBlock,
   buildRecentWritesBlock,
+  buildRecentToolOutcomesBlock,
   recordRecentWrite,
+  recordRecentToolOutcome,
+  compactToolOutcome,
   draftSignature,
   computeDraftMissingFields,
+  computeGoalDraftMissingFields,
   isDraftProposable,
+  isGoalDraftProposable,
   extractCategoryNames,
   snapCategory,
   applyDraftAndCategory,
@@ -4922,6 +5172,9 @@ exports.__testables = {
   isWriteAllowed: (pendingConfirmationAtStart, draftCompleteAtStart, userAffirmative, proposalInTranscript) =>
     (pendingConfirmationAtStart === true || draftCompleteAtStart === true || proposalInTranscript === true) &&
     userAffirmative === true,
+  isGoalWriteAllowed: (pendingGoalConfirmationAtStart, goalDraftCompleteAtStart, userAffirmative, goalProposalInTranscript) =>
+    (pendingGoalConfirmationAtStart === true || goalDraftCompleteAtStart === true || goalProposalInTranscript === true) &&
+    userAffirmative === true,
   constants: {
     MAX_MEMORY,
     MAX_TOOL_ROUNDS,
@@ -4930,5 +5183,6 @@ exports.__testables = {
     SUMMARY_MAX_CHARS,
     FACTS_MAX_CHARS,
     WRITE_TOOLS: Array.from(WRITE_TOOLS),
+    GOAL_WRITE_TOOLS: Array.from(GOAL_WRITE_TOOLS),
   },
 };

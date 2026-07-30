@@ -10,6 +10,50 @@ const functionSchemas = JSON.parse(
 // Debug: Log the loaded schema
 console.log('Loaded function schemas:', JSON.stringify(functionSchemas, null, 2));
 
+// Tools that mutate real data — omitted from the model while Simulation Mode is active.
+const SIM_MODE_OMIT_TOOLS = new Set([
+  'createTransaction',
+  'updateTransaction',
+  'deleteTransaction',
+  'createGoal',
+  'updateGoal',
+  'deleteGoal',
+  'confirmTransaction',
+  'updateDraftTransaction',
+  'updateDraftGoal',
+]);
+// Goal write / draft tools — omitted when the client's plan has no Goals.
+const GOAL_UNAVAILABLE_OMIT_TOOLS = new Set([
+  'createGoal',
+  'updateGoal',
+  'deleteGoal',
+  'updateDraftGoal',
+]);
+const SIM_PROPOSE_TOOL_NAMES = new Set([
+  'proposeSimulationAdd',
+  'proposeSimulationModify',
+  'proposeSimulationRemove',
+]);
+
+/**
+ * Return a filtered copy of functionSchemas for the current chat turn.
+ * Runtime refuse-in-code remains the safety net; this only reduces wasted tool rounds.
+ */
+function filterFunctionSchemas(
+  schemas = functionSchemas,
+  { simulationMode = false, goalsAvailable = true, simulationAvailable = true } = {}
+) {
+  const list = Array.isArray(schemas) ? schemas : [];
+  return list.filter((item) => {
+    const name = item?.function?.name;
+    if (!name) return true;
+    if (simulationMode && SIM_MODE_OMIT_TOOLS.has(name)) return false;
+    if (!simulationAvailable && SIM_PROPOSE_TOOL_NAMES.has(name)) return false;
+    if (goalsAvailable === false && GOAL_UNAVAILABLE_OMIT_TOOLS.has(name)) return false;
+    return true;
+  });
+}
+
 // Build the Azure deployment URL on demand so callers can pick a different
 // deployment (e.g. a cheaper / smaller model for low-stakes endpoints like
 // auto-categorization) without changing the global env var. Falls back to
@@ -77,4 +121,4 @@ async function queryAzureOpenAI(
   return data;
 }
 
-module.exports = { queryAzureOpenAI, functionSchemas };
+module.exports = { queryAzureOpenAI, functionSchemas, filterFunctionSchemas };
