@@ -302,8 +302,7 @@ async function buildUpdateTransactionInput(args = {}, ctx = {}, preloadedExistin
 // Each tool gets (args, ctx), where ctx can include userId, auth, etc.
 const functionMap = {
   async getUserAccounts(args, ctx) {
-    // auth/ownership checks can go here: ensure ctx.userId === args.userId or allowed
-    const { userId } = args;
+    const userId = ctx?.userId ?? args.userId;
     const page = args.page || 1;
     const limit = args.limit || SMART_LIMITS.accounts;
     
@@ -337,13 +336,16 @@ const functionMap = {
   },
 
   async getUserAccountData(args, ctx) {
-    const { userId, token, body } = args;
-    const result = await getUserAccountData(userId, token, body);
+    const userId = ctx?.userId ?? args.userId;
+    const token = ctx?.token ?? args.token;
+    const accountId = args.accountId ?? ctx?.accountId;
+    const result = await getSelectedAccount({ userId, accountId, token, body: args.body || {} });
     return result;
   },
 
   async getUserTransactions(args, ctx) {
-    const { userId, accountId, startDate, endDate } = args;
+    const userId = ctx?.userId ?? args.userId;
+    const { accountId, startDate, endDate } = args;
     const page = args.page || 1;
     const limit = args.limit || SMART_LIMITS.transactions;
     
@@ -451,7 +453,8 @@ const functionMap = {
 
   // New function to get transaction summary without loading all data
   async getTransactionSummary(args, ctx) {
-    const { userId, accountId, startDate, endDate } = args;
+    const userId = ctx?.userId ?? args.userId;
+    const { accountId, startDate, endDate } = args;
     
     try {
       const summary = await getTransactionSummary(userId, accountId, { startDate, endDate });
@@ -473,26 +476,38 @@ const functionMap = {
   // Add more: categories, shopping list, account details, etc.
 
   async getUserData(args, ctx) {
-    const { userId, token } = args;
+    const userId = ctx?.userId ?? args.userId;
+    const token = ctx?.token ?? args.token;
     const result = await getUserData({ userId, token });
     return result;
   },
 
   async getSelectedKeacastAccounts(args, ctx) {
-    const { userId, token, body } = args;
-    const result = await getSelectedKeacastAccounts({ userId, token, body });
+    const userId = ctx?.userId ?? args.userId;
+    const token = ctx?.token ?? args.token;
+    const result = await getSelectedKeacastAccounts({ userId, token, body: args.body });
     return result;
   },
 
   async getSelectedAccount(args, ctx) {
-    const { userId, accountId, token, body, timeoutMs } = args;
-    const result = await getSelectedAccount({ userId, accountId, token, body, timeoutMs });
+    const userId = ctx?.userId ?? args.userId;
+    const token = ctx?.token ?? args.token;
+    const accountId = args.accountId ?? ctx?.accountId;
+    const result = await getSelectedAccount({
+      userId,
+      accountId,
+      token,
+      body: args.body,
+      timeoutMs: args.timeoutMs,
+    });
     return result;
   },
 
   async getBalances(args, ctx) {
-    const { accountId, userId, token, body } = args;
-    const result = await getBalances({ accountId, userId, token, body });
+    const userId = ctx?.userId ?? args.userId;
+    const token = ctx?.token ?? args.token;
+    const accountId = args.accountId ?? ctx?.accountId;
+    const result = await getBalances({ accountId, userId, token, body: args.body });
     return result;
   },
 

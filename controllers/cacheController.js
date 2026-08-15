@@ -1,6 +1,19 @@
 // controllers/cacheController.js
 const contextCache = require('../services/contextCache.service');
 const redis = require('../services/redisService');
+const {
+  selectedAccountUserPattern,
+  invalidateSelectedAccountToolCache,
+} = require('../services/keaAccountCache');
+
+function sameUserId(a, b) {
+  if (a == null || b == null) return false;
+  return String(a) === String(b);
+}
+
+function isOwnCacheRequest(req, paramUserId) {
+  return sameUserId(paramUserId, req.cashflowUser?.id);
+}
 
 // ─── Admin-only flush helpers ───────────────────────────────────────────────
 // These power the "wipe all summarization / autocategorize cache for every
@@ -98,20 +111,19 @@ async function flushPatterns(patterns) {
 exports.invalidateUserCache = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { token, userId: authUserId } = extractAuthFromRequest(req);
-    
-    // Ensure user can only invalidate their own cache or admin access
-    if (userId !== authUserId && !req.user?.isAdmin) {
+    if (!isOwnCacheRequest(req, userId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
     console.log('Cache invalidation requested for user:', userId);
     const invalidatedCount = await contextCache.invalidateUserCache(userId);
+    const selected = await scanAndUnlinkByPattern(selectedAccountUserPattern(userId));
     
     res.json({
       success: true,
       message: `Invalidated ${invalidatedCount} cache entries for user ${userId}`,
       invalidatedKeys: invalidatedCount,
+      selectedAccountKeysDeleted: selected.deleted,
       userId: userId
     });
   } catch (error) {
@@ -129,15 +141,13 @@ exports.invalidateUserCache = async (req, res) => {
 exports.invalidateAccountCache = async (req, res) => {
   try {
     const { userId, accountId } = req.params;
-    const { token, userId: authUserId } = extractAuthFromRequest(req);
-    
-    // Ensure user can only invalidate their own cache
-    if (userId !== authUserId && !req.user?.isAdmin) {
+    if (!isOwnCacheRequest(req, userId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
     console.log('Account cache invalidation requested for user:', userId, 'account:', accountId);
     await contextCache.invalidateAccountCache(userId, accountId);
+    await invalidateSelectedAccountToolCache(userId, accountId);
     
     res.json({
       success: true,
@@ -160,11 +170,10 @@ exports.invalidateAccountCache = async (req, res) => {
 exports.warmUpCache = async (req, res) => {
   try {
     const { userId, accountId } = req.params;
-    const { token, userId: authUserId } = extractAuthFromRequest(req);
+    const token = req.cashflowToken;
     const location = req.body?.location;
     
-    // Ensure user can only warm up their own cache
-    if (userId !== authUserId && !req.user?.isAdmin) {
+    if (!isOwnCacheRequest(req, userId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
@@ -205,10 +214,7 @@ exports.warmUpCache = async (req, res) => {
 exports.getCacheStats = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { token, userId: authUserId } = extractAuthFromRequest(req);
-    
-    // Ensure user can only view their own cache stats
-    if (userId !== authUserId && !req.user?.isAdmin) {
+    if (!isOwnCacheRequest(req, userId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
@@ -393,20 +399,3 @@ exports.getCacheHealth = async (req, res) => {
     });
   }
 };
-
-// Helper function to extract auth info from request
-function extractAuthFromRequest(req) {
-  const bearerToken = req.headers.authorization?.startsWith('Bearer ')
-    ? req.headers.authorization.split(' ')[1]
-    : undefined;
-  const headerToken = req.headers['x-auth-token'];
-  const bodyToken = req.body?.token;
-  const token = bearerToken || headerToken || bodyToken;
-
-  const headerUserId = req.headers['x-user-id'];
-  const bodyUserId = req.body?.sessionId;
-  const jwtUserId = req.user?.id;
-  const userId = bodyUserId || headerUserId || jwtUserId;
-
-  return { token, userId, authHeader: req.headers.authorization };
-}

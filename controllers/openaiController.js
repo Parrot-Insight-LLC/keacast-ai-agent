@@ -15,6 +15,13 @@ const {
   assembleBaseSystemPrompt,
   logSystemPromptBlockSizes,
 } = require('./systemPromptBuilders');
+const { createKeaTelemetry } = require('../services/keaTelemetry');
+const { injectTrustedIdentity } = require('../services/keaIdentity');
+const { assertAccountAccess } = require('../services/keaAccountAccess');
+const {
+  selectedAccountToolCacheKey,
+  invalidateSelectedAccountToolCache,
+} = require('../services/keaAccountCache');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 20; // verbatim conversation window (older turns are folded into a rolling summary)
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
@@ -47,6 +54,16 @@ const MAX_DRAFT_UPDATES_PER_TURN = 4;    // stop the model looping on updateDraf
 // they require a prior proposal (dialogueState.pendingConfirmation) AND an
 // affirmative user turn before they may execute.
 const WRITE_TOOLS = new Set(['createTransaction', 'updateTransaction']);
+const ACCOUNT_SCOPED_READ_TOOLS = new Set([
+  'getUserTransactions',
+  'getRecurringForecasts',
+  'getUpcomingTransactions',
+  'getTransactionSummary',
+  'getSelectedAccount',
+  'getUserAccountData',
+  'getBalances',
+  'getFocusedEntityDetails',
+]);
 // Goal write tools share the same propose→confirm contract but NOT the
 // transaction draft-slot merge (goal fields are unrelated to the transaction
 // draft, so merging it over goal args would corrupt them).
@@ -105,8 +122,10 @@ const SUMMARIZATION_CACHE_TTL = 300; // 5 minutes in seconds
 const SUMMARIZATION_PROMPT_VERSION = 'v2';
 
 function buildSessionKey(req) {
-  // Check multiple sources for sessionId in order of preference
-  const sessionId = req.body.sessionId || 
+  // Prefer the verified cashflow session id so a client cannot point history
+  // at another user's Redis bucket via body.sessionId.
+  const sessionId = req.cashflowUser?.id ||
+                   req.body.sessionId || 
                    req.query.sessionId || 
                    req.headers['x-session-id'] ||
                    req.user?.id || 
@@ -161,22 +180,6 @@ const SELECTED_ACCOUNT_TOOL_TTL = 300;   // 5 min Redis cache for the tool-layer
 // still surfacing a clear timeout instead of hanging forever.
 const SELECTED_ACCOUNT_TOOL_TIMEOUT_MS = 25000;
 
-function selectedAccountToolCacheKey(userId, accountId) {
-  const u = normalizeAccountIdForCacheKey(userId);
-  const a = normalizeAccountIdForCacheKey(accountId);
-  return `summarization:tool:selectedaccount:${u}:${a}`;
-}
-
-// Fail-soft: drop the 5-min selected-account blob after a successful write so
-// the next chat turn's CURRENT CONTEXT / ACTIVE GOALS aren't stale.
-async function invalidateSelectedAccountToolCache(userId, accountId) {
-  if (!userId || accountId === undefined || accountId === null || accountId === '') return;
-  try {
-    await redis.del(selectedAccountToolCacheKey(userId, accountId));
-  } catch (e) {
-    console.warn('Selected-account tool cache invalidate failed:', e.message);
-  }
-}
 
 // Build a cheap, stable fingerprint for the cache key when we have the
 // fully-fetched account blob. We deliberately AVOID hashing whole transaction
@@ -1976,6 +1979,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       const { name, arguments: argsJson } = toolCall.function || {};
       let args = {};
       try { args = argsJson ? JSON.parse(argsJson) : {}; } catch { args = {}; }
+      args = injectTrustedIdentity(args, ctx);
 
       // ── Non-writing draft tool: merge slots into dialogue state ──────────
       if (name === DRAFT_TOOL) {
@@ -2277,6 +2281,28 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         continue;
       }
 
+      if (ACCOUNT_SCOPED_READ_TOOLS.has(name)) {
+        try {
+          await assertAccountAccess(ctx.userId, args.accountId ?? ctx.accountId);
+        } catch (err) {
+          const code = err && err.code === 'ACCOUNT_REQUIRED' ? 'account_required' : 'access_denied';
+          toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
+            error: code,
+            message: err?.message || 'Not allowed to access that account.',
+          }) });
+          continue;
+        }
+      }
+
+      const timedToolFn = async (callArgs, callCtx) => {
+        const t0 = Date.now();
+        try {
+          return await toolFn(callArgs, callCtx);
+        } finally {
+          if (ctx.telemetry) ctx.telemetry.recordTool(name, Date.now() - t0);
+        }
+      };
+
       // ── Simulation Mode: refuse ALL real writes; redirect to propose tools ──
       if (ctx.simulationMode === true && SIM_BLOCKED_WRITE_TOOLS.has(name)) {
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
@@ -2392,7 +2418,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           continue;
         }
         try {
-          const result = await toolFn(effectiveArgs, ctx);
+          const result = await timedToolFn(effectiveArgs, ctx);
           // Ground the model's confirmation message in what was ACTUALLY
           // written: restating anything else (a stale draft, a re-estimate)
           // produced "$45 Planned Purchase" messages for a $25 write.
@@ -2475,7 +2501,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         }
         console.log(`[write-audit] tool=${name} user=${ctx.userId} account=${ctx.accountId} goalArgs=${JSON.stringify(args)}`);
         try {
-          const result = await toolFn(args, ctx);
+          const result = await timedToolFn(args, ctx);
           state.lastCommitSignature = goalSig;
           state.committed = true;
           state.pendingGoalConfirmation = false;
@@ -2533,7 +2559,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         }
         console.log(`[write-audit] tool=${name} user=${ctx.userId} account=${ctx.accountId} deleteArgs=${JSON.stringify(args)}`);
         try {
-          const result = await toolFn(args, ctx);
+          const result = await timedToolFn(args, ctx);
           state.lastCommitSignature = delSig;
           state.committed = true;
           state.pendingConfirmation = false;
@@ -2561,7 +2587,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 
       // ── Read / other tools ───────────────────────────────────────────────
       try {
-        const result = await toolFn(args, ctx);
+        const result = await timedToolFn(args, ctx);
         // Collect simulation proposals so they ride back to the client
         // alongside the final prose (the frontend applies them to the overlay).
         if (SIM_PROPOSE_TOOLS.has(name) && result && result.simOp) {
@@ -2634,7 +2660,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     let response;
     try {
       console.log(`Tool loop round ${round}/${MAX_TOOL_ROUNDS}: calling model with`, convo.length, 'messages (tool_choice:', isLastRound ? 'none' : 'auto', ')');
-      response = await queryAzureOpenAI(convo, { tools: toolsForTurn, tool_choice: isLastRound ? 'none' : 'auto' });
+      const tAzure = Date.now();
+      response = await queryAzureOpenAI(convo, { tools: toolsForTurn, tool_choice: isLastRound ? 'none' : 'auto', requestId: ctx.requestId });
+      if (ctx.telemetry) ctx.telemetry.recordAzureCall(Date.now() - tAzure, response?.usage);
     } catch (error) {
       console.log('Tool loop model call failed:', error.message);
       console.log('Error details:', error.response?.data || error);
@@ -2658,13 +2686,14 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 // 🧠 Chat with memory + tools (functionMap.js)
 // ----------------------------
 exports.chat = async (req, res) => {
+  const telemetry = createKeaTelemetry({ requestId: req.id });
   try {
     // Redacted request log: never emit `token` or the full message/PII to logs.
     console.log('Chat endpoint called:', JSON.stringify(redactChatBodyForLog(req.body)));
     const { message, systemPrompt } = req.body;
     if (!message) {
       console.log('Chat endpoint: Missing message in request body');
-      return res.status(400).json({ error: 'Message is required' });
+      return res.status(400).json({ error: 'Message is required', requestId: req.id });
     }
 
     const sessionKey = buildSessionKey(req);
@@ -2705,7 +2734,10 @@ exports.chat = async (req, res) => {
         productKnowledge = undefined;
       }
     }
-    const { token, userId, authHeader } = extractAuthFromRequest(req);
+    const extracted = extractAuthFromRequest(req);
+    const token = req.cashflowToken || extracted.token;
+    const userId = req.cashflowUser?.id ?? extracted.userId;
+    const authHeader = req.headers.authorization || extracted.authHeader;
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
 
     // When no session identifier was provided, buildSessionKey falls back to
@@ -2719,6 +2751,7 @@ exports.chat = async (req, res) => {
     }
 
     // Load prior conversation memory
+    telemetry.markStart('memory_load');
     let history = [];
     if (hasScopedSession) {
       try {
@@ -2764,6 +2797,7 @@ exports.chat = async (req, res) => {
     }
     // 3) Long-term durable facts from cashflow-backend-api (per user + account).
     const longTermFacts = await recallLongTermFacts({ userId, accountId: accountid, token });
+    telemetry.markEnd('memory_load');
 
     // Prefer the client-sent transcript when provided. It's the exact
     // conversation the user is looking at, so it can't drift from the UI even
@@ -2812,6 +2846,7 @@ exports.chat = async (req, res) => {
     const accountSnapshot = req.body?.accountSnapshot;
     let selectedAccount = null;
     let selectedAccountSource = 'none';
+    telemetry.markStart('selected_account_fetch');
 
     if (
       accountSnapshot &&
@@ -2866,6 +2901,7 @@ exports.chat = async (req, res) => {
     } else if (!userId || !token || !accountid) {
       console.log('Chat endpoint: Skipping account preload (missing userId, token, or accountid)');
     }
+    telemetry.markEnd('selected_account_fetch');
 
     const hasAccount = !!(
       selectedAccount &&
@@ -2880,6 +2916,7 @@ exports.chat = async (req, res) => {
     // Specific lookups (a single transaction, a category, a date range) are
     // handled on demand by the function-calling tools below, so we only seed a
     // small high-signal brief instead of dumping hundreds of rows of JSON.
+    telemetry.markStart('context_build');
     const firstName = coerceFirstName(req.body?.userData, selectedAccount?.user || null);
     const completeContext = hasAccount
       ? buildChatAccountContext(selectedAccount, firstName, currentDate)
@@ -3115,14 +3152,21 @@ exports.chat = async (req, res) => {
       goalsAvailable,
       uiContext: uiContextRaw,
       toolsForTurn,
+      telemetry,
+      requestId: req.id,
     };
+    telemetry.markEnd('context_build');
+    telemetry.recordBlock('currentContext', completeContext ? completeContext.length : 0);
+    telemetry.recordBlock('systemTotal', systemContent.length);
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
     let error;
     try {
       console.log('Attempting to get response with tools...');
-      const responseWithTools = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'auto' });
+      const tAzure = Date.now();
+      const responseWithTools = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'auto', requestId: req.id });
+      telemetry.recordAzureCall(Date.now() - tAzure, responseWithTools?.usage);
       const choice = responseWithTools?.choices?.[0];
       const msg = choice?.message;
       
@@ -3144,7 +3188,9 @@ exports.chat = async (req, res) => {
     } catch (error) {
       console.log('Tool-based response failed, trying direct response...');
       try {
-        const directResponse = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'none' });
+        const tAzure = Date.now();
+        const directResponse = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'none', requestId: req.id });
+        telemetry.recordAzureCall(Date.now() - tAzure, directResponse?.usage);
         const choice = directResponse?.choices?.[0];
         result = { content: choice?.message?.content || '', raw: directResponse };
       } catch (directError) {
@@ -3215,12 +3261,23 @@ exports.chat = async (req, res) => {
         : null,
     };
 
+    telemetry.setResponseCharacterCount(finalText.length);
+    telemetry.recordWriteFlags({
+      write_proposed: pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript,
+      write_confirmation_detected: userAffirmative,
+      write_attempted: writes.length > 0 || blocked.length > 0,
+      write_committed: writes.length > 0,
+      write_blocked: blocked.length > 0,
+    });
+    telemetry.emit(req.log);
+
     res.json({
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: hasAccount,
       dataMessage: dataMessage,
       requestSize: requestSize,
+      requestId: req.id,
       // Structured simulation proposals from the proposeSimulation* tools.
       // The frontend applies these to its client-side simulation overlay.
       simOps: Array.isArray(result?.simOps) ? result.simOps : [],
@@ -3234,29 +3291,32 @@ exports.chat = async (req, res) => {
   } catch (error) {
     console.error('Chat endpoint error:', error);
     console.error('Error stack:', error.stack);
+    try { telemetry.emit(req.log); } catch (e) { /* ignore */ }
     
     // Handle specific error types
     if (error.code === 'ECONNREFUSED') {
-      return res.status(503).json({ error: 'Service temporarily unavailable - Redis connection failed' });
+      return res.status(503).json({ error: 'Service temporarily unavailable - Redis connection failed', requestId: req.id });
     }
     if (error.response?.status === 401) {
-      return res.status(401).json({ error: 'Azure OpenAI authentication failed' });
+      return res.status(401).json({ error: 'Azure OpenAI authentication failed', requestId: req.id });
     }
     if (error.response?.status === 400) {
       return res.status(400).json({ 
         error: 'Azure OpenAI request failed', 
         details: error.response?.data?.error?.message || 'Invalid request format',
-        suggestion: 'Check API configuration and request format'
+        suggestion: 'Check API configuration and request format',
+        requestId: req.id
       });
     }
     if (error.response?.status === 429) {
-      return res.status(429).json({ error: 'Rate limit exceeded' });
+      return res.status(429).json({ error: 'Rate limit exceeded', requestId: req.id });
     }
     
     // Generic error for other cases
     res.status(500).json({ 
       error: 'Internal server error',
-      details: error.message || 'Unknown error occurred'
+      details: error.message || 'Unknown error occurred',
+      requestId: req.id
     });
   }
 };
@@ -5165,6 +5225,8 @@ exports.__testables = {
   buildGoalsBlock,
   pickTopSpendingCategories,
   redactChatBodyForLog,
+  injectTrustedIdentity,
+  ACCOUNT_SCOPED_READ_TOOLS: Array.from(ACCOUNT_SCOPED_READ_TOOLS),
   // Mirrors the write-gate condition enforced inside executeToolCalls: armed by
   // an explicit pendingConfirmation flag, a complete draft staged earlier, OR a
   // proposal visible in the client transcript, AND a confirmation (the model's

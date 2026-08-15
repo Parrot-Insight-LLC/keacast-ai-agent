@@ -63,11 +63,19 @@ function buildBaseUrl(deployment) {
   return `${process.env.AZURE_OPENAI_ENDPOINT.replace(/\/$/, '')}/openai/deployments/${dep}/chat/completions?api-version=${process.env.AZURE_OPENAI_API_VERSION}`;
 }
 
-async function callAOAI(body, { deployment, timeout } = {}) {
+async function callAOAI(body, { deployment, timeout, requestId } = {}) {
   const url = buildBaseUrl(deployment);
   try {
-    console.log('Azure OpenAI request URL:', url);
-    console.log('Azure OpenAI request body:', JSON.stringify(body, null, 2));
+    const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
+    const messageCount = Array.isArray(body.messages) ? body.messages.length : 0;
+    console.log('Azure OpenAI request:', JSON.stringify({
+      requestId: requestId || null,
+      messageCount,
+      toolCount,
+      tool_choice: body.tool_choice || null,
+      temperature: body.temperature,
+      max_tokens: body.max_tokens,
+    }));
 
     const res = await axios.post(url, body, {
       headers: {
@@ -101,6 +109,7 @@ async function queryAzureOpenAI(
     deployment,           // optional per-call Azure deployment override
     timeout,              // optional per-call axios timeout (ms)
     response_format,      // optional structured-output hint (Azure 2024-08-06+)
+    requestId,            // correlation id for logs (never log the full body)
   } = {}
 ) {
   const body = { messages, temperature, max_tokens };
@@ -116,7 +125,7 @@ async function queryAzureOpenAI(
     body.tool_choice = tool_choice;
   }
   if (response_format) body.response_format = response_format;
-  const data = await callAOAI(body, { deployment, timeout });
+  const data = await callAOAI(body, { deployment, timeout, requestId });
   // Return the full data so controller can inspect tool calls
   return data;
 }

@@ -2,9 +2,12 @@ const express = require('express');
 const router = express.Router();
 const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction, invalidateAutoCategorizationKey, summarization } = require('../controllers/openaiController');
 const {redisTest} = require('../controllers/openaiController');
+const { cashflowAuth } = require('../middleware/cashflowAuth');
+
+const requireCashflowUser = cashflowAuth();
 
 // Chat and analysis endpoints
-router.post('/chat', chat);
+router.post('/chat', requireCashflowUser, chat);
 router.post('/summarize', analyzeTransactions);
 router.post('/auto-categorize', autoCategorizeTransaction);
 // Evicts the Redis cache for a single transaction — call when a user overrides
