@@ -12,6 +12,9 @@ const {
   buildInvitationClarifyText,
   buildDeterministicAffirmativeText,
   isDeterministicAffirmativeCapability,
+  shouldSkipAzureForRoute,
+  INVITATION_FREQUENCY_ONCE,
+  INVITATION_DEFAULT_CATEGORY,
 } = require('../services/keaCapabilityRouter');
 const { resolveGroundingPolicy } = require('../services/keaGroundingPolicy');
 const { bundleForCapability, allowedToolsFor } = require('../services/keaToolBundles');
@@ -29,6 +32,7 @@ function route(message, extra = {}) {
     userAffirmative: extra.userAffirmative === true ? true : T.isAffirmativeMessage(message),
     dialogueState: extra.dialogueState || T.emptyDialogueState(),
     accountId: extra.accountId || '10',
+    knownCategories: extra.knownCategories,
   });
 }
 
@@ -54,6 +58,8 @@ function inviteState(extra = {}) {
   }
   return ds;
 }
+
+const CATEGORIES = ['Electronics', 'Household', 'Uncategorized'];
 
 const MIRO = {
   type: 'transaction',
@@ -131,9 +137,10 @@ async function run() {
   section('Phase 2.5 referent confirmation is not write confirmation');
   const asked = inviteState({ status: 'referent_asked' });
   const secondYes = route('yes', { dialogueState: asked });
-  check('second yes → transaction_write', secondYes.capability === 'transaction_write');
+  check('second yes → invitation_continuation', secondYes.capability === 'invitation_continuation');
+  check('second yes is title ask', secondYes.affirmativeResolution === 'invitation_title_ask');
   check('second yes is not confirmation', secondYes.capability !== 'confirmation');
-  check('second yes is write_handoff', secondYes.invitationWriteHandoff === true);
+  check('second yes is not transaction_write', secondYes.capability !== 'transaction_write');
   check('second yes still does not commit', T.isWriteAllowed(
     false,
     T.isDraftProposable(asked.draftTransaction),
@@ -196,7 +203,9 @@ async function run() {
 
   const dsAdd = inviteState();
   applyInvitationLifecycle(dsAdd, addAfter, { accountId: '10' });
-  check('explicit add consumes invitation', dsAdd.pendingInvitation == null);
+  check('explicit add without title waits for title', dsAdd.pendingInvitation
+    && dsAdd.pendingInvitation.status === 'awaiting_title');
+  check('explicit add without title does not arm confirmation', dsAdd.pendingConfirmation === false);
 
   section('Phase 2.5 invitation paraphrases share structured semantics');
   const affordRoute = route('Can I afford $800 next Friday?');
@@ -259,6 +268,209 @@ async function run() {
     T.isAffirmativeMessage('yes'),
     false
   ) === false);
+
+  section('Phase 2.6 live failure: referent yes seeds trusted draft and asks title');
+  const liveFail = inviteState({ status: 'referent_asked', uiReferent: MIRO });
+  liveFail.draftTransaction = {
+    title: 'Laptop Purchase',
+    category: 'Expense',
+    amount: 80,
+    start: '2026-08-23',
+    type: 'expense',
+    merchant: 'Best Buy',
+    memo: 'Miro Pest Control',
+  };
+  const titleAskRoute = route('Yes.', { dialogueState: liveFail });
+  applyInvitationLifecycle(liveFail, titleAskRoute, { accountId: '10', categoryNames: CATEGORIES });
+  const titleAskText = buildDeterministicAffirmativeText(titleAskRoute, liveFail);
+  const draftAfterYes = liveFail.draftTransaction || {};
+  check('title-ask capability is invitation_continuation', titleAskRoute.capability === 'invitation_continuation');
+  check('title-ask resolution', titleAskRoute.affirmativeResolution === 'invitation_title_ask');
+  check('title-ask skips Azure', shouldSkipAzureForRoute(titleAskRoute) === true);
+  check('title-ask tools empty', bundleForCapability(titleAskRoute.capability).length === 0);
+  check('seeded amount is 800', draftAfterYes.amount === 800);
+  check('seeded start is Aug 21', draftAfterYes.start === '2026-08-21');
+  check('seeded type is expense', draftAfterYes.type === 'expense');
+  check('seeded frequency is Once', draftAfterYes.frequency === INVITATION_FREQUENCY_ONCE);
+  check('title remains unset', draftAfterYes.title == null || String(draftAfterYes.title).trim() === '');
+  check('category remains unset', draftAfterYes.category == null || String(draftAfterYes.category).trim() === '');
+  check('merchant not copied', draftAfterYes.merchant == null);
+  check('memo not copied', draftAfterYes.memo == null);
+  check('pendingConfirmation stays false after referent yes', liveFail.pendingConfirmation === false);
+  check('invitation status awaiting_title', liveFail.pendingInvitation && liveFail.pendingInvitation.status === 'awaiting_title');
+  check('title-ask text', titleAskText === 'I can prepare the $800 expense for August 21. What would you like to call it?');
+  check('title-ask has no Laptop Purchase', !/Laptop Purchase/i.test(titleAskText));
+  check('title-ask has no Expense category', !/\bExpense\b/.test(titleAskText));
+  check('title-ask has no Household', !/Household/i.test(titleAskText));
+  check('title-ask has no Best Buy', !/Best Buy/i.test(titleAskText));
+  check('title-ask has no Miro', !/Miro/i.test(titleAskText));
+  check('title-ask has no forecast claim', !/forecast positive|negative balances|fits your plan|\bsafe\b|\bcomfortable\b|\baffordable\b/i.test(titleAskText));
+  check('incomplete seed is not proposable', T.isDraftProposable(draftAfterYes) === false);
+
+  section('Phase 2.6 title only produces proposal');
+  const titleOnlyDs = inviteState({ status: 'awaiting_title' });
+  titleOnlyDs.draftTransaction = {
+    amount: 800,
+    start: '2026-08-21',
+    type: 'expense',
+    frequency: INVITATION_FREQUENCY_ONCE,
+  };
+  const titleOnlyRoute = route('Laptop', { dialogueState: titleOnlyDs, knownCategories: CATEGORIES });
+  applyInvitationLifecycle(titleOnlyDs, titleOnlyRoute, { accountId: '10', categoryNames: CATEGORIES });
+  const titleOnlyText = buildDeterministicAffirmativeText(titleOnlyRoute, titleOnlyDs, { accountName: 'Main Account' });
+  check('title-only is slot_fill', titleOnlyRoute.capability === 'invitation_continuation'
+    && titleOnlyRoute.affirmativeResolution === 'invitation_slot_fill');
+  check('title-only sets Laptop', titleOnlyDs.draftTransaction.title === 'Laptop');
+  check('title-only keeps amount/date', titleOnlyDs.draftTransaction.amount === 800
+    && titleOnlyDs.draftTransaction.start === '2026-08-21');
+  check('title-only defaults Uncategorized', titleOnlyDs.draftTransaction.category === INVITATION_DEFAULT_CATEGORY);
+  check('title-only arms pendingConfirmation', titleOnlyDs.pendingConfirmation === true);
+  check('title-only consumes invitation', titleOnlyDs.pendingInvitation == null);
+  check('title-only is proposable', T.isDraftProposable(titleOnlyDs.draftTransaction) === true);
+  check('title-only proposal names Laptop', /Title: Laptop/.test(titleOnlyText));
+  check('title-only proposal amount', /Amount: \$800/.test(titleOnlyText));
+  check('title-only proposal date', /Date: August 21, 2026/.test(titleOnlyText));
+  check('title-only proposal frequency', /Frequency: One-time/.test(titleOnlyText));
+  check('title-only proposal category Uncategorized', /Category: Uncategorized/.test(titleOnlyText));
+  check('title-only proposal account', /Account: Main Account/.test(titleOnlyText));
+  check('title-only proposal asks confirm', /Confirm\?/.test(titleOnlyText));
+  check('title-only proposal has no forecast claim', !/forecast positive|negative balances|fits your plan|\bsafe\b|\bcomfortable\b|\baffordable\b/i.test(titleOnlyText));
+  check('title-only does not ask for category', !/what (category|would you like to (put|categorize))/i.test(titleOnlyText));
+
+  section('Phase 2.6 title + category');
+  const bothDs = inviteState({ status: 'awaiting_title' });
+  bothDs.draftTransaction = {
+    amount: 800,
+    start: '2026-08-21',
+    type: 'expense',
+    frequency: INVITATION_FREQUENCY_ONCE,
+  };
+  const bothRoute = route('Call it Laptop and put it under Electronics.', {
+    dialogueState: bothDs,
+    knownCategories: CATEGORIES,
+  });
+  applyInvitationLifecycle(bothDs, bothRoute, { accountId: '10', categoryNames: CATEGORIES });
+  const bothText = buildDeterministicAffirmativeText(bothRoute, bothDs, { accountName: 'Main Account' });
+  check('title+category sets Laptop', bothDs.draftTransaction.title === 'Laptop');
+  check('title+category snaps Electronics', bothDs.draftTransaction.category === 'Electronics');
+  check('title+category keeps trusted slots', bothDs.draftTransaction.amount === 800
+    && bothDs.draftTransaction.start === '2026-08-21'
+    && bothDs.draftTransaction.type === 'expense'
+    && bothDs.draftTransaction.frequency === INVITATION_FREQUENCY_ONCE);
+  check('title+category proposes', bothDs.pendingConfirmation === true && /Title: Laptop/.test(bothText)
+    && /Category: Electronics/.test(bothText));
+
+  section('Phase 2.6 category only still asks for title');
+  const catOnlyDs = inviteState({ status: 'awaiting_title' });
+  catOnlyDs.draftTransaction = {
+    amount: 800,
+    start: '2026-08-21',
+    type: 'expense',
+    frequency: INVITATION_FREQUENCY_ONCE,
+  };
+  const catOnlyRoute = route('Put it under Electronics.', {
+    dialogueState: catOnlyDs,
+    knownCategories: CATEGORIES,
+  });
+  applyInvitationLifecycle(catOnlyDs, catOnlyRoute, { accountId: '10', categoryNames: CATEGORIES });
+  const catOnlyText = buildDeterministicAffirmativeText(catOnlyRoute, catOnlyDs);
+  check('category-only sets Electronics', catOnlyDs.draftTransaction.category === 'Electronics');
+  check('category-only title still missing', !catOnlyDs.draftTransaction.title);
+  check('category-only does not propose', catOnlyDs.pendingConfirmation === false);
+  check('category-only invitation remains', catOnlyDs.pendingInvitation
+    && catOnlyDs.pendingInvitation.status === 'awaiting_title');
+  check('category-only asks for title', catOnlyText === 'What would you like to call the $800 expense?');
+  check('category-only is not proposable', T.isDraftProposable(catOnlyDs.draftTransaction) === false);
+
+  section('Phase 2.6 user never said Laptop');
+  check('original affordability does not capture laptop', route('Can I afford $800 next Friday?').slots.title == null);
+  check('title-ask draft has no Laptop', !/Laptop/i.test(JSON.stringify(draftAfterYes)));
+
+  section('Phase 2.6 focused Miro cannot fill invitation slots');
+  check('miro leftover title was wiped', draftAfterYes.title == null || String(draftAfterYes.title).trim() === '');
+  check('miro leftover category was wiped', draftAfterYes.category == null);
+  check('miro leftover amount was not kept', draftAfterYes.amount !== 80);
+  check('miro leftover date was not kept', draftAfterYes.start !== '2026-08-23');
+
+  section('Phase 2.6 old history cannot supply title/category');
+  const histDs = inviteState({ status: 'referent_asked' });
+  histDs.draftTransaction = {
+    title: 'Laptop Purchase',
+    category: 'Household',
+    amount: 50,
+    start: '2026-01-01',
+    type: 'expense',
+  };
+  const histRoute = route('yes', { dialogueState: histDs });
+  applyInvitationLifecycle(histDs, histRoute, { accountId: '10', categoryNames: CATEGORIES });
+  check('history Best Buy/Laptop/Household not in seed', histDs.draftTransaction.title == null
+    && histDs.draftTransaction.category == null
+    && histDs.draftTransaction.amount === 800
+    && histDs.draftTransaction.start === '2026-08-21');
+
+  section('Phase 2.6 full sequence one commit');
+  const seq = inviteState();
+  const seqYes1 = route('Yes.', { dialogueState: seq });
+  applyInvitationLifecycle(seq, seqYes1, { accountId: '10', categoryNames: CATEGORIES });
+  check('seq step 1 referent asked', seq.pendingInvitation.status === 'referent_asked');
+  check('seq step 1 cannot commit', T.isWriteAllowed(seq.pendingConfirmation, T.isDraftProposable(seq.draftTransaction), true, false) === false);
+  const seqYes2 = route('Yes.', { dialogueState: seq });
+  applyInvitationLifecycle(seq, seqYes2, { accountId: '10', categoryNames: CATEGORIES });
+  check('seq step 2 title ask', seqYes2.affirmativeResolution === 'invitation_title_ask');
+  check('seq step 2 cannot commit', T.isWriteAllowed(seq.pendingConfirmation, T.isDraftProposable(seq.draftTransaction), true, false) === false);
+  const seqTitle = route('Laptop', { dialogueState: seq, knownCategories: CATEGORIES });
+  applyInvitationLifecycle(seq, seqTitle, { accountId: '10', categoryNames: CATEGORIES });
+  check('seq step 3 proposal armed', seq.pendingConfirmation === true && T.isDraftProposable(seq.draftTransaction) === true);
+  const seqConfirm = route('yes', {
+    pendingWrite: true,
+    userAffirmative: true,
+    dialogueState: seq,
+  });
+  check('seq step 4 yes is confirmation', seqConfirm.capability === 'confirmation');
+  check('seq step 4 write confirmation', seqConfirm.affirmativeResolution === 'write_confirmation');
+  check('seq step 4 can commit once', T.isWriteAllowed(true, true, T.isAffirmativeMessage('yes'), false) === true);
+  check('seq final draft trusted+user', seq.draftTransaction.title === 'Laptop'
+    && seq.draftTransaction.amount === 800
+    && seq.draftTransaction.start === '2026-08-21'
+    && seq.draftTransaction.type === 'expense'
+    && seq.draftTransaction.frequency === INVITATION_FREQUENCY_ONCE
+    && seq.draftTransaction.category === INVITATION_DEFAULT_CATEGORY);
+
+  section('Phase 2.6 explicit fast path');
+  const fastDs = inviteState();
+  const fastRoute = route('Add it as Laptop under Electronics.', {
+    dialogueState: fastDs,
+    knownCategories: CATEGORIES,
+  });
+  applyInvitationLifecycle(fastDs, fastRoute, { accountId: '10', categoryNames: CATEGORIES });
+  const fastText = buildDeterministicAffirmativeText(fastRoute, fastDs, { accountName: 'Main Account' });
+  check('fast path is transaction_write', fastRoute.capability === 'transaction_write');
+  check('fast path is write_handoff', fastRoute.affirmativeResolution === 'write_handoff');
+  check('fast path skips Azure', shouldSkipAzureForRoute(fastRoute) === true);
+  check('fast path uses invitation amount/date', fastDs.draftTransaction.amount === 800
+    && fastDs.draftTransaction.start === '2026-08-21');
+  check('fast path title from user', fastDs.draftTransaction.title === 'Laptop');
+  check('fast path category from user', fastDs.draftTransaction.category === 'Electronics');
+  check('fast path type/frequency deterministic', fastDs.draftTransaction.type === 'expense'
+    && fastDs.draftTransaction.frequency === INVITATION_FREQUENCY_ONCE);
+  check('fast path proposes', fastDs.pendingConfirmation === true && /Title: Laptop/.test(fastText)
+    && /Category: Electronics/.test(fastText));
+  check('fast path skips referent question', !/Do you mean/.test(fastText));
+  const fastYes = route('yes', { pendingWrite: true, userAffirmative: true, dialogueState: fastDs });
+  check('fast path later yes commits', fastYes.capability === 'confirmation'
+    && T.isWriteAllowed(true, true, true, false) === true);
+
+  section('Phase 2.6 normal write regression keeps ESTIMATE path');
+  const normalWrite = route('Add an $800 expense next Friday.');
+  check('normal write is transaction_write', normalWrite.capability === 'transaction_write');
+  check('normal write is not invitation handoff', normalWrite.invitationWriteHandoff === false);
+  check('normal write still uses Azure', shouldSkipAzureForRoute(normalWrite) === false);
+
+  section('Phase 2.6 Phase 2.5 regression: first yes / unresolved / telemetry');
+  check('first yes still invitation_clarify', inviteYes.affirmativeResolution === 'invitation_clarify');
+  check('first yes still deterministic', isDeterministicAffirmativeCapability(inviteYes.capability) === true);
+  check('unresolved yes still unresolved_clarify', nothingYes.affirmativeResolution === 'unresolved_clarify');
+  check('unresolved yes tools empty', bundleForCapability(nothingYes.capability).length === 0);
 }
 
 module.exports = { run };

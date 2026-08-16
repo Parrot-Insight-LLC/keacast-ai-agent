@@ -21,7 +21,7 @@ const { assertAccountAccess } = require('../services/keaAccountAccess');
 const { invalidateSelectedAccountToolCache } = require('../services/keaAccountCache');
 const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
 const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
-const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions, applyInvitationLifecycle, maybeSetAffordabilityInvitation, isDeterministicAffirmativeCapability, buildDeterministicAffirmativeText } = require('../services/keaCapabilityRouter');
+const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions, applyInvitationLifecycle, maybeSetAffordabilityInvitation, shouldSkipAzureForRoute, buildDeterministicAffirmativeText } = require('../services/keaCapabilityRouter');
 const {
   resolveGroundingPolicy,
   isFailSoft,
@@ -3186,8 +3186,8 @@ exports.chat = async (req, res) => {
         || pendingGoalConfirmationAtStart || goalDraftCompleteAtStart || goalProposalInTranscript,
       userAffirmative,
     });
-    applyInvitationLifecycle(dialogueState, phase1Route, { accountId: accountid });
-    const skipAzureAffirmative = isDeterministicAffirmativeCapability(phase1Route.capability);
+    applyInvitationLifecycle(dialogueState, phase1Route, { accountId: accountid, categoryNames });
+    const skipAzureAffirmative = shouldSkipAzureForRoute(phase1Route);
     const phase1Policy = resolveGroundingPolicy(phase1Route, { message });
     let phase1Evidence = null;
     let groundingPrefetchMs = 0;
@@ -3586,7 +3586,11 @@ exports.chat = async (req, res) => {
     } else if (skipAzureAffirmative) {
       requestSize = 0;
       console.log('Chat endpoint: deterministic affirmative, skipping Azure:', phase1Route.affirmativeResolution);
-      result = { content: buildDeterministicAffirmativeText(phase1Route) };
+      result = { content: buildDeterministicAffirmativeText(phase1Route, dialogueState, {
+        accountName: hasAccount && selectedAccount
+          ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name)
+          : null,
+      }) };
     } else {
       try {
       console.log('Attempting to get response with tools...');

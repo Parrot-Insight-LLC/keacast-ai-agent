@@ -625,7 +625,9 @@ function normalizePendingInvitation(raw) {
   const amount = Number(raw.amount);
   const date = raw.date ? String(raw.date).slice(0, 10) : '';
   if (!(amount > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
-  const status = raw.status === 'referent_asked' ? 'referent_asked' : 'offered';
+  const status = (raw.status === 'referent_asked' || raw.status === 'awaiting_title')
+    ? raw.status
+    : 'offered';
   return {
     kind: 'add_affordability_expense',
     sourceCapability: 'affordability_or_planning',
@@ -666,6 +668,181 @@ function formatInvitationDate(date) {
   return m.isValid() ? m.format('MMMM D') : '';
 }
 
+function formatInvitationDateLong(date) {
+  const m = moment(String(date || ''), 'YYYY-MM-DD', true);
+  return m.isValid() ? m.format('MMMM D, YYYY') : '';
+}
+
+// Matches tools/functionMap FREQUENCY_ONCE. Local so this router does not
+// import the tool layer.
+const INVITATION_FREQUENCY_ONCE = 2;
+const INVITATION_DEFAULT_CATEGORY = 'Uncategorized';
+
+function snapInvitationCategory(input, knownCategories) {
+  const q = String(input || '').trim();
+  if (!q) return null;
+  if (!Array.isArray(knownCategories) || knownCategories.length === 0) return q;
+  const needle = q.toLowerCase();
+  for (const n of knownCategories) {
+    if (String(n).trim().toLowerCase() === needle) return n;
+  }
+  for (const n of knownCategories) {
+    const ln = String(n).trim().toLowerCase();
+    if (ln && (ln.includes(needle) || needle.includes(ln))) return n;
+  }
+  return null;
+}
+
+function invitationDraftIsProposable(draft) {
+  if (!draft || typeof draft !== 'object') return false;
+  return ['title', 'type', 'amount', 'start'].every((k) => {
+    const v = draft[k];
+    return v !== undefined && v !== null && String(v).trim() !== '';
+  });
+}
+
+function looksLikeInvitationSeed(draft, invitation) {
+  if (!draft || !invitation) return false;
+  return Number(draft.amount) === Number(invitation.amount)
+    && String(draft.start || '').slice(0, 10) === invitation.date
+    && String(draft.type || '').toLowerCase() === 'expense'
+    && (!draft.title || String(draft.title).trim() === '');
+}
+
+function seedTrustedInvitationDraft(dialogueState, invitation, { replace } = {}) {
+  if (!dialogueState || !invitation) return;
+  const next = {
+    amount: invitation.amount,
+    start: invitation.date,
+    type: 'expense',
+    frequency: INVITATION_FREQUENCY_ONCE,
+  };
+  const prev = dialogueState.draftTransaction && typeof dialogueState.draftTransaction === 'object'
+    ? dialogueState.draftTransaction
+    : {};
+  const sameSeed = !replace
+    && Number(prev.amount) === Number(invitation.amount)
+    && String(prev.start || '').slice(0, 10) === invitation.date
+    && String(prev.type || '').toLowerCase() === 'expense';
+  if (sameSeed) {
+    if (prev.title && String(prev.title).trim()) next.title = String(prev.title).trim();
+    if (prev.category && String(prev.category).trim()) next.category = String(prev.category).trim();
+  }
+  dialogueState.draftTransaction = next;
+  if (replace || !sameSeed) dialogueState.pendingConfirmation = false;
+}
+
+function applyUserInvitationSlots(dialogueState, slots, categoryNames) {
+  if (!dialogueState.draftTransaction || typeof dialogueState.draftTransaction !== 'object') {
+    dialogueState.draftTransaction = {};
+  }
+  const draft = dialogueState.draftTransaction;
+  if (slots && slots.title) draft.title = String(slots.title).trim();
+  if (slots && slots.category) {
+    const snapped = snapInvitationCategory(slots.category, categoryNames);
+    if (snapped) draft.category = snapped;
+  }
+}
+
+function finalizeInvitationDraft(dialogueState, invitation) {
+  const draft = dialogueState.draftTransaction;
+  if (!invitationDraftIsProposable(draft)) {
+    dialogueState.pendingConfirmation = false;
+    if (invitation) {
+      dialogueState.pendingInvitation = { ...invitation, status: 'awaiting_title' };
+    }
+    return false;
+  }
+  if (!draft.category || !String(draft.category).trim()) {
+    draft.category = INVITATION_DEFAULT_CATEGORY;
+  }
+  dialogueState.pendingConfirmation = true;
+  dialogueState.needsReconfirm = false;
+  dialogueState.pendingInvitation = null;
+  return true;
+}
+
+function applyInvitationDrafting(dialogueState, invitation, route, { categoryNames, replace } = {}) {
+  const slots = (route && route.slots) || {};
+  const amount = slots.amount != null ? Number(slots.amount) : invitation.amount;
+  const date = slots.purchaseDate ? String(slots.purchaseDate).slice(0, 10) : invitation.date;
+  seedTrustedInvitationDraft(dialogueState, { ...invitation, amount, date }, { replace });
+  applyUserInvitationSlots(dialogueState, slots, categoryNames);
+  finalizeInvitationDraft(dialogueState, invitation);
+}
+
+function clearInvitation(dialogueState, invitation) {
+  if (dialogueState.pendingConfirmation !== true
+    && looksLikeInvitationSeed(dialogueState.draftTransaction, invitation)) {
+    dialogueState.draftTransaction = {};
+  }
+  dialogueState.pendingInvitation = null;
+}
+
+function parseInvitationSlotFill(message, knownCategories) {
+  const text = String(message || '').trim();
+  const result = { title: null, category: null };
+  if (!text) return result;
+
+  const under = text.match(/\bunder\s+([A-Za-z][A-Za-z0-9 &'-]{0,40})/i);
+  if (under) {
+    const catRaw = String(under[1] || '').replace(/\s+and\b.*$/i, '').replace(/[.!?]+$/g, '').trim();
+    const snapped = snapInvitationCategory(catRaw, knownCategories);
+    if (snapped) result.category = snapped;
+  }
+
+  const callIt = text.match(/\b(?:call it|name it|title(?:\s+it)?(?:\s+is)?)\s+["']?([^"'.,!?]+?)(?:["']|\s+and\b|\s+under\b|$)/i);
+  const addAs = text.match(/\b(?:add|create|log|schedule)\s+it\s+as\s+["']?([^"'.,!?]+?)(?:["']|\s+under\b|$)/i);
+  const asUnder = text.match(/\bas\s+["']?([^"'.,!?]+?)\s+under\b/i);
+  let titleRaw = null;
+  if (callIt) titleRaw = callIt[1];
+  else if (addAs) titleRaw = addAs[1];
+  else if (asUnder) titleRaw = asUnder[1];
+  if (titleRaw) {
+    titleRaw = String(titleRaw).replace(/\s+and\s*$/i, '').trim();
+    if (titleRaw) result.title = titleRaw.replace(/\s+/g, ' ');
+  }
+  return result;
+}
+
+function parseAwaitingTitleMessage(message, knownCategories) {
+  const parsed = parseInvitationSlotFill(message, knownCategories);
+  if (parsed.title || parsed.category) return parsed;
+  const text = String(message || '').trim().replace(/[.!?]+$/g, '').trim();
+  if (!text || text.length > 60 || /\?/.test(message)) return parsed;
+  if (isBareAffirmative(message) || isBareNegative(message)) return parsed;
+  if (/\b(can i|will i|how much|what about|afford|negative|forecast|balance)\b/i.test(text)) {
+    return parsed;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9 &'.-]{0,48}$/.test(text) || text.split(/\s+/).length > 6) {
+    return parsed;
+  }
+  const snapped = snapInvitationCategory(text, knownCategories);
+  if (snapped && Array.isArray(knownCategories) && knownCategories.some((n) => String(n).trim().toLowerCase() === text.toLowerCase())) {
+    parsed.category = snapped;
+    return parsed;
+  }
+  parsed.title = text.replace(/\s+/g, ' ');
+  return parsed;
+}
+
+function isInvitationReferringWrite(text) {
+  return /^(add it|create it|log it|schedule it)\b/i.test(String(text || '').trim());
+}
+
+function invitationHandoffSlots(invitation, slots, parsed) {
+  const next = { ...slots };
+  if (invitation && slots.amount == null && !slots.purchaseDate) {
+    next.amount = invitation.amount;
+    next.purchaseDate = invitation.date;
+    next.subjectKind = slots.subjectKind || 'amount';
+    next.subjectValue = slots.subjectValue || String(invitation.amount);
+  }
+  if (parsed && parsed.title) next.title = parsed.title;
+  if (parsed && parsed.category) next.category = parsed.category;
+  return next;
+}
+
 function buildInvitationClarifyText(invitation) {
   const inv = normalizePendingInvitation(invitation);
   if (!inv) return 'Sure — what would you like me to continue with?';
@@ -674,7 +851,38 @@ function buildInvitationClarifyText(invitation) {
   return `Do you mean you'd like me to add the ${amount} expense on ${date}?`;
 }
 
-function buildDeterministicAffirmativeText(route) {
+function buildInvitationTitleAskText(src) {
+  const amt = formatInvitationAmount(src && src.amount);
+  const date = formatInvitationDate(src && (src.start || src.purchaseDate || src.date));
+  if (src && src.category && !src.title) {
+    return `What would you like to call the ${amt} expense?`;
+  }
+  return `I can prepare the ${amt} expense for ${date}. What would you like to call it?`;
+}
+
+function buildInvitationProposalText(draft, { accountName } = {}) {
+  const amount = formatInvitationAmount(draft && draft.amount);
+  const date = formatInvitationDateLong(draft && draft.start);
+  const category = draft && draft.category && String(draft.category).trim()
+    ? String(draft.category).trim()
+    : INVITATION_DEFAULT_CATEGORY;
+  const account = accountName && String(accountName).trim() ? String(accountName).trim() : 'your account';
+  const title = draft && draft.title ? String(draft.title).trim() : '';
+  return [
+    'I propose adding:',
+    '',
+    `- Title: ${title}`,
+    `- Amount: ${amount}`,
+    `- Date: ${date}`,
+    '- Frequency: One-time',
+    `- Category: ${category}`,
+    `- Account: ${account}`,
+    '',
+    'Confirm?',
+  ].join('\n');
+}
+
+function buildDeterministicAffirmativeText(route, dialogueState, extras = {}) {
   const resolution = route && route.affirmativeResolution;
   if (resolution === 'declined') return 'Okay.';
   if (resolution === 'invitation_clarify') {
@@ -688,11 +896,33 @@ function buildDeterministicAffirmativeText(route) {
   if (resolution === 'analysis_clarify') {
     return 'Which would you like me to look at more closely?';
   }
+  const draft = dialogueState && dialogueState.draftTransaction;
+  if (invitationDraftIsProposable(draft) && dialogueState && dialogueState.pendingConfirmation === true) {
+    return buildInvitationProposalText(draft, extras);
+  }
+  if (resolution === 'invitation_title_ask'
+    || resolution === 'invitation_slot_fill'
+    || resolution === 'write_handoff') {
+    const src = draft && (draft.amount != null || draft.start)
+      ? draft
+      : {
+          amount: route && route.slots && route.slots.amount,
+          start: route && route.slots && (route.slots.purchaseDate || route.slots.start),
+          category: route && route.slots && route.slots.category,
+          title: route && route.slots && route.slots.title,
+        };
+    return buildInvitationTitleAskText(src);
+  }
   return 'Sure — what would you like me to continue with?';
 }
 
 function isDeterministicAffirmativeCapability(capability) {
   return capability === 'invitation_continuation' || capability === 'bare_affirmative_unresolved';
+}
+
+function shouldSkipAzureForRoute(route) {
+  if (!route) return false;
+  return isDeterministicAffirmativeCapability(route.capability) || !!route.invitationWriteHandoff;
 }
 
 function invitationMatchesAccount(invitation, accountId) {
@@ -701,7 +931,7 @@ function invitationMatchesAccount(invitation, accountId) {
   return accountsMatch(inv.accountId, accountId);
 }
 
-function applyInvitationLifecycle(dialogueState, route, { accountId } = {}) {
+function applyInvitationLifecycle(dialogueState, route, { accountId, categoryNames } = {}) {
   if (!dialogueState || typeof dialogueState !== 'object') return dialogueState;
   const inv = normalizePendingInvitation(dialogueState.pendingInvitation);
   if (!inv) {
@@ -709,24 +939,39 @@ function applyInvitationLifecycle(dialogueState, route, { accountId } = {}) {
     return dialogueState;
   }
   const cap = route && route.capability;
+  const resolution = route && route.affirmativeResolution;
   if (cap === 'invitation_continuation') {
-    if (route.affirmativeResolution === 'declined') {
-      dialogueState.pendingInvitation = null;
-    } else if (route.affirmativeResolution === 'invitation_clarify') {
+    if (resolution === 'declined') {
+      clearInvitation(dialogueState, inv);
+      return dialogueState;
+    }
+    if (resolution === 'invitation_clarify') {
       dialogueState.pendingInvitation = { ...inv, status: 'referent_asked' };
+      return dialogueState;
+    }
+    if (resolution === 'invitation_title_ask' || resolution === 'invitation_slot_fill') {
+      applyInvitationDrafting(dialogueState, inv, route, {
+        categoryNames,
+        replace: resolution === 'invitation_title_ask',
+      });
+      return dialogueState;
     }
     return dialogueState;
   }
   if (cap === 'bare_affirmative_unresolved') {
-    dialogueState.pendingInvitation = null;
+    clearInvitation(dialogueState, inv);
     return dialogueState;
   }
   if (cap === 'transaction_write') {
-    dialogueState.pendingInvitation = null;
+    if (route && route.invitationWriteHandoff) {
+      applyInvitationDrafting(dialogueState, inv, route, { categoryNames, replace: false });
+      return dialogueState;
+    }
+    clearInvitation(dialogueState, inv);
     return dialogueState;
   }
   if (cap === 'confirmation') return dialogueState;
-  if (cap) dialogueState.pendingInvitation = null;
+  if (cap) clearInvitation(dialogueState, inv);
   return dialogueState;
 }
 
@@ -756,6 +1001,8 @@ function routeCapabilityUnwrapped(input = {}) {
   const pendingType = pendingWriteType(input);
   const last = input.dialogueState || {};
   const currentAccountId = input.accountId;
+  const invitation = normalizePendingInvitation(last.pendingInvitation);
+  const invitationOk = invitation && invitationMatchesAccount(invitation, currentAccountId);
 
   const base = {
     capability: 'unknown',
@@ -877,18 +1124,9 @@ function routeCapabilityUnwrapped(input = {}) {
   if (isGoalWriteUtterance(message)) {
     return { ...base, capability: 'goal_write', confidence: 'high', accountChanged };
   }
-  if (isWriteUtterance(message)) {
-    const invitation = normalizePendingInvitation(last.pendingInvitation);
-    const invitationOk = invitation && invitationMatchesAccount(invitation, currentAccountId);
-    const writeSlots = invitationOk && slots.amount == null && !slots.purchaseDate
-      ? {
-          ...slots,
-          amount: invitation.amount,
-          purchaseDate: invitation.date,
-          subjectKind: slots.subjectKind || 'amount',
-          subjectValue: slots.subjectValue || String(invitation.amount),
-        }
-      : slots;
+  if (isWriteUtterance(message) || (invitationOk && isInvitationReferringWrite(message))) {
+    const parsed = invitationOk ? parseInvitationSlotFill(message, knownCategories) : { title: null, category: null };
+    const writeSlots = invitationHandoffSlots(invitationOk ? invitation : null, slots, parsed);
     return {
       ...base,
       capability: 'transaction_write',
@@ -970,8 +1208,6 @@ function routeCapabilityUnwrapped(input = {}) {
   }
 
   // 6. Bare-affirmative continuation — never unknown, never UI deixis.
-  const invitation = normalizePendingInvitation(last.pendingInvitation);
-  const invitationOk = invitation && invitationMatchesAccount(invitation, currentAccountId);
   if (isBareNegative(message) && invitation) {
     return {
       ...base,
@@ -991,14 +1227,14 @@ function routeCapabilityUnwrapped(input = {}) {
         affirmativeResolution: 'unresolved_clarify',
       };
     }
-    if (invitationOk && invitation.status === 'referent_asked') {
+    if (invitationOk && (invitation.status === 'referent_asked' || invitation.status === 'awaiting_title')) {
       return {
         ...base,
-        capability: 'transaction_write',
+        capability: 'invitation_continuation',
         confidence: 'high',
         accountChanged: false,
         invitationWriteHandoff: true,
-        affirmativeResolution: 'write_handoff',
+        affirmativeResolution: 'invitation_title_ask',
         slots: {
           ...slots,
           amount: invitation.amount,
@@ -1049,6 +1285,29 @@ function routeCapabilityUnwrapped(input = {}) {
       accountChanged,
       affirmativeResolution: 'unresolved_clarify',
     };
+  }
+
+  if (invitationOk && invitation.status === 'awaiting_title' && !pendingType) {
+    const parsed = parseAwaitingTitleMessage(message, knownCategories);
+    if (parsed.title || parsed.category) {
+      return {
+        ...base,
+        capability: 'invitation_continuation',
+        confidence: 'high',
+        accountChanged: false,
+        invitationWriteHandoff: true,
+        affirmativeResolution: 'invitation_slot_fill',
+        slots: {
+          ...slots,
+          amount: invitation.amount,
+          purchaseDate: invitation.date,
+          subjectKind: slots.subjectKind || 'amount',
+          subjectValue: slots.subjectValue || String(invitation.amount),
+          title: parsed.title,
+          category: parsed.category,
+        },
+      };
+    }
   }
 
   // 7. unknown
@@ -1175,4 +1434,9 @@ module.exports = {
   buildInvitationClarifyText,
   buildDeterministicAffirmativeText,
   isDeterministicAffirmativeCapability,
+  shouldSkipAzureForRoute,
+  parseInvitationSlotFill,
+  invitationDraftIsProposable,
+  INVITATION_FREQUENCY_ONCE,
+  INVITATION_DEFAULT_CATEGORY,
 };
