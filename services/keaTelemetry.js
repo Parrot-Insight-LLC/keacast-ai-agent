@@ -88,6 +88,9 @@ function createKeaTelemetry({ requestId } = {}) {
     historical_prefetch_page_count: null,
     historical_prefetch_row_count: null,
     historical_match_count: null,
+    historical_lookup_count: null,
+    historical_period_read_count: null,
+    ui_action_count: null,
   };
 
   function markStart(name) {
@@ -174,6 +177,15 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (flags.historical_match_count != null) {
       grounding.historical_match_count = Number(flags.historical_match_count) || 0;
+    }
+    if (flags.historical_lookup_count != null) {
+      grounding.historical_lookup_count = Number(flags.historical_lookup_count) || 0;
+    }
+    if (flags.historical_period_read_count != null) {
+      grounding.historical_period_read_count = Number(flags.historical_period_read_count) || 0;
+    }
+    if (flags.ui_action_count != null) {
+      grounding.ui_action_count = Number(flags.ui_action_count) || 0;
     }
   }
 
@@ -310,6 +322,9 @@ function createKeaTelemetry({ requestId } = {}) {
       historical_prefetch_page_count: grounding.historical_prefetch_page_count,
       historical_prefetch_row_count: grounding.historical_prefetch_row_count,
       historical_match_count: grounding.historical_match_count,
+      historical_lookup_count: grounding.historical_lookup_count,
+      historical_period_read_count: grounding.historical_period_read_count,
+      ui_action_count: grounding.ui_action_count,
       estimated_block_chars: blocks,
     };
     for (const r of azureRounds) {

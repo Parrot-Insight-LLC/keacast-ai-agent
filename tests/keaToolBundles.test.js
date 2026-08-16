@@ -129,6 +129,11 @@ async function run() {
   check('omitGetUserTransactions drops getUserTransactions', !names(lookupOmit).includes('getUserTransactions'));
   const lookupKeep = allowedToolsFor('financial_lookup');
   check('lookup without omit still has getUserTransactions', lookupKeep.has('getUserTransactions'));
+  check('generic lookup does not expose openTransactionSearch', !lookupKeep.has('openTransactionSearch'));
+  check(
+    'wantsUiAction re-enables openTransactionSearch',
+    allowedToolsFor('financial_lookup', { includeOpenTransactionSearch: true }).has('openTransactionSearch')
+  );
 }
 
 module.exports = { run };

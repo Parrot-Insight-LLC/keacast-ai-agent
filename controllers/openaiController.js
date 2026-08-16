@@ -21,7 +21,7 @@ const { assertAccountAccess } = require('../services/keaAccountAccess');
 const { invalidateSelectedAccountToolCache } = require('../services/keaAccountCache');
 const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
 const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
-const { routeCapability, applyContinuationPersistence } = require('../services/keaCapabilityRouter');
+const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions } = require('../services/keaCapabilityRouter');
 const {
   resolveGroundingPolicy,
   isFailSoft,
@@ -29,7 +29,7 @@ const {
   groundingStrategyFor,
   FAIL_SOFT_TEXT,
 } = require('../services/keaGroundingPolicy');
-const { prefetchGrounding, buildEvidenceSystemSection } = require('../services/keaGroundingPrefetch');
+const { prefetchGrounding, buildEvidenceSystemSection, shouldForceDirectAnswer } = require('../services/keaGroundingPrefetch');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 20; // verbatim conversation window (older turns are folded into a rolling summary)
@@ -2267,11 +2267,19 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       // ── Non-writing UI actions: open/navigate client panels ──
       if (name === UI_SEARCH_TOOL) {
         const term = typeof args.search_term === 'string' ? args.search_term.trim() : '';
-        uiActions.push({ type: 'open_search', search_term: term || null });
+        const startDate = UI_DATE_RE.test(String(args.startDate || '')) ? String(args.startDate).trim() : null;
+        const endDate = UI_DATE_RE.test(String(args.endDate || '')) ? String(args.endDate).trim() : null;
+        const action = { type: 'open_search' };
+        if (term) action.search_term = term;
+        if (startDate) action.startDate = startDate;
+        if (endDate) action.endDate = endDate;
+        uiActions.push(action);
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
           ok: true,
           opened: 'transaction_search',
           search_term: term || null,
+          startDate,
+          endDate,
           note: `The transaction search panel is opening on the user's screen${term ? ` pre-filled with "${term}"` : ''}. Briefly tell the user it is opening — do NOT invent result counts or amounts.`
         }) });
         continue;
@@ -3092,6 +3100,7 @@ exports.chat = async (req, res) => {
     const goalProposalArmsWrite = goalProposalInTranscript === true && goalNeedsReconfirmAtStart !== true;
 
     telemetry.markStart('context_build');
+    const categoryNames = extractCategoryNames(selectedAccount);
     const phase1Route = routeCapability({
       message,
       simulationMode,
@@ -3103,6 +3112,7 @@ exports.chat = async (req, res) => {
       dialogueState,
       accountId: accountid,
       currentDate,
+      knownCategories: categoryNames,
     });
     const pendingWriteRouting = applyPendingWriteTopicSwitch(dialogueState, phase1Route, {
       pendingArmedAtStart: pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript
@@ -3126,7 +3136,7 @@ exports.chat = async (req, res) => {
       groundingPrefetchMs = Date.now() - tPrefetch;
     }
     const phase1FailSoft = isFailSoft(phase1Policy, phase1Evidence);
-    applyContinuationPersistence(dialogueState, phase1Route, {
+    applyContinuationPersistenceFromEvidence(dialogueState, phase1Route, phase1Evidence, {
       accountId: accountid,
       failSoft: phase1FailSoft,
     });
@@ -3161,6 +3171,10 @@ exports.chat = async (req, res) => {
         ? phase1Evidence.prefetchMeta.rowCount : null,
       historical_match_count: phase1Evidence && phase1Evidence.prefetchMeta
         ? phase1Evidence.prefetchMeta.matchCount : null,
+      historical_lookup_count: phase1Evidence && phase1Evidence.prefetchMeta
+        ? phase1Evidence.prefetchMeta.lookupCount : null,
+      historical_period_read_count: phase1Evidence && phase1Evidence.prefetchMeta
+        ? phase1Evidence.prefetchMeta.periodReadCount : null,
       capability_confidence_bucket: phase1Route.confidence,
       continuation_used: !!phase1Route.continuationUsed,
     });
@@ -3177,7 +3191,7 @@ exports.chat = async (req, res) => {
 
     // The user's real category names — used to (a) tell the model to pick a
     // category from this list, and (b) snap any chosen category server-side.
-    const categoryNames = extractCategoryNames(selectedAccount);
+    // Extracted before routing so known category names can disambiguate lookups.
 
     // Phase 5: assemble base system from modular builders (behavior unchanged).
     const {
@@ -3380,23 +3394,31 @@ exports.chat = async (req, res) => {
       ? extractProposalFromMessage(lastAssistantTurnText(history), categoryNames, currentDate)
       : null;
 
-    const toolsForTurn = filterFunctionSchemas(functionSchemas, {
-      simulationMode,
-      goalsAvailable,
-      simulationAvailable,
-      allowedTools: allowedToolsFor(phase1Route.capability, {
-        parentCapability: phase1Route.parentCapability,
-        pendingType: phase1Route.pendingType,
-        omitGetUserTransactions: !!(
-          phase1Evidence
-          && phase1Evidence.status === 'ok'
-          && Array.isArray(phase1Evidence.source)
-          && phase1Evidence.source.includes('user_transactions')
-          && phase1Evidence.facts
-          && phase1Evidence.facts.expenseTotal != null
-        ),
-      }),
+    const forceDirectAnswer = shouldForceDirectAnswer({
+      route: phase1Route,
+      policy: phase1Policy,
+      evidence: phase1Evidence,
     });
+    const hasTxnEvidence = !!(
+      phase1Evidence
+      && (phase1Evidence.status === 'ok' || phase1Evidence.status === 'partial')
+      && Array.isArray(phase1Evidence.source)
+      && phase1Evidence.source.includes('user_transactions')
+    );
+    const toolsForTurn = forceDirectAnswer
+      ? []
+      : filterFunctionSchemas(functionSchemas, {
+          simulationMode,
+          goalsAvailable,
+          simulationAvailable,
+          allowedTools: allowedToolsFor(phase1Route.capability, {
+            parentCapability: phase1Route.parentCapability,
+            pendingType: phase1Route.pendingType,
+            omitGetUserTransactions: hasTxnEvidence,
+            includeOpenTransactionSearch: !!phase1Route.wantsUiAction,
+          }),
+        });
+    const primaryToolChoice = forceDirectAnswer ? 'none' : 'auto';
 
     const ctx = {
       userId,
@@ -3434,7 +3456,7 @@ exports.chat = async (req, res) => {
       try {
       console.log('Attempting to get response with tools...');
       const tAzure = Date.now();
-      const responseWithTools = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'auto', requestId: req.id });
+      const responseWithTools = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: primaryToolChoice, requestId: req.id });
       telemetry.recordAzureCall(Date.now() - tAzure, responseWithTools?.usage);
       const choice = responseWithTools?.choices?.[0];
       const msg = choice?.message;
@@ -3446,8 +3468,9 @@ exports.chat = async (req, res) => {
         contentLength: msg?.content?.length || 0
       });
       
-      // If the model wants to call tools, execute them
-      if (msg?.tool_calls && msg.tool_calls.length > 0) {
+      // If the model wants to call tools, execute them — unless this turn
+      // already has complete analytical evidence (tool_choice: none).
+      if (!forceDirectAnswer && msg?.tool_calls && msg.tool_calls.length > 0) {
         console.log('Model requested tool calls, executing...');
         result = await executeToolCalls(messages, msg.tool_calls, ctx);
       } else {
@@ -3520,6 +3543,12 @@ exports.chat = async (req, res) => {
       write_blocked: blocked.length > 0,
     });
 
+    const uiActions = mergeOpenSearchUiActions(
+      Array.isArray(result?.uiActions) ? result.uiActions : [],
+      phase1Route
+    );
+    telemetry.recordGrounding({ ui_action_count: uiActions.length });
+
     const responsePayload = {
       response: finalText,
       memoryUsed: updatedHistory.length,
@@ -3531,8 +3560,8 @@ exports.chat = async (req, res) => {
       // The frontend applies these to its client-side simulation overlay.
       simOps: Array.isArray(result?.simOps) ? result.simOps : [],
       // Client UI actions requested via tools (e.g. open the transaction
-      // search panel, optionally pre-filled with a search term).
-      uiActions: Array.isArray(result?.uiActions) ? result.uiActions : [],
+      // search panel, optionally pre-filled with a search term and dates).
+      uiActions,
       transactionResult,
       error: result?.error,
     };

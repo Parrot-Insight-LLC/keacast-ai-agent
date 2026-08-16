@@ -12,7 +12,6 @@ const NAVIGATION_UI = Object.freeze([
 const FINANCIAL_LOOKUP = Object.freeze([
   'getUserTransactions',
   'getFocusedEntityDetails',
-  'openTransactionSearch',
 ]);
 const FINANCIAL_FORECAST = Object.freeze(['getRecurringForecasts']);
 const AFFORDABILITY = Object.freeze([]);
@@ -91,10 +90,14 @@ function bundleForCapability(capability, { parentCapability, pendingType } = {})
 
 function allowedToolsFor(capability, opts = {}) {
   const names = bundleForCapability(capability, opts);
+  let out = names;
   if (opts.omitGetUserTransactions) {
-    return new Set(names.filter((n) => n !== 'getUserTransactions'));
+    out = out.filter((n) => n !== 'getUserTransactions');
   }
-  return new Set(names);
+  if (opts.includeOpenTransactionSearch && !out.includes('openTransactionSearch')) {
+    out = out.concat(['openTransactionSearch']);
+  }
+  return new Set(out);
 }
 
 module.exports = {

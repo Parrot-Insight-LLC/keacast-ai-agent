@@ -24,6 +24,7 @@ const FINANCIAL_CAPABILITIES = new Set([
 ]);
 
 const SUBJECT_MAX = 64;
+const MAX_LOOKUP_CLAUSES = 6;
 const CATEGORY_WORDS = [
   'restaurants', 'restaurant', 'dining', 'groceries', 'grocery', 'gas',
   'rent', 'utilities', 'entertainment', 'travel', 'shopping', 'food',
@@ -124,7 +125,7 @@ function parseCategory(text) {
   return null;
 }
 
-function parseMerchant(text) {
+function parseAtToken(text) {
   const m = String(text || '');
   const at = m.match(/\bat\s+([A-Za-z0-9][A-Za-z0-9 &'.-]{1,40})/);
   if (!at) return null;
@@ -132,27 +133,56 @@ function parseMerchant(text) {
     .replace(/\b(last|this|next)\s+(month|week)\b.*$/i, '')
     .replace(/\b(in|on|for)\s+\w+$/i, '')
     .trim();
-  return clipSubject(raw);
+  if (!raw) return null;
+  return { display: raw, value: clipSubject(raw) };
 }
 
-function extractSlots(message, currentDate) {
+function parseMerchant(text) {
+  const tok = parseAtToken(text);
+  return tok ? tok.value : null;
+}
+
+function knownCategorySet(knownCategories) {
+  const set = new Set(CATEGORY_WORDS);
+  if (Array.isArray(knownCategories)) {
+    for (const n of knownCategories) {
+      const c = clipSubject(n);
+      if (c) set.add(c);
+    }
+  }
+  return set;
+}
+
+function isKnownCategoryToken(token, knownCategories) {
+  const c = clipSubject(token);
+  return !!(c && knownCategorySet(knownCategories).has(c));
+}
+
+function extractSlots(message, currentDate, knownCategories) {
   const amount = parseAmount(message);
   const period = parsePeriod(message, currentDate);
   const category = parseCategory(message);
-  const merchant = parseMerchant(message);
+  const atTok = parseAtToken(message);
   let subjectKind = null;
   let subjectValue = null;
-  if (merchant) {
+  let displaySubject = null;
+  if (atTok && isKnownCategoryToken(atTok.value, knownCategories)) {
+    subjectKind = 'category';
+    subjectValue = atTok.value;
+    displaySubject = atTok.display;
+  } else if (atTok) {
     subjectKind = 'merchant';
-    subjectValue = merchant;
+    subjectValue = atTok.value;
+    displaySubject = atTok.display;
   } else if (category) {
     subjectKind = 'category';
     subjectValue = category;
+    displaySubject = category;
   } else if (amount != null) {
     subjectKind = 'amount';
     subjectValue = String(amount);
   }
-  return { amount, period, subjectKind, subjectValue };
+  return { amount, period, subjectKind, subjectValue, displaySubject };
 }
 
 function isShortFollowUp(text) {
@@ -223,7 +253,177 @@ function isForecast(text) {
 
 function isLookup(text) {
   const m = String(text || '').toLowerCase();
-  return /\b(how much (did i|have i|do i)|spent|spend|spending|what did i spend|balance|available|credit limit|how much (is|was) in)\b/.test(m);
+  return /\b(how much (did i|have i|do i)|spent|spend|spending|what did i spend|balance|available|credit limit|how much (is|was) in)\b/.test(m)
+    || /\b(what did .+ cost|cost (last|this|in) )\b/.test(m);
+}
+
+function isLookupClause(text) {
+  return isLookup(text) || /\b(what did i spend|what did .+ cost)\b/i.test(String(text || ''));
+}
+
+function detectWantsUiAction(text) {
+  const m = String(text || '').toLowerCase();
+  const hasVerb = /\b(show|open|find|list|pull up)\b/.test(m);
+  const hasTarget = /\b(transaction|transactions|charges|purchases|search)\b/.test(m);
+  return hasVerb && hasTarget;
+}
+
+function splitLookupClauses(message) {
+  const text = String(message || '');
+  const byBreaks = text.split(/(?:\?+|\r?\n)+/);
+  const clauses = [];
+  for (const chunk of byBreaks) {
+    const pieces = chunk.split(/\band\s+(?=(?:how much|what did i spend)\b)/i);
+    for (const piece of pieces) {
+      const trimmed = String(piece || '').replace(/^[\s,;:.-]+|[\s,;:.-]+$/g, '').trim();
+      if (trimmed) clauses.push(trimmed);
+    }
+  }
+  return clauses;
+}
+
+function lookupFromSlots(slots) {
+  if (!slots) return null;
+  const hasSubject = slots.subjectKind === 'merchant' || slots.subjectKind === 'category';
+  const hasPeriod = !!(slots.period && slots.period.start && slots.period.end);
+  if (!hasSubject && !hasPeriod) return null;
+  return {
+    subjectKind: slots.subjectKind || null,
+    subjectValue: slots.subjectValue || null,
+    period: slots.period || null,
+    displaySubject: slots.displaySubject || slots.subjectValue || null,
+  };
+}
+
+function extractNavSubjectToken(text) {
+  const original = String(text || '');
+  const noise = /\b(show\s+me|show|open|find|list|pull\s+up|my|the|from|in|on|at|last|this|next|month|week|january|february|march|april|may|june|july|august|september|october|november|december|transactions|charges|purchases|search)\b/gi;
+  const leftover = original
+    .replace(noise, ' ')
+    .replace(/[^A-Za-z0-9 &'-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!leftover) return null;
+  const words = leftover.split(/\s+/).filter(Boolean).slice(0, 3);
+  return words.join(' ') || null;
+}
+
+function extractLookupRequests(message, currentDate, knownCategories) {
+  const clauses = splitLookupClauses(message);
+  const accepted = [];
+  let extraLookupClauses = 0;
+  for (const clause of clauses) {
+    if (!isLookupClause(clause)) continue;
+    const req = lookupFromSlots(extractSlots(clause, currentDate, knownCategories));
+    if (!req) continue;
+    if (accepted.length >= MAX_LOOKUP_CLAUSES) {
+      extraLookupClauses += 1;
+      continue;
+    }
+    accepted.push(req);
+  }
+  return { lookupRequests: accepted, capped: extraLookupClauses > 0 };
+}
+
+function extractNavLookup(message, currentDate, knownCategories) {
+  const slots = extractSlots(message, currentDate, knownCategories);
+  if (slots.subjectKind === 'merchant' || slots.subjectKind === 'category') {
+    return lookupFromSlots(slots);
+  }
+  const token = extractNavSubjectToken(message);
+  if (!token) return lookupFromSlots({ ...slots, subjectKind: null, subjectValue: null });
+  const kind = isKnownCategoryToken(token, knownCategories) ? 'category' : 'merchant';
+  return lookupFromSlots({
+    ...slots,
+    subjectKind: kind,
+    subjectValue: clipSubject(token),
+    displaySubject: token,
+  });
+}
+
+function titleCaseSubject(value) {
+  const s = String(value || '').trim();
+  if (!s) return null;
+  return s.replace(/\b[a-z]/g, (ch) => ch.toUpperCase());
+}
+
+function buildOpenSearchAction(route) {
+  if (!route || !route.wantsUiAction) return null;
+  const req = Array.isArray(route.lookupRequests) && route.lookupRequests[0]
+    ? route.lookupRequests[0]
+    : null;
+  const slots = req || route.slots || {};
+  const action = { type: 'open_search' };
+  const term = slots.displaySubject || titleCaseSubject(slots.subjectValue);
+  if (term) action.search_term = term;
+  if (slots.period && /^\d{4}-\d{2}-\d{2}$/.test(String(slots.period.start || ''))) {
+    action.startDate = String(slots.period.start);
+  }
+  if (slots.period && /^\d{4}-\d{2}-\d{2}$/.test(String(slots.period.end || ''))) {
+    action.endDate = String(slots.period.end);
+  }
+  return action;
+}
+
+function mergeOpenSearchUiActions(uiActions, route) {
+  const actions = Array.isArray(uiActions) ? uiActions.slice() : [];
+  const suggested = buildOpenSearchAction(route);
+  if (!suggested) return actions;
+  const existing = actions.find((a) => a && a.type === 'open_search');
+  if (existing) {
+    if (!existing.search_term && suggested.search_term) existing.search_term = suggested.search_term;
+    if (!existing.startDate && suggested.startDate) existing.startDate = suggested.startDate;
+    if (!existing.endDate && suggested.endDate) existing.endDate = suggested.endDate;
+    return actions;
+  }
+  actions.push(suggested);
+  return actions;
+}
+
+function attachLookupMeta(result, message, currentDate, knownCategories) {
+  const extras = extractLookupRequests(message, currentDate, knownCategories);
+  const wantsUi = detectWantsUiAction(message);
+  let lookupRequests = extras.lookupRequests;
+  if (wantsUi && !lookupRequests.length) {
+    const nav = extractNavLookup(message, currentDate, knownCategories);
+    if (nav) lookupRequests = [nav];
+  }
+  let slots = result.slots || {};
+  if (result.capability === 'continuation'
+    && !lookupRequests.length
+    && (slots.subjectKind === 'merchant' || slots.subjectKind === 'category')) {
+    const cont = lookupFromSlots(slots);
+    if (cont) lookupRequests = [cont];
+  }
+  if (lookupRequests.length
+    && result.capability === 'financial_lookup'
+    && slots.subjectKind !== 'account') {
+    const first = lookupRequests[0];
+    slots = {
+      ...slots,
+      subjectKind: first.subjectKind || slots.subjectKind,
+      subjectValue: first.subjectValue || slots.subjectValue,
+      period: first.period || slots.period,
+      displaySubject: first.displaySubject || slots.displaySubject,
+    };
+  }
+  if (wantsUi && lookupRequests.length && result.capability === 'navigation_ui') {
+    const first = lookupRequests[0];
+    slots = {
+      ...slots,
+      subjectKind: first.subjectKind || slots.subjectKind,
+      subjectValue: first.subjectValue || slots.subjectValue,
+      period: first.period || slots.period,
+      displaySubject: first.displaySubject || slots.displaySubject,
+    };
+  }
+  return {
+    ...result,
+    slots,
+    lookupRequests,
+    compoundLookupCapped: extras.capped,
+    wantsUiAction: wantsUi,
+  };
 }
 
 function asksForFinancialAmount(text) {
@@ -287,10 +487,11 @@ function pendingWriteType(input) {
 /**
  * Deterministic first-match capability router. No LLM.
  */
-function routeCapability(input = {}) {
+function routeCapabilityUnwrapped(input = {}) {
   const message = String(input.message || '');
   const currentDate = input.currentDate;
-  const slots = extractSlots(message, currentDate);
+  const knownCategories = input.knownCategories;
+  const slots = extractSlots(message, currentDate, knownCategories);
   const pendingType = pendingWriteType(input);
   const last = input.dialogueState || {};
   const currentAccountId = input.accountId;
@@ -405,6 +606,25 @@ function routeCapability(input = {}) {
   if (isNavUtterance(message)) {
     return { ...base, capability: 'navigation_ui', confidence: 'high', accountChanged };
   }
+  if (detectWantsUiAction(message)) {
+    const nav = extractNavLookup(message, currentDate, knownCategories);
+    const navSlots = nav
+      ? {
+          ...slots,
+          subjectKind: nav.subjectKind || slots.subjectKind,
+          subjectValue: nav.subjectValue || slots.subjectValue,
+          period: nav.period || slots.period,
+          displaySubject: nav.displaySubject || slots.displaySubject,
+        }
+      : slots;
+    return {
+      ...base,
+      capability: 'navigation_ui',
+      confidence: 'high',
+      accountChanged,
+      slots: navSlots,
+    };
+  }
   if (isCasual(message)) {
     return { ...base, capability: 'casual_conversation', confidence: 'high', accountChanged };
   }
@@ -430,6 +650,16 @@ function routeCapability(input = {}) {
 
   // 6. unknown
   return { ...base, capability: 'unknown', confidence: 'low', accountChanged };
+}
+
+function routeCapability(input = {}) {
+  const result = routeCapabilityUnwrapped(input);
+  return attachLookupMeta(
+    result,
+    String(input.message || ''),
+    input.currentDate,
+    input.knownCategories
+  );
 }
 
 const PERSIST_CAPABILITIES = new Set([
@@ -471,15 +701,41 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
   return dialogueState;
 }
 
+function applyContinuationPersistenceFromEvidence(dialogueState, route, evidence, opts) {
+  const lookups = Array.isArray(evidence && evidence.lookups) ? evidence.lookups : [];
+  let lastOk = null;
+  for (const lookup of lookups) {
+    if (lookup && lookup.status === 'ok'
+      && (lookup.subjectKind === 'merchant' || lookup.subjectKind === 'category')) {
+      lastOk = lookup;
+    }
+  }
+  const persistRoute = lastOk
+    ? {
+        ...route,
+        slots: {
+          ...(route.slots || {}),
+          subjectKind: lastOk.subjectKind,
+          subjectValue: lastOk.subjectValue,
+          period: lastOk.period,
+        },
+      }
+    : route;
+  return applyContinuationPersistence(dialogueState, persistRoute, opts);
+}
+
 module.exports = {
   CAPABILITIES,
   FINANCIAL_CAPABILITIES,
+  MAX_LOOKUP_CLAUSES,
   routeCapability,
   extractSlots,
+  extractLookupRequests,
   parsePeriod,
   parseAmount,
   shouldPersistContinuation,
   applyContinuationPersistence,
+  applyContinuationPersistenceFromEvidence,
   asksForFinancialAmount,
   clipSubject,
   isWriteAmendmentOrSlotFill,
@@ -487,4 +743,8 @@ module.exports = {
   isSimUtterance,
   isLookup,
   isForecast,
+  detectWantsUiAction,
+  buildOpenSearchAction,
+  mergeOpenSearchUiActions,
+  isKnownCategoryToken,
 };

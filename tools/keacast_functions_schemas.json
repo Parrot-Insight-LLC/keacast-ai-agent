@@ -500,11 +500,13 @@
     "type": "function",
     "function": {
       "name": "openTransactionSearch",
-      "description": "NON-WRITING UI action: opens the Keacast transaction search panel on the user's screen, optionally pre-filled with a search term that runs immediately. Use when the user asks you to open search or to find/look up/show transactions IN THE APP (e.g. 'search for my Uber transactions', 'open search', 'pull up my Netflix charges'). The chat window minimizes and the search results appear front and center. This does NOT return transaction data to you — when YOU need the data to answer a question, use the read tools (getUserTransactions, getUpcomingTransactions, getRecurringForecasts) instead. After calling this, tell the user briefly that the search is opening; do not invent result counts or amounts.",
+      "description": "NON-WRITING UI action: opens the Keacast transaction search panel on the user's screen, optionally pre-filled with a search term and optional YYYY-MM-DD date bounds that run immediately. Use when the user asks you to open search or to find/look up/show/list/pull up transactions IN THE APP (e.g. 'search for my Uber transactions', 'open search', 'pull up my Netflix charges', 'show me Walmart transactions last month'). Do NOT use this to answer analytical questions such as 'how much did I spend' or 'what did X cost' — those must be answered from GROUNDED EVIDENCE. The chat window minimizes and the search results appear front and center. This does NOT return transaction data to you — when YOU need the data to answer a question, use GROUNDED EVIDENCE or the read tools. After calling this, tell the user briefly that the search is opening; do not invent result counts or amounts. Never pass an account id.",
       "parameters": {
         "type": "object",
         "properties": {
-          "search_term": { "type": "string", "description": "Text to pre-fill and run in the search box (merchant name, transaction title, category, amount, etc.). Omit to just open the empty search panel." }
+          "search_term": { "type": "string", "description": "Text to pre-fill and run in the search box (merchant name, transaction title, category, amount, etc.). Omit to just open the empty search panel." },
+          "startDate": { "type": "string", "description": "Optional inclusive period start in YYYY-MM-DD. Resolve relative periods (last month, June) before calling." },
+          "endDate": { "type": "string", "description": "Optional inclusive period end in YYYY-MM-DD. Resolve relative periods (last month, June) before calling." }
         },
         "required": []
       }

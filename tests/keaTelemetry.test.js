@@ -227,6 +227,9 @@ async function run() {
     historical_prefetch_page_count: 3,
     historical_prefetch_row_count: 120,
     historical_match_count: 40,
+    historical_lookup_count: 4,
+    historical_period_read_count: 2,
+    ui_action_count: 1,
   });
   const pG = tG.toPayload();
   check('conversation_intent recorded', pG.conversation_intent === 'financial_lookup');
@@ -244,6 +247,9 @@ async function run() {
   check('historical_prefetch_page_count', pG.historical_prefetch_page_count === 3);
   check('historical_prefetch_row_count', pG.historical_prefetch_row_count === 120);
   check('historical_match_count', pG.historical_match_count === 40);
+  check('historical_lookup_count', pG.historical_lookup_count === 4);
+  check('historical_period_read_count', pG.historical_period_read_count === 2);
+  check('ui_action_count', pG.ui_action_count === 1);
   check('grounding payload has no evidence', pG.evidence === undefined && pG.facts === undefined);
   check('grounding payload has no merchant', pG.merchant === undefined && pG.lastSubjectValue === undefined);
   check('grounding payload has no amounts', pG.amount === undefined && pG.expenseTotal === undefined);
