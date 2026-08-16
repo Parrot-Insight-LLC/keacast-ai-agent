@@ -15,11 +15,32 @@ function selectedAccountUserPattern(userId) {
   return `summarization:tool:selectedaccount:${normalizeCacheSegment(userId)}:*`;
 }
 
-async function invalidateSelectedAccountToolCache(userId, accountId) {
+function emitKeaSnapshotInvalidated({ reason, requestId, userId, accountId } = {}) {
+  try {
+    const { hashUserKey, hashAccountKey } = require('./keaTelemetry');
+    console.log(JSON.stringify({
+      event: 'kea_snapshot_invalidated',
+      reason: reason || null,
+      requestId: requestId || null,
+      userKey: hashUserKey(userId),
+      accountKey: hashAccountKey(accountId),
+    }));
+  } catch (e) {
+    console.warn('kea_snapshot_invalidated emit failed:', e.message);
+  }
+}
+
+async function invalidateSelectedAccountToolCache(userId, accountId, { reason, requestId } = {}) {
   if (!userId || accountId === undefined || accountId === null || accountId === '') return;
   try {
     const redis = require('./redisService');
     await redis.del(selectedAccountToolCacheKey(userId, accountId));
+    emitKeaSnapshotInvalidated({
+      reason: reason || null,
+      requestId,
+      userId,
+      accountId,
+    });
   } catch (e) {
     console.warn('Selected-account tool cache invalidate failed:', e.message);
   }
@@ -30,4 +51,5 @@ module.exports = {
   selectedAccountToolCacheKey,
   selectedAccountUserPattern,
   invalidateSelectedAccountToolCache,
+  emitKeaSnapshotInvalidated,
 };

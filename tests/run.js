@@ -11,6 +11,7 @@ const suites = [
   './schemasIdentity.test.js',
   './keaTelemetry.test.js',
   './keaAccountSnapshot.test.js',
+  './keaContextResolve.test.js',
   './selectedAccountObservability.test.js',
   './corsPreflight.test.js',
   './writeGate.test.js',

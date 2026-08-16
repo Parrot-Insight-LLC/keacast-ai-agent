@@ -55,6 +55,7 @@ function slimTxn(t) {
   if (t.start) out.start = t.start;
   if (t.authorized_date) out.authorized_date = t.authorized_date;
   if (t.category) out.category = String(t.category).slice(0, 64);
+  if (t.forecast_type) out.forecast_type = t.forecast_type;
   return out.amount != null || out.name || out.merchant_name ? out : null;
 }
 
@@ -164,7 +165,10 @@ function compactSavings(sav) {
 
 function compactSelectedAccount(account, currentDate) {
   if (!account || typeof account !== 'object') return null;
-  if (account._keaCompact === true) return account;
+  if (account._keaCompact === true && Number(account.schemaVersion) === 1) return account;
+  if (account._keaCompact === true) {
+    return { ...account, schemaVersion: 1 };
+  }
 
   const recents = flattenRecents(account)
     .sort((a, b) => txnTime(b) - txnTime(a))
@@ -193,6 +197,7 @@ function compactSelectedAccount(account, currentDate) {
 
   return {
     _keaCompact: true,
+    schemaVersion: 1,
     accountid: account.accountid,
     accountname: account.accountname || null,
     bank_account_name: account.bank_account_name || null,

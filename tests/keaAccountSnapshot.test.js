@@ -101,6 +101,7 @@ async function run() {
   const compactBytes = utf8Bytes(compact);
 
   check('compact marked', compact._keaCompact === true);
+  check('schemaVersion 1', compact.schemaVersion === 1);
   check('compact much smaller than full blob', compactBytes * 10 < fullBytes);
   check('omits cfTransactions', compact.cfTransactions === undefined);
   check('omits computedBalances', compact.computedBalances === undefined);

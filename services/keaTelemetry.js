@@ -8,14 +8,22 @@ const crypto = require('crypto');
  * is stable before grounding is implemented.
  */
 
-function hashUserKey(userId) {
-  if (userId == null || userId === '') return null;
+function hashKeyedId(prefix, id) {
+  if (id == null || id === '') return null;
   const secret = process.env.CASHFLOW_JWT_SECRET || process.env.key_word;
-  const material = `kea-user-key:${String(userId)}`;
+  const material = `${prefix}:${String(id)}`;
   const digest = secret
     ? crypto.createHmac('sha256', secret).update(material).digest('hex')
     : crypto.createHash('sha256').update(material).digest('hex');
   return digest.slice(0, 16);
+}
+
+function hashUserKey(userId) {
+  return hashKeyedId('kea-user-key', userId);
+}
+
+function hashAccountKey(accountId) {
+  return hashKeyedId('kea-account-key', accountId);
 }
 
 /**
@@ -142,6 +150,7 @@ function createKeaTelemetry({ requestId } = {}) {
       selected_account_http_ms: marks.selected_account_http?.ms ?? null,
       selected_account_parse_ms: marks.selected_account_parse?.ms ?? null,
       selected_account_stringify_ms: marks.selected_account_stringify?.ms ?? null,
+      selected_account_compact_ms: marks.selected_account_compact?.ms ?? null,
       selected_account_redis_set_ms: marks.selected_account_redis_set?.ms ?? null,
       selected_account_redis_ping_ms: marks.selected_account_redis_ping?.ms ?? null,
       selected_account_cache_write_ms: (
@@ -216,5 +225,6 @@ function createKeaTelemetry({ requestId } = {}) {
 module.exports = {
   createKeaTelemetry,
   hashUserKey,
+  hashAccountKey,
   identityFromCashflowAuth,
 };

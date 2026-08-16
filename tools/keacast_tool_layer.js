@@ -92,6 +92,13 @@ async function getSelectedAccount({ userId, accountId, token, body, timeoutMs, r
   return response.data;
 }
 
+async function getKeaAccountContext({ accountId, token, body, timeoutMs, requestId }) {
+  const url = `${BASE_URL}/account/kea-context/${accountId}`;
+  const config = buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId });
+  const response = await axios.post(url, body || {}, config);
+  return response.data;
+}
+
 async function getBalances({ accountId, userId, token, body }) {
   const url = `${BASE_URL}/balances/getall/${accountId}/${moment().format('YYYY-MM-DD')}`;
   const response = await axios.get(url, AUTH_HEADER(token));
@@ -232,6 +239,7 @@ module.exports = {
   getUserData,
   getSelectedKeacastAccounts,
   getSelectedAccount,
+  getKeaAccountContext,
   getBalances,
   createTransaction,
   deleteTransaction,

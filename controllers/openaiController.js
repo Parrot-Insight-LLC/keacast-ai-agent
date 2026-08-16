@@ -18,15 +18,9 @@ const {
 const { createKeaTelemetry, identityFromCashflowAuth } = require('../services/keaTelemetry');
 const { injectTrustedIdentity } = require('../services/keaIdentity');
 const { assertAccountAccess } = require('../services/keaAccountAccess');
-const {
-  selectedAccountToolCacheKey,
-  invalidateSelectedAccountToolCache,
-} = require('../services/keaAccountCache');
-const {
-  compactSelectedAccount,
-  measurePayloadKeyBytes,
-  utf8Bytes,
-} = require('../services/keaAccountSnapshot');
+const { invalidateSelectedAccountToolCache } = require('../services/keaAccountCache');
+const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
+const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 20; // verbatim conversation window (older turns are folded into a rolling summary)
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
@@ -179,34 +173,6 @@ function buildSummarizationCacheKey(sessionKey, accountId, plaidTransactions, fo
 // They are intentionally tiny and side-effect-free so the prompt builder
 // stays readable and so we can unit-test (or swap them out) easily.
 
-const SELECTED_ACCOUNT_TOOL_TTL = 300;   // 5 min Redis cache for the compact chat snapshot
-// /account/selected is heavy (live Plaid + multi-table joins + chart compute),
-// routinely 8–15s on cold accounts. 25s gives us reasonable headroom while
-// still surfacing a clear timeout instead of hanging forever.
-const SELECTED_ACCOUNT_TOOL_TIMEOUT_MS = 25000;
-
-async function cacheCompactSelectedAccount(toolCacheKey, account, currentDate, telemetry) {
-  const compact = compactSelectedAccount(account, currentDate);
-  if (!compact) return { compact: null, payloadBytes: 0 };
-  if (telemetry) telemetry.markStart('selected_account_stringify');
-  const compactJson = JSON.stringify(compact);
-  if (telemetry) telemetry.markEnd('selected_account_stringify');
-  const payloadBytes = Buffer.byteLength(compactJson, 'utf8');
-  if (telemetry) telemetry.markStart('selected_account_redis_set');
-  try {
-    await redis.set(toolCacheKey, compactJson, 'EX', SELECTED_ACCOUNT_TOOL_TTL);
-  } catch (e) {
-    console.warn('Selected-account compact cache write failed:', e.message);
-  }
-  if (telemetry) telemetry.markEnd('selected_account_redis_set');
-  return { compact, payloadBytes };
-}
-
-
-// Build a cheap, stable fingerprint for the cache key when we have the
-// fully-fetched account blob. We deliberately AVOID hashing whole transaction
-// arrays — Plaid timestamps + balance refresh time are sufficient invalidation
-// signals and keep the key construction O(1) instead of O(n).
 function buildAccountFingerprint(account) {
   if (!account || typeof account !== 'object') return null;
   const len = (v) => (Array.isArray(v) ? v.length : 0);
@@ -2496,7 +2462,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           committedWrites.push(writeRecord);
           // Session memory so later turns can update/delete this by real id.
           recordRecentWrite(state, writeRecord);
-          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId);
+          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId, {
+            reason: 'write_commit',
+            requestId: ctx.requestId,
+          });
           toolResults.push({ id: toolCall.id, name, content: toolContent });
         } catch (err) {
           blockedWrites.push({ tool: name, reason: 'execution_failed' });
@@ -2559,7 +2528,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           };
           committedWrites.push(goalRecord);
           recordRecentWrite(state, goalRecord);
-          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId);
+          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId, {
+            reason: 'write_commit',
+            requestId: ctx.requestId,
+          });
           let toolContent = JSON.stringify(result ?? {});
           if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
           toolResults.push({ id: toolCall.id, name, content: toolContent });
@@ -2615,7 +2587,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           };
           committedWrites.push(delRecord);
           recordRecentWrite(state, delRecord);
-          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId);
+          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId, {
+            reason: 'write_commit',
+            requestId: ctx.requestId,
+          });
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             ...(result ?? {}),
             note: 'DELETE COMMITTED. Confirm to the user exactly what was deleted (the transaction/series you proposed) — do not describe any other transaction.'
@@ -2880,12 +2855,10 @@ exports.chat = async (req, res) => {
       : getCurrentDateInTimezone(location);
     console.log('Using current date:', currentDate, clientDate ? '(from clientDate)' : '(from coordinates)');
 
-    // ── Resolve the selected-account blob via the tool layer ──────────────
-    // Mirrors exports.summarization: prefer a client-sent accountSnapshot,
-    // otherwise fetch the slim, fully-enriched single-account blob through
-    // functionMap.getSelectedAccount (Redis-cached 5 min). This replaces the
-    // old contextCache / getSelectedKeacastAccounts preload and the multi-KB
-    // JSON dump — specifics are now fetched on demand by the tools below.
+    // ── Resolve compact Kea financial context ────────────────────────────
+    // Prefer a client-sent accountSnapshot, otherwise Redis compact snapshot,
+    // otherwise POST /account/kea-context/:accid. Never fall back to the
+    // calendar /account/selected dashboard pipeline.
     const accountSnapshot = req.body?.accountSnapshot;
     let selectedAccount = null;
     let selectedAccountSource = 'none';
@@ -2905,91 +2878,47 @@ exports.chat = async (req, res) => {
     }
 
     if (!selectedAccount && userId && token && accountid) {
-      const toolCacheKey = selectedAccountToolCacheKey(userId, accountid);
-      selectedAccountCacheHit = false;
-      telemetry.markStart('selected_account_redis_ping');
-      try {
-        await redis.ping();
-      } catch (e) {
-        console.warn('Chat endpoint: redis ping failed:', e.message);
-      }
-      telemetry.markEnd('selected_account_redis_ping');
-      telemetry.markStart('selected_account_cache_lookup');
-      try {
-        const cached = await redis.get(toolCacheKey);
-        telemetry.markEnd('selected_account_cache_lookup');
-        if (cached) {
-          selectedAccountPayloadBytes = Buffer.byteLength(cached, 'utf8');
-          telemetry.markStart('selected_account_parse');
-          try {
-            selectedAccount = JSON.parse(cached);
-            telemetry.markEnd('selected_account_parse');
-            selectedAccountSource = 'tool-cache';
-            selectedAccountCacheHit = true;
-            if (selectedAccount && selectedAccount._keaCompact !== true) {
-              selectedAccountFullPayloadBytes = selectedAccountPayloadBytes;
-              selectedAccountPayloadKeyBytes = measurePayloadKeyBytes(selectedAccount);
-              const rewritten = await cacheCompactSelectedAccount(
-                toolCacheKey,
-                selectedAccount,
-                currentDate,
-                telemetry
-              );
-              if (rewritten.compact) {
-                selectedAccount = rewritten.compact;
-                selectedAccountPayloadBytes = rewritten.payloadBytes;
-              }
-            }
-            console.log('Chat endpoint: Using cached selected-account blob for account', accountid);
-          } catch (parseErr) {
-            telemetry.markEnd('selected_account_parse');
-            console.warn('Chat endpoint: tool-layer cache parse failed:', parseErr.message);
-            selectedAccount = null;
-            selectedAccountCacheHit = false;
-          }
-        }
-      } catch (e) {
-        telemetry.markEnd('selected_account_cache_lookup');
-        console.warn('Chat endpoint: tool-layer cache read failed:', e.message);
-      }
-
-      if (!selectedAccount) {
-        try {
-          telemetry.markStart('selected_account_http');
-          selectedAccount = await functionMap.getSelectedAccount({
-            userId,
-            accountId: accountid,
-            token,
-            body: { clientDate: currentDate },
-            timeoutMs: SELECTED_ACCOUNT_TOOL_TIMEOUT_MS,
-            requestId: req.id,
-          }, { userId, token, accountId: accountid, requestId: req.id });
-          const httpMs = telemetry.markEnd('selected_account_http');
-          console.log('Chat endpoint: tool-layer fetch completed in', httpMs, 'ms');
-          selectedAccountSource = 'tool-fresh';
-          if (selectedAccount && typeof selectedAccount === 'object') {
-            selectedAccountFullPayloadBytes = utf8Bytes(selectedAccount);
-            selectedAccountPayloadKeyBytes = measurePayloadKeyBytes(selectedAccount);
-            const written = await cacheCompactSelectedAccount(
-              toolCacheKey,
-              selectedAccount,
-              currentDate,
-              telemetry
-            );
-            if (written.compact) {
-              selectedAccount = written.compact;
-              selectedAccountPayloadBytes = written.payloadBytes;
-            }
-          }
-        } catch (toolErr) {
-          telemetry.markEnd('selected_account_http');
-          console.warn(
-            'Chat endpoint: tool-layer fetch failed —',
-            'status:', toolErr?.response?.status,
-            'message:', toolErr?.message
-          );
-          selectedAccount = null;
-        }
+      const resolved = await resolveKeaSelectedAccount({
+        userId,
+        accountId: accountid,
+        token,
+        currentDate,
+        requestId: req.id,
+        redis,
+        telemetry,
+        fetchKeaContext: (opts) => functionMap.getKeaAccountContext(opts, {
+          userId,
+          token,
+          accountId: accountid,
+          requestId: req.id,
+        }),
+      });
+      selectedAccount = resolved.selectedAccount;
+      selectedAccountSource = resolved.source;
+      selectedAccountCacheHit = resolved.cacheHit;
+      selectedAccountPayloadBytes = resolved.payloadBytes;
+      selectedAccountFullPayloadBytes = resolved.fullPayloadBytes;
+      selectedAccountPayloadKeyBytes = resolved.payloadKeyBytes;
+      if (resolved.error) {
+        telemetry.markEnd('selected_account_fetch');
+        telemetry.setSelectedAccountMeta({
+          source: selectedAccountSource,
+          cacheHit: selectedAccountCacheHit,
+          payloadBytes: selectedAccountPayloadBytes,
+          fullPayloadBytes: selectedAccountFullPayloadBytes,
+          payloadKeyBytes: selectedAccountPayloadKeyBytes,
+        });
+        telemetry.emit(req.log);
+        console.warn(
+          'Chat endpoint: kea-context fetch failed —',
+          'status:', resolved.error.status,
+          'message:', resolved.error.message
+        );
+        return res.status(502).json({
+          error: 'Kea account context unavailable',
+          code: 'KEA_CONTEXT_UNAVAILABLE',
+          requestId: req.id,
+        });
       }
     } else if (!userId || !token || !accountid) {
       console.log('Chat endpoint: Skipping account preload (missing userId, token, or accountid)');
@@ -3617,16 +3546,12 @@ exports.summarization = async (req, res) => {
     const sessionKey = buildSessionKey(req);
     const { token, userId, authHeader } = extractAuthFromRequest(req);
 
-    // ── Phase 2: Resolve the account blob ────────────────────────────────
+    // ── Phase 2: Resolve compact Kea financial context ────────────────────
     // Resolution order (fastest → slowest):
-    //   1. accountSnapshot in the request body — the frontend already
-    //      rendered the dashboard so it has every precomputed field
-    //      (balance/available/savings/futureNegativeBalances/recents/etc.).
-    //      Sending a 1–2 KB snapshot is ~50× faster than re-fetching.
-    //   2. Tool-layer fetch — for callers (older clients, server-to-server
-    //      jobs) that don't pre-populate a snapshot. /account/selected is
-    //      heavy so we cache the response for 5 minutes.
-    //   3. Legacy req.body arrays — last-resort minimum-viable context.
+    //   1. accountSnapshot in the request body
+    //   2. Redis compact snapshot, else POST /account/kea-context/:accid
+    //   3. Legacy req.body arrays — only when kea-context was not attempted
+    // Never fall back to /account/selected.
     let selectedAccount = null;
     let selectedAccountSource = 'none';
 
@@ -3647,70 +3572,42 @@ exports.summarization = async (req, res) => {
     }
 
     if (!selectedAccount && userId && token && accountId) {
-      const toolCacheKey = selectedAccountToolCacheKey(userId, accountId);
-      try {
-        const cached = await redis.get(toolCacheKey);
-        if (cached) {
-          selectedAccount = JSON.parse(cached);
-          selectedAccountSource = 'tool-cache';
-          if (selectedAccount && selectedAccount._keaCompact !== true) {
-            const rewritten = await cacheCompactSelectedAccount(
-              toolCacheKey,
-              selectedAccount,
-              clientDate,
-              null
-            );
-            if (rewritten.compact) selectedAccount = rewritten.compact;
-          }
-          console.log('Summarization: Using cached selected-account blob (5min TTL) for account', accountId);
-        }
-      } catch (e) {
-        console.warn('Summarization: Tool-layer cache read failed:', e.message);
+      const resolved = await resolveKeaSelectedAccount({
+        userId,
+        accountId,
+        token,
+        currentDate: clientDate,
+        requestId: req.id,
+        redis,
+        fetchKeaContext: (opts) => functionMap.getKeaAccountContext(opts, {
+          userId,
+          token,
+          accountId,
+          requestId: req.id,
+        }),
+      });
+      if (resolved.error) {
+        console.warn(
+          'Summarization: kea-context fetch failed —',
+          'status:', resolved.error.status,
+          'message:', resolved.error.message
+        );
+        return res.status(502).json({
+          error: 'Kea account context unavailable',
+          code: 'KEA_CONTEXT_UNAVAILABLE',
+          requestId: req.id,
+        });
       }
-
-      if (!selectedAccount) {
-        try {
-          console.log('Summarization: Fetching selected account via tool layer for', userId, accountId);
-          const t0 = Date.now();
-          selectedAccount = await functionMap.getSelectedAccount({
-            userId,
-            accountId,
-            token,
-            body: { clientDate },
-            timeoutMs: SELECTED_ACCOUNT_TOOL_TIMEOUT_MS,
-            requestId: req.id,
-          }, { userId, token, accountId, requestId: req.id });
-          console.log('Summarization: Tool-layer fetch completed in', Date.now() - t0, 'ms');
-          selectedAccountSource = 'tool-fresh';
-          if (selectedAccount && typeof selectedAccount === 'object') {
-            const written = await cacheCompactSelectedAccount(
-              toolCacheKey,
-              selectedAccount,
-              clientDate,
-              null
-            );
-            if (written.compact) selectedAccount = written.compact;
-          }
-        } catch (toolErr) {
-          // Surface enough detail to actually diagnose this in production logs:
-          // status code, response body snippet, and whether axios timed out.
-          const status = toolErr?.response?.status;
-          const data = toolErr?.response?.data;
-          console.warn(
-            'Summarization: Tool-layer fetch failed —',
-            'code:', toolErr?.code,
-            'status:', status,
-            'message:', toolErr?.message,
-            'body:', typeof data === 'string' ? data.slice(0, 200) : JSON.stringify(data || {}).slice(0, 200)
-          );
-          selectedAccount = null;
-        }
+      selectedAccount = resolved.selectedAccount;
+      selectedAccountSource = resolved.source;
+      if (selectedAccount) {
+        console.log('Summarization: Using kea-context source', selectedAccountSource, 'for account', accountId);
       }
     }
 
     if (!selectedAccount) {
       console.log(
-        'Summarization: No accountSnapshot or tool-layer data — falling back to legacy req.body arrays.',
+        'Summarization: No accountSnapshot or kea-context data — falling back to legacy req.body arrays.',
         'plaid:', Array.isArray(fallbackBody.plaidTransactions) ? fallbackBody.plaidTransactions.length : 0,
         'forecast:', Array.isArray(fallbackBody.forecastedTransactions) ? fallbackBody.forecastedTransactions.length : 0,
         'balances:', Array.isArray(fallbackBody.balances) ? fallbackBody.balances.length : 0

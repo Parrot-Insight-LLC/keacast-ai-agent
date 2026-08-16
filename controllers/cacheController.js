@@ -4,6 +4,7 @@ const redis = require('../services/redisService');
 const {
   selectedAccountUserPattern,
   invalidateSelectedAccountToolCache,
+  emitKeaSnapshotInvalidated,
 } = require('../services/keaAccountCache');
 
 function sameUserId(a, b) {
@@ -118,6 +119,11 @@ exports.invalidateUserCache = async (req, res) => {
     console.log('Cache invalidation requested for user:', userId);
     const invalidatedCount = await contextCache.invalidateUserCache(userId);
     const selected = await scanAndUnlinkByPattern(selectedAccountUserPattern(userId));
+    emitKeaSnapshotInvalidated({
+      reason: 'http_user_delete',
+      requestId: req.id,
+      userId,
+    });
     
     res.json({
       success: true,
@@ -147,7 +153,10 @@ exports.invalidateAccountCache = async (req, res) => {
     
     console.log('Account cache invalidation requested for user:', userId, 'account:', accountId);
     await contextCache.invalidateAccountCache(userId, accountId);
-    await invalidateSelectedAccountToolCache(userId, accountId);
+    await invalidateSelectedAccountToolCache(userId, accountId, {
+      reason: 'http_account_delete',
+      requestId: req.id,
+    });
     
     res.json({
       success: true,
@@ -258,6 +267,10 @@ exports.flushSummarizationCache = async (req, res) => {
   try {
     const t0 = Date.now();
     const result = await flushPatterns(FLUSHABLE_PREFIXES.summarization);
+    emitKeaSnapshotInvalidated({
+      reason: 'admin_flush',
+      requestId: req.id,
+    });
     console.log(
       'Cache flush (summarization): deleted', result.totalDeleted,
       'keys across', result.perPattern.length, 'patterns in', Date.now() - t0, 'ms'

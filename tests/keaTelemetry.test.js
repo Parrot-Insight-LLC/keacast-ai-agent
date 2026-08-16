@@ -4,6 +4,7 @@ const { check, section } = require('./harness');
 const {
   createKeaTelemetry,
   hashUserKey,
+  hashAccountKey,
   identityFromCashflowAuth,
 } = require('../services/keaTelemetry');
 
@@ -48,6 +49,7 @@ async function run() {
   check('http_ms null when unused', payload.selected_account_http_ms === null);
   check('parse_ms null when unused', payload.selected_account_parse_ms === null);
   check('stringify_ms null when unused', payload.selected_account_stringify_ms === null);
+  check('compact_ms null when unused', payload.selected_account_compact_ms === null);
   check('redis_set_ms null when unused', payload.selected_account_redis_set_ms === null);
   check('redis_ping_ms null when unused', payload.selected_account_redis_ping_ms === null);
   check('payload_bytes null when unused', payload.selected_account_payload_bytes === null);
@@ -86,8 +88,23 @@ async function run() {
   check('redis_set_ms number on miss path', typeof p2.selected_account_redis_set_ms === 'number');
   check('cache_write_ms is stringify+set', p2.selected_account_cache_write_ms === p2.selected_account_stringify_ms + p2.selected_account_redis_set_ms);
   check('payload_bytes compact size', p2.selected_account_payload_bytes === 2048);
-  check('full_payload_bytes recorded on miss', p2.selected_account_full_payload_bytes === 4_000_000);
-  check('payload_key_bytes histogram present', p2.selected_account_payload_key_bytes.cfTransactions === 3_000_000);
+  check('full_payload_bytes still recordable when explicitly set', p2.selected_account_full_payload_bytes === 4_000_000);
+  check('payload_key_bytes histogram present when explicitly set', p2.selected_account_payload_key_bytes.cfTransactions === 3_000_000);
+
+  const tCompact = createKeaTelemetry({ requestId: 'req-compact' });
+  tCompact.markStart('selected_account_compact');
+  tCompact.markEnd('selected_account_compact');
+  tCompact.setSelectedAccountMeta({
+    source: 'tool-fresh',
+    cacheHit: false,
+    payloadBytes: 5145,
+    fullPayloadBytes: null,
+    payloadKeyBytes: null,
+  });
+  const pCompact = tCompact.toPayload();
+  check('compact_ms number when marked', typeof pCompact.selected_account_compact_ms === 'number');
+  check('fresh miss leaves full_payload_bytes null', pCompact.selected_account_full_payload_bytes === null);
+  check('fresh miss leaves histogram null', pCompact.selected_account_payload_key_bytes === null);
 
   const t3 = createKeaTelemetry({ requestId: 'req-3' });
   t3.setSelectedAccountMeta({ source: 'tool-cache', cacheHit: true });
@@ -116,6 +133,9 @@ async function run() {
   check('userKey is not raw id', id.userKey !== '7' && id.userKey !== 7);
   check('userKey is 16-char hex', /^[a-f0-9]{16}$/.test(id.userKey));
   check('hashUserKey matches identity', id.userKey === hashUserKey(7));
+  check('hashAccountKey is not raw account id', hashAccountKey(22) !== '22' && hashAccountKey(22) !== 22);
+  check('hashAccountKey is 16-char hex', /^[a-f0-9]{16}$/.test(hashAccountKey(22)));
+  check('user and account hashes differ', hashUserKey(22) !== hashAccountKey(22));
   check('ignores body.sessionId without cashflowUser', identityFromCashflowAuth({ body: { sessionId: 99 } }).authenticated === false);
   check('anon identity has null userKey', identityFromCashflowAuth({}).userKey === null);
 

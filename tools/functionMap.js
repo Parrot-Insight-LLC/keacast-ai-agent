@@ -16,7 +16,7 @@ const {
   getUpcomingByAccountAndRangeCount,
   getTransactionSummary
 } = require('../services/transactions.service');
-const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getBalances, createTransaction, deleteTransaction, deleteGroupTransactions, getTransactionById, updateTransaction, getGoals, getGoal, previewGoalCadence, createGoal, updateGoal, deleteGoal, rememberFact, recallFacts } = require('./keacast_tool_layer');
+const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getKeaAccountContext, getBalances, createTransaction, deleteTransaction, deleteGroupTransactions, getTransactionById, updateTransaction, getGoals, getGoal, previewGoalCadence, createGoal, updateGoal, deleteGoal, rememberFact, recallFacts } = require('./keacast_tool_layer');
 const moment = require('moment');
 
 // Smart data loading strategy to prevent memory issues
@@ -502,6 +502,18 @@ const functionMap = {
       requestId: args.requestId ?? ctx?.requestId,
     });
     return result;
+  },
+
+  async getKeaAccountContext(args, ctx) {
+    const token = ctx?.token ?? args.token;
+    const accountId = args.accountId ?? ctx?.accountId;
+    return getKeaAccountContext({
+      accountId,
+      token,
+      body: args.body,
+      timeoutMs: args.timeoutMs,
+      requestId: args.requestId ?? ctx?.requestId,
+    });
   },
 
   async getBalances(args, ctx) {
