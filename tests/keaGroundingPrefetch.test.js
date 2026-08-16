@@ -111,10 +111,11 @@ async function run() {
         postedSpending: 0,
         postedNet: 0,
         negativeBalanceRisk: {
-          hasNegativeInHorizon: true,
+          scope: { start: '2026-09-01', end: '2026-09-30', label: 'next_month' },
+          horizonDays: 90,
+          hasNegativeInScope: true,
           firstNegativeDate: '2026-09-12',
           firstNegativeAmount: -40,
-          horizonDays: 90,
         },
         observations: [{ code: 'forecast_goes_negative' }],
         limitations: [],
@@ -125,7 +126,7 @@ async function run() {
   check('negative-risk uses cashflow_analysis macro', negEv.source.includes('cashflow_analysis') && !negEv.source.includes('user_transactions'));
   check('negative-risk did not call getUserTransactions', unusedCalls.length === 0);
   check('negative-risk prefetched once', cashflowCalls === 1);
-  check('negative-risk uses full-horizon flag', negEv.facts.negativeBalanceRisk.hasNegativeInHorizon === true);
+  check('negative-risk uses scoped flag', negEv.facts.negativeBalanceRisk.hasNegativeInScope === true);
   check('negative-risk status ok', negEv.status === 'ok');
 
   const affordRoute = routeCapability({

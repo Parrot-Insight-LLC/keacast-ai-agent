@@ -767,7 +767,19 @@ function routeCapabilityUnwrapped(input = {}) {
     return { ...base, capability: 'affordability_or_planning', confidence: 'high', accountChanged, slots };
   }
   if (isCashflowAnalysis(message)) {
-    const period = slots.period || parsePeriod('this month', currentDate);
+    let period = slots.period;
+    if (!period && isNegativeRiskQuestion(message)) {
+      const today = moment(currentDate, 'YYYY-MM-DD', true).isValid()
+        ? moment(currentDate, 'YYYY-MM-DD')
+        : moment();
+      period = {
+        start: today.format('YYYY-MM-DD'),
+        end: today.clone().add(90, 'days').format('YYYY-MM-DD'),
+        label: 'forecast_horizon',
+      };
+    } else if (!period) {
+      period = parsePeriod('this month', currentDate);
+    }
     return {
       ...base,
       capability: 'cashflow_analysis',

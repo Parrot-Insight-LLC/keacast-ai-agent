@@ -205,6 +205,15 @@ async function run() {
   section('current vs forecast balance');
   check('available balance lookup', route("What's my available balance?").capability === 'financial_lookup');
   check('will I go negative next month analysis', route('Will I go negative next month?').capability === 'cashflow_analysis');
+  check('will I go negative next month scoped', route('Will I go negative next month?').slots.period
+    && route('Will I go negative next month?').slots.period.label === 'next_month');
+  check('will I go negative this month scoped', route('Will I go negative this month?').slots.period
+    && route('Will I go negative this month?').slots.period.start === '2026-08-01'
+    && route('Will I go negative this month?').slots.period.end === '2026-08-31');
+  check('will I go negative uses full horizon', route('Will I go negative?').slots.period
+    && route('Will I go negative?').slots.period.label === 'forecast_horizon'
+    && route('Will I go negative?').slots.period.start === '2026-08-16'
+    && route('Will I go negative?').slots.period.end === '2026-11-14');
   check('what will my balance be next month forecast', route('What will my balance be next month?').capability === 'financial_forecast');
 
   section('topic-switch needsReconfirm lifecycle');

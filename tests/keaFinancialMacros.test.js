@@ -263,6 +263,47 @@ async function run() {
   check('amount-only follow-up inherits date', cont.capability === 'continuation'
     && cont.slots.amount === 1200
     && cont.slots.purchaseDate === '2026-08-21');
+
+  section('Phase 2.1 snapshot vs macro narration');
+
+  check(
+    'bare will I go negative uses forecast_horizon',
+    route('Will I go negative?').slots.period
+      && route('Will I go negative?').slots.period.label === 'forecast_horizon'
+  );
+  check(
+    'this month negative stays this_month',
+    route('Will I go negative this month?').slots.period.label === 'this_month'
+  );
+
+  const scopedEv = {
+    status: 'ok',
+    source: ['cashflow_analysis'],
+    period: { start: '2026-08-01', end: '2026-08-31', label: 'this_month' },
+    dataAsOf: '2026-08-16T12:00:00.000Z',
+    facts: {
+      remainingForecastSpending: 3042,
+      remainingForecastIncome: 0,
+      negativeBalanceRisk: {
+        scope: { start: '2026-08-16', end: '2026-08-31', label: 'this_month' },
+        horizonDays: 90,
+        hasNegativeInScope: false,
+      },
+    },
+    observations: [],
+    limitations: [],
+  };
+  const scopedBlock = buildEvidenceSystemSection(scopedEv);
+  check('macro evidence is authoritative over snapshot', /GROUNDED EVIDENCE is authoritative/.test(scopedBlock));
+  check('remaining month is not the upcoming window', /not the snapshot upcoming window/.test(scopedBlock));
+  check('forbids attaching next-14-day label to remainingForecastSpending', /Never attach that upcoming-window label to remainingForecastSpending/.test(scopedBlock));
+  check('forbids disposable funds from analyzeCashflow', /Do not invent disposable funds/.test(scopedBlock));
+  check('forbids safe-to-spend from analyzeCashflow', /safe-to-spend/.test(scopedBlock));
+  check('forbids overdraft safety from analyzeCashflow', /overdraft safety/.test(scopedBlock));
+  check('forbids affordability conclusion from analyzeCashflow', /Do not conclude the user can afford/.test(scopedBlock));
+  check('forbids category-cut prescriptions', /Do not prescribe cutting the largest categories/.test(scopedBlock));
+  check('scope vs horizon instruction', /negativeBalanceRisk.scope is the question evaluation window/.test(scopedBlock));
+  check('snapshot compact risk yields to macro', /If snapshot compact negatives disagree/.test(scopedBlock));
 }
 
 module.exports = { run };

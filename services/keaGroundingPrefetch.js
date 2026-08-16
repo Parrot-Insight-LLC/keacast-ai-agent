@@ -865,7 +865,24 @@ function buildEvidenceSystemSection(evidence) {
   const isMacro = compact.source.includes('cashflow_analysis')
     || compact.source.includes('affordability_analysis');
   const macroInstruction = isMacro
-    ? 'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Explain their practical meaning. Do not invent an affordability threshold, score, or safe/tight/risky label.'
+    ? [
+      'GROUNDED EVIDENCE is authoritative for this requested analysis.',
+      'Do not substitute overlapping compact snapshot forecast summaries when macro evidence provides the scoped calculation.',
+      'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Explain their practical meaning.',
+      'Do not invent an affordability threshold, score, or safe/tight/risky label.',
+      'remainingForecastSpending / remainingForecastIncome = remaining unmatched F/RF in the current calendar month — not the snapshot upcoming window.',
+      'Snapshot "Next 14 days" / upcoming totals are a separate ~15-day window. Never attach that upcoming-window label to remainingForecastSpending.',
+      'negativeBalanceRisk.scope is the question evaluation window. horizonDays is the 90-day computation horizon. A negative outside scope does not answer a scoped question such as "next month".',
+      'If snapshot compact negatives disagree with GROUNDED EVIDENCE scoped risk, use GROUNDED EVIDENCE.',
+    ].join(' ')
+    : '';
+  const cashflowNarrationInstruction = compact.source.includes('cashflow_analysis')
+    ? [
+      'You may describe posted income, posted spending, posted net, remaining forecast income/spending, savingsPotential, categories, merchants, and scoped negative risk.',
+      'Do not invent disposable funds, safe-to-spend, overdraft safety, affordability, or "enough money to cover everything" from analyzeCashflow.',
+      'analyzeCashflow is not assessAffordability. Do not conclude the user can afford a purchase from this evidence.',
+      'Do not prescribe cutting the largest categories, increasing income, or transferring savings merely because those categories are largest. State the factual category/merchant ranking instead.',
+    ].join(' ')
     : '';
   const affordabilityInstruction = compact.source.includes('affordability_analysis')
     ? 'Do not say the user can afford the purchase merely because newNegativeIntroduced is false. If the baseline forecast was already negative, explain that, whether the date moves earlier, and how much the low worsens. If neither baseline nor hypothetical goes negative, you may say the purchase does not create a negative balance in the current 90-day Keacast forecast and report the remaining lowest projected balance — not a universal financial recommendation. If a next_month_first_day assumption is present, say it out loud (for example: "Assuming the purchase is on September 1...").'
@@ -882,6 +899,7 @@ function buildEvidenceSystemSection(evidence) {
     JSON.stringify(compact),
     lookupInstructions,
     macroInstruction,
+    cashflowNarrationInstruction,
     affordabilityInstruction,
     partialInstruction,
   ].filter(Boolean).join('\n');
