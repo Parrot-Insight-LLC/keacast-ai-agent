@@ -625,6 +625,40 @@ function buildChatAccountContext(account, firstName, currentDate, options = {}) 
   return lines.join('\n');
 }
 
+function buildMacroSelectedAccountContext(account, firstName, currentDate) {
+  const today = currentDate || moment().format('YYYY-MM-DD');
+  const name = (account && (account.accountname || account.bank_account_name || account.institution_name))
+    || 'their account';
+  const type = (account && (account.account_type || account.type)) || '';
+  const inst = (account && account.institution_name) || '';
+  return [
+    `Today: ${today}. User first name: ${firstName || 'there'}.`,
+    `Selected account: ${name}${type ? ` (${type})` : ''}${inst ? ` @ ${inst}` : ''}.`,
+    'All financial values in GROUNDED EVIDENCE refer only to this selected account unless the evidence explicitly states otherwise.',
+  ].join('\n');
+}
+
+function buildMacroAnalysisPrompt({ currentDate, firstName, account, evidence } = {}) {
+  const assembled = assembleBaseSystemPrompt({
+    currentDate,
+    promptProfile: 'macro_analysis',
+  });
+  const accountBrief = account
+    ? buildMacroSelectedAccountContext(account, firstName, currentDate)
+    : '';
+  let systemContent = accountBrief
+    ? `${assembled.baseSystem}\n\n---\nCURRENT CONTEXT (background — NOT a message from the user):\n${accountBrief}`
+    : assembled.baseSystem;
+  const groundedEvidenceBlock = buildEvidenceSystemSection(evidence);
+  if (groundedEvidenceBlock) systemContent += `\n\n---\n${groundedEvidenceBlock}`;
+  return {
+    ...assembled,
+    accountBrief,
+    groundedEvidenceBlock,
+    systemContent,
+  };
+}
+
 // Aggregate recent posted expenses by category (from account.breakdown when
 // populated, else account.recents) so advice can name concrete, quantified
 // levers ("Dining is your #2 category at $410/mo") instead of staying vague.
@@ -3230,122 +3264,130 @@ exports.chat = async (req, res) => {
       && Array.isArray(phase1Evidence.source)
       && (phase1Evidence.source.includes('cashflow_analysis')
         || phase1Evidence.source.includes('affordability_analysis'));
-    const completeContext = hasAccount
-      ? buildChatAccountContext(selectedAccount, firstName, currentDate, {
-          suppressFinancialSummary: macroOwnsTurn,
-        })
-      : buildChatNoAccountContext(firstName);
-    console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
 
-    // The user's real category names — used to (a) tell the model to pick a
-    // category from this list, and (b) snap any chosen category server-side.
-    // Extracted before routing so known category names can disambiguate lookups.
+    let identityBlock;
+    let writePolicyBlock;
+    let productHelpPlaybookBlock;
+    let planningPlaybookBlock;
+    let baseSystem;
+    let completeContext;
+    let dateRefBlock = '';
+    let uiContextBlock = '';
+    let availableAccountsBlock = '';
+    let categoriesBlock = '';
+    let goalsBlock = '';
+    let factsBlock = '';
+    let summaryBlock = '';
+    let recentWritesBlock = '';
+    let recentToolOutcomesBlock = '';
+    let dialogueBlock = '';
+    let groundedEvidenceBlock = '';
+    let systemContent;
 
-    // Phase 5: assemble base system from modular builders (behavior unchanged).
-    const {
-      identityBlock,
-      writePolicyBlock,
-      productHelpPlaybookBlock,
-      planningPlaybookBlock,
-      baseSystem,
-    } = assembleBaseSystemPrompt({
-      currentDate,
-      faq,
-      productKnowledge,
-      omitPlanningPlaybook: macroOwnsTurn,
-    });
-
-    // Attach the compact context block as BACKGROUND inside the system message
-    // rather than as a per-turn user message. Injecting it as a `user` turn
-    // between the history and the real user message used to derail multi-turn
-    // flows: on a confirmation turn the model saw [assistant: "...confirm?"],
-    // then a system-authored "user" context dump, then "yes please" — and
-    // treated the context dump as a topic change, restarting the conversation.
-    let systemContent = completeContext
-      ? `${baseSystem}\n\n---\nCURRENT CONTEXT (background — NOT a message from the user):\n${completeContext}`
-      : baseSystem;
-
-    // Append the Kea Assistant memory layers as BACKGROUND context (each hard-
-    // capped). Order: long-term facts, then rolling summary, then the live
-    // dialogue state (most immediately actionable last).
-    const factsBlock = buildFactsBlock(longTermFacts);
-    const summaryBlock = buildSummaryBlock(rollingSummary);
-    const dialogueBlock = buildDialogueStateBlock(dialogueState);
-    const dateRefBlock = buildDateReferenceBlock(currentDate);
-    const uiContextBlock = buildUiContextBlock(uiContextRaw);
-    const availableAccountsBlock = buildAvailableAccountsBlock(uiContextRaw);
-    const recentWritesBlock = buildRecentWritesBlock(dialogueState);
-    const recentToolOutcomesBlock = buildRecentToolOutcomesBlock(dialogueState);
-    // Active savings goals ride along in the selected-account blob — surface
-    // them permanently so planning advice always accounts for money already
-    // earmarked toward goals (no tool round-trip needed).
-    const goalsBlock = hasAccount ? buildGoalsBlock(selectedAccount.goals, currentDate) : '';
-    const categoriesBlock = categoryNames.length
-      ? truncateText(
-          `AVAILABLE CATEGORIES (choose transaction categories ONLY from this list — pick the closest match, never invent one):\n${categoryNames.join(', ')}`,
-          1200
-        )
-      : '';
-    systemContent += `\n\n---\n${dateRefBlock}`;
-    if (uiContextBlock) systemContent += `\n\n---\n${uiContextBlock}`;
-    if (availableAccountsBlock) systemContent += `\n\n---\n${availableAccountsBlock}`;
-    if (categoriesBlock) systemContent += `\n\n---\n${categoriesBlock}`;
-    if (goalsBlock) systemContent += `\n\n---\n${goalsBlock}`;
-    if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
-    if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
-    if (recentWritesBlock) systemContent += `\n\n---\n${recentWritesBlock}`;
-    if (recentToolOutcomesBlock) systemContent += `\n\n---\n${recentToolOutcomesBlock}`;
-    if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
-    const groundedEvidenceBlock = buildEvidenceSystemSection(phase1Evidence);
-    if (groundedEvidenceBlock) systemContent += `\n\n---\n${groundedEvidenceBlock}`;
-    // Goals feature availability steers whether the model may offer goal writes.
-    if (goalsAvailable) {
-      systemContent += `\n\n---\nGOALS ARE AVAILABLE: You may use getGoals, previewGoalCadence, updateDraftGoal, and (after propose+confirm) createGoal/updateGoal/deleteGoal. Stage goal proposals with updateDraftGoal — never with updateDraftTransaction.`;
+    if (macroOwnsTurn) {
+      const macroPrompt = buildMacroAnalysisPrompt({
+        currentDate,
+        firstName,
+        account: hasAccount ? selectedAccount : null,
+        evidence: phase1Evidence,
+      });
+      identityBlock = macroPrompt.identityBlock;
+      writePolicyBlock = macroPrompt.writePolicyBlock;
+      productHelpPlaybookBlock = macroPrompt.productHelpPlaybookBlock;
+      planningPlaybookBlock = macroPrompt.planningPlaybookBlock;
+      baseSystem = macroPrompt.baseSystem;
+      completeContext = macroPrompt.accountBrief || '';
+      groundedEvidenceBlock = macroPrompt.groundedEvidenceBlock || '';
+      systemContent = macroPrompt.systemContent;
+      console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source: macro_analysis)');
     } else {
-      systemContent += `\n\n---\nGOALS ARE NOT AVAILABLE on this user's plan. Do NOT offer to create, update, or delete goals (those tools are refused in code). You may still lay out savings plans in prose and mention that the Goals feature is available on upgraded plans.`;
-    }
+      completeContext = hasAccount
+        ? buildChatAccountContext(selectedAccount, firstName, currentDate)
+        : buildChatNoAccountContext(firstName);
+      console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
 
-    // ── Simulation ("what-if") instructions ────────────────────────────────
-    // The proposeSimulation* tools stage hypothetical changes on the client's
-    // simulation overlay — they never write. When the user's calendar is in
-    // Simulation Mode we route ALL transaction changes through them (real
-    // writes are also refused in code); outside it they still serve "what if"
-    // questions, which auto-start a simulation on the client.
-    if (simulationMode) {
-      let simBlock = `SIMULATION MODE IS ACTIVE. The user is exploring hypothetical "what-if" changes on their calendar. RULES:
+      ({
+        identityBlock,
+        writePolicyBlock,
+        productHelpPlaybookBlock,
+        planningPlaybookBlock,
+        baseSystem,
+      } = assembleBaseSystemPrompt({ currentDate, faq, productKnowledge }));
+
+      systemContent = completeContext
+        ? `${baseSystem}\n\n---\nCURRENT CONTEXT (background — NOT a message from the user):\n${completeContext}`
+        : baseSystem;
+
+      factsBlock = buildFactsBlock(longTermFacts);
+      summaryBlock = buildSummaryBlock(rollingSummary);
+      dialogueBlock = buildDialogueStateBlock(dialogueState);
+      dateRefBlock = buildDateReferenceBlock(currentDate);
+      uiContextBlock = buildUiContextBlock(uiContextRaw);
+      availableAccountsBlock = buildAvailableAccountsBlock(uiContextRaw);
+      recentWritesBlock = buildRecentWritesBlock(dialogueState);
+      recentToolOutcomesBlock = buildRecentToolOutcomesBlock(dialogueState);
+      goalsBlock = hasAccount ? buildGoalsBlock(selectedAccount.goals, currentDate) : '';
+      categoriesBlock = categoryNames.length
+        ? truncateText(
+            `AVAILABLE CATEGORIES (choose transaction categories ONLY from this list — pick the closest match, never invent one):\n${categoryNames.join(', ')}`,
+            1200
+          )
+        : '';
+      systemContent += `\n\n---\n${dateRefBlock}`;
+      if (uiContextBlock) systemContent += `\n\n---\n${uiContextBlock}`;
+      if (availableAccountsBlock) systemContent += `\n\n---\n${availableAccountsBlock}`;
+      if (categoriesBlock) systemContent += `\n\n---\n${categoriesBlock}`;
+      if (goalsBlock) systemContent += `\n\n---\n${goalsBlock}`;
+      if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
+      if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
+      if (recentWritesBlock) systemContent += `\n\n---\n${recentWritesBlock}`;
+      if (recentToolOutcomesBlock) systemContent += `\n\n---\n${recentToolOutcomesBlock}`;
+      if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
+      groundedEvidenceBlock = buildEvidenceSystemSection(phase1Evidence);
+      if (groundedEvidenceBlock) systemContent += `\n\n---\n${groundedEvidenceBlock}`;
+      if (goalsAvailable) {
+        systemContent += `\n\n---\nGOALS ARE AVAILABLE: You may use getGoals, previewGoalCadence, updateDraftGoal, and (after propose+confirm) createGoal/updateGoal/deleteGoal. Stage goal proposals with updateDraftGoal — never with updateDraftTransaction.`;
+      } else {
+        systemContent += `\n\n---\nGOALS ARE NOT AVAILABLE on this user's plan. Do NOT offer to create, update, or delete goals (those tools are refused in code). You may still lay out savings plans in prose and mention that the Goals feature is available on upgraded plans.`;
+      }
+
+      if (simulationMode) {
+        let simBlock = `SIMULATION MODE IS ACTIVE. The user is exploring hypothetical "what-if" changes on their calendar. RULES:
 - Use proposeSimulationAdd to stage a new hypothetical income/expense, proposeSimulationModify to change an existing forecasted transaction (find its transactionid via the read tools if needed), and proposeSimulationRemove to drop one. Map intent: "add / what if I had" => add; "change / raise / lower / move" => modify; "cancel / remove / drop / without" => remove.
 - For recurring forecasts set scope: 'group' for every occurrence, 'groupfrom' for this-and-future, 'single' (default) for one occurrence.
 - These tools do NOT write data and need NO confirmation turn — propose immediately with your best estimates, exactly one tool call per distinct change.
 - NEVER call createTransaction, updateTransaction, deleteTransaction, createGoal, updateGoal, or deleteGoal while Simulation Mode is active (they are refused in code). The user commits or discards the simulation from the banner on their calendar.
 - After proposing, briefly narrate the change and its projected impact on the user's balances.
 - If the user asks to "make it real" / permanently save a change, tell them to leave Simulation Mode (or discard the sim) first; do NOT treat a staged sim op as a confirmed real write.`;
-      if (simContext && Number(simContext.opCount) > 0) {
-        simBlock += `\nThe simulation currently holds ${Number(simContext.opCount)} staged change(s).`;
+        if (simContext && Number(simContext.opCount) > 0) {
+          simBlock += `\nThe simulation currently holds ${Number(simContext.opCount)} staged change(s).`;
+        }
+        if (simSnapshot) {
+          const parts = [];
+          if (simSnapshot.simLow && simSnapshot.simLow.amount != null) {
+            parts.push(`projected lowest balance ${Number(simSnapshot.simLow.amount)} on ${simSnapshot.simLow.date}`);
+          }
+          if (simSnapshot.baselineLow && simSnapshot.baselineLow.amount != null) {
+            parts.push(`baseline (no simulation) lowest balance ${Number(simSnapshot.baselineLow.amount)} on ${simSnapshot.baselineLow.date}`);
+          }
+          if (simSnapshot.firstNegativeDate) {
+            parts.push(`the simulated balance first goes NEGATIVE on ${simSnapshot.firstNegativeDate}`);
+          }
+          if (simSnapshot.horizonEndDiff != null) {
+            parts.push(`net effect at the forecast horizon ${Number(simSnapshot.horizonEndDiff)}`);
+          }
+          if (parts.length) {
+            simBlock += `\nCURRENT SIMULATION IMPACT (use these exact numbers when narrating impact; format them as dollar amounts): ${parts.join('; ')}.`;
+          }
+        }
+        systemContent += `\n\n---\n${simBlock}`;
+      } else if (simulationAvailable) {
+        systemContent += `\n\n---\nWHAT-IF SIMULATIONS: When the user asks a hypothetical "what if" question about adding, changing, or removing a transaction (rather than asking you to actually do it), use the proposeSimulation* tools (proposeSimulationAdd / proposeSimulationModify / proposeSimulationRemove). They stage the change on the user's calendar as a reviewable simulation without writing data and need no confirmation turn. Only use createTransaction/updateTransaction/deleteTransaction when the user wants the REAL change made (propose→confirm→write). A prior simulation op is NOT confirmation for a real write — if they later ask to make it permanent, start a fresh propose→confirm cycle.`;
+      } else {
+        systemContent += `\n\n---\nDo not use the proposeSimulation* tools — this user's plan does not include Simulation Mode. For hypothetical questions, explain the impact in prose instead.`;
       }
-      if (simSnapshot) {
-        const parts = [];
-        if (simSnapshot.simLow && simSnapshot.simLow.amount != null) {
-          parts.push(`projected lowest balance ${Number(simSnapshot.simLow.amount)} on ${simSnapshot.simLow.date}`);
-        }
-        if (simSnapshot.baselineLow && simSnapshot.baselineLow.amount != null) {
-          parts.push(`baseline (no simulation) lowest balance ${Number(simSnapshot.baselineLow.amount)} on ${simSnapshot.baselineLow.date}`);
-        }
-        if (simSnapshot.firstNegativeDate) {
-          parts.push(`the simulated balance first goes NEGATIVE on ${simSnapshot.firstNegativeDate}`);
-        }
-        if (simSnapshot.horizonEndDiff != null) {
-          parts.push(`net effect at the forecast horizon ${Number(simSnapshot.horizonEndDiff)}`);
-        }
-        if (parts.length) {
-          simBlock += `\nCURRENT SIMULATION IMPACT (use these exact numbers when narrating impact; format them as dollar amounts): ${parts.join('; ')}.`;
-        }
-      }
-      systemContent += `\n\n---\n${simBlock}`;
-    } else if (simulationAvailable) {
-      systemContent += `\n\n---\nWHAT-IF SIMULATIONS: When the user asks a hypothetical "what if" question about adding, changing, or removing a transaction (rather than asking you to actually do it), use the proposeSimulation* tools (proposeSimulationAdd / proposeSimulationModify / proposeSimulationRemove). They stage the change on the user's calendar as a reviewable simulation without writing data and need no confirmation turn. Only use createTransaction/updateTransaction/deleteTransaction when the user wants the REAL change made (propose→confirm→write). A prior simulation op is NOT confirmation for a real write — if they later ask to make it permanent, start a fresh propose→confirm cycle.`;
-    } else {
-      systemContent += `\n\n---\nDo not use the proposeSimulation* tools — this user's plan does not include Simulation Mode. For hypothetical questions, explain the impact in prose instead.`;
     }
+
     logSystemPromptBlockSizes({
       identity: identityBlock,
       writePolicy: writePolicyBlock,
@@ -5574,6 +5616,8 @@ exports.__testables = {
   buildGoalsBlock,
   pickTopSpendingCategories,
   buildChatAccountContext,
+  buildMacroSelectedAccountContext,
+  buildMacroAnalysisPrompt,
   redactChatBodyForLog,
   injectTrustedIdentity,
   buildSessionKey,

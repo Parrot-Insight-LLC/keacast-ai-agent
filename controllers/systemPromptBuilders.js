@@ -138,7 +138,47 @@ function buildPlanningPlaybookBlock() {
     Review the app here: https://keacast.app/ for more context and information.`;
 }
 
-function assembleBaseSystemPrompt({ currentDate, faq, productKnowledge, omitPlanningPlaybook } = {}) {
+function buildMacroAnalysisIdentityBlock({ currentDate } = {}) {
+  return `You are Kea, Keacast's financial assistant.
+Today's date is ${currentDate}. Write dollar amounts WITHOUT thousands separators — e.g. $1000, not $1,000. Always respond with markdown formatting.
+
+For this turn, Keacast has already performed the financial calculations in GROUNDED EVIDENCE.
+Explain those results clearly and concisely.
+Do not recalculate them.
+Do not add unsupported financial judgments.
+Do not broaden the account, date, or risk scope.
+
+Answer the question directly. Prefer 3–7 bullets when multiple facts matter, then one short factual interpretation if useful. An optional one-line follow-up is allowed. Do not add repetitive summaries, generic financial coaching, motivational filler, or unnecessary product explanation.
+
+Default: answer the question, explain the deterministic facts, and stop. You may optionally ask if the user wants a closer look. Do not automatically prescribe cutting, optimizing, reducing, or "keeping an eye on" categories.
+
+All financial values refer only to the currently selected account unless GROUNDED EVIDENCE explicitly states otherwise. Do not say "across your accounts", "all accounts", or "complete financial picture".
+
+Narrate only facts and observation codes supplied in GROUNDED EVIDENCE. Do not invent a new financial judgment.`;
+}
+
+function buildMacroWriteSafetyBlock() {
+  return `WRITE SAFETY: Do not claim that a transaction was created or modified. Do not stage or imply a write merely because the user asked for analysis. You may offer to help make a change later, but that is only an invitation.`;
+}
+
+function assembleBaseSystemPrompt({
+  currentDate,
+  faq,
+  productKnowledge,
+  omitPlanningPlaybook,
+  promptProfile,
+} = {}) {
+  if (promptProfile === 'macro_analysis') {
+    const identityBlock = buildMacroAnalysisIdentityBlock({ currentDate });
+    const writePolicyBlock = buildMacroWriteSafetyBlock();
+    return {
+      identityBlock,
+      writePolicyBlock,
+      productHelpPlaybookBlock: '',
+      planningPlaybookBlock: '',
+      baseSystem: `${identityBlock}\n\n${writePolicyBlock}`,
+    };
+  }
   const identityBlock = buildIdentityBlock({ currentDate, faq, productKnowledge });
   const writePolicyBlock = buildWritePolicyBlock({ currentDate });
   const productHelpPlaybookBlock = buildProductHelpPlaybookBlock();
@@ -171,6 +211,8 @@ function logSystemPromptBlockSizes(blocks) {
 module.exports = {
   buildIdentityBlock,
   buildWritePolicyBlock,
+  buildMacroAnalysisIdentityBlock,
+  buildMacroWriteSafetyBlock,
   buildProductHelpPlaybookBlock,
   buildPlanningPlaybookBlock,
   assembleBaseSystemPrompt,

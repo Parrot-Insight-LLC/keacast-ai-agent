@@ -548,6 +548,7 @@ function evidenceFromMacroResult(result, { source, period, currentDate, assumpti
     source: [source],
     period: result.period || period || null,
     dataAsOf: result.dataAsOf || currentDate || null,
+    accountScope: 'selected_account',
     facts: macroFactsFromResult(result, source),
     observations: Array.isArray(result.observations) ? result.observations : [],
     assumptions: assumptions || [],
@@ -813,6 +814,55 @@ async function prefetchGrounding({
   return emptyEvidence({ status: 'ok', source: [], limitations: [] });
 }
 
+function cloneJson(value) {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function azureFacingEvidence(evidence) {
+  const compact = {
+    status: evidence.status,
+    source: evidence.source,
+    period: evidence.period || null,
+    dataAsOf: evidence.dataAsOf || null,
+    facts: cloneJson(evidence.facts || {}),
+    limitations: evidence.limitations || [],
+  };
+  if (Array.isArray(evidence.lookups) && evidence.lookups.length) {
+    compact.lookups = evidence.lookups;
+  }
+  if (Array.isArray(evidence.observations) && evidence.observations.length) {
+    compact.observations = cloneJson(evidence.observations);
+  }
+  if (Array.isArray(evidence.assumptions) && evidence.assumptions.length) {
+    compact.assumptions = evidence.assumptions;
+  }
+  const isMacro = Array.isArray(compact.source)
+    && (compact.source.includes('cashflow_analysis') || compact.source.includes('affordability_analysis'));
+  if (isMacro) {
+    compact.accountScope = evidence.accountScope || 'selected_account';
+  }
+  const isCashflow = Array.isArray(compact.source) && compact.source.includes('cashflow_analysis');
+  if (isCashflow) {
+    if (compact.facts && compact.facts.negativeBalanceRisk && typeof compact.facts.negativeBalanceRisk === 'object') {
+      const risk = { ...compact.facts.negativeBalanceRisk };
+      delete risk.horizonDays;
+      compact.facts.negativeBalanceRisk = risk;
+    }
+    if (compact.facts) delete compact.facts.horizonDays;
+    if (Array.isArray(compact.observations)) {
+      compact.observations = compact.observations.map((row) => {
+        if (!row || typeof row !== 'object') return row;
+        if (row.code !== 'no_negative_in_scope') return row;
+        const copy = { ...row };
+        delete copy.horizonDays;
+        return copy;
+      });
+    }
+  }
+  return compact;
+}
+
 function buildEvidenceSystemSection(evidence) {
   if (!evidence || !Array.isArray(evidence.source) || evidence.source.length === 0) {
     if (evidence && evidence.status === 'unavailable') {
@@ -831,23 +881,7 @@ function buildEvidenceSystemSection(evidence) {
     }
     return '';
   }
-  const compact = {
-    status: evidence.status,
-    source: evidence.source,
-    period: evidence.period || null,
-    dataAsOf: evidence.dataAsOf || null,
-    facts: evidence.facts || {},
-    limitations: evidence.limitations || [],
-  };
-  if (Array.isArray(evidence.lookups) && evidence.lookups.length) {
-    compact.lookups = evidence.lookups;
-  }
-  if (Array.isArray(evidence.observations) && evidence.observations.length) {
-    compact.observations = evidence.observations;
-  }
-  if (Array.isArray(evidence.assumptions) && evidence.assumptions.length) {
-    compact.assumptions = evidence.assumptions;
-  }
+  const compact = azureFacingEvidence(evidence);
   const lookupInstructions = compact.lookups
     ? [
       'Answer every requested lookup represented in lookups[].',
@@ -867,36 +901,35 @@ function buildEvidenceSystemSection(evidence) {
   const macroInstruction = isMacro
     ? [
       'GROUNDED EVIDENCE is authoritative for this requested analysis.',
-      'Do not substitute overlapping compact snapshot forecast summaries when macro evidence provides the scoped calculation.',
+      'accountScope=selected_account: all financial values refer only to the currently selected account unless the evidence explicitly states otherwise. Do not say across your accounts, all accounts, or complete financial picture.',
       'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Explain their practical meaning.',
-      'Do not invent an affordability threshold, score, or safe/tight/risky/healthy/comfortable/disposable label.',
-      'remainingForecastSpending / remainingForecastIncome = remaining unmatched F/RF in the current calendar month — not the snapshot upcoming window, not the next 14 days, and not the next 15 days.',
-      'Snapshot "Next 14 days" / upcoming totals are a separate ~15-day window. Never attach that upcoming-window label to remainingForecastSpending.',
-      'negativeBalanceRisk.scope is the period the user asked about. horizonDays is the maximum forecast computation window, not the answer scope.',
-      'hasNegativeInScope=false answers only risk.scope. Do not say there is no negative risk in the next 90 days unless a separate full-horizon calculation is present.',
-      'lowestProjectedAmount and lowestProjectedDate are an inseparable pair from the same object. projectedOnDate and projectedOnDateAt are an inseparable pair. Never combine scope.start with an unrelated projected amount.',
-      'reconciledBalance is the latest reconciled snapshot. It is never a projected balance, never lowestProjectedAmount, and never projectedOnDate.',
+      'Narrate observation codes and supplied facts only. Do not invent a new financial judgment.',
+      'remainingForecastSpending / remainingForecastIncome = remaining unmatched F/RF in the current calendar month — not the next 14 days, and not the next 15 days.',
+      'Negative-risk claims may use only negativeBalanceRisk.scope (start, end, label). Do not broaden the date range beyond that scope.',
+      'hasNegativeInScope=false answers only risk.scope.',
+      'lowestProjectedAmount and lowestProjectedDate are an inseparable pair from the same object. projectedOnDate and projectedOnDateAt are an inseparable pair. lowestAfterDate and lowestAfterDateOn are an inseparable pair. Never combine scope.start with an unrelated projected amount.',
+      'reconciledBalance, currentBalance, and availableBalance are never projected balances, never lowestProjectedAmount, and never projectedOnDate.',
       'Missing, null, or unprovided financial fields must never be described as zero. postedIncome=0 does not establish forecastIncome=0. Do not say "no forecasted income or expenses are recorded" unless those forecast fields are actually present.',
-      'If snapshot compact negatives disagree with GROUNDED EVIDENCE scoped risk, use GROUNDED EVIDENCE.',
     ].join(' ')
     : '';
   const cashflowNarrationInstruction = compact.source.includes('cashflow_analysis')
     ? [
       'You may describe posted income, posted spending, posted net, remaining forecast income/spending, savingsPotential, categories, merchants, and scoped negative risk.',
+      'If postedSpending exceeds postedIncome, you may state that fact. Do not conclude the user is doing well or poorly, managing well, or has healthy/unhealthy/comfortable/safe cash flow.',
       'Do not invent disposable funds, safe-to-spend, overdraft safety, affordability, or "enough money to cover everything" from analyzeCashflow.',
       'analyzeCashflow is not assessAffordability. Do not conclude the user can afford a purchase from this evidence.',
-      'Do not prescribe cutting the largest categories, increasing income, or transferring savings merely because those categories are largest. State the factual category/merchant ranking instead.',
-      'For a next-month negative-balance question, the primary answer is negativeBalanceRisk.hasNegativeInScope. If false, prefer: "No. Your current Keacast forecast does not show a negative balance during {scope label / month}." Do not mention a lowest balance unless useful; if you do, both amount and date must come from negativeBalanceRisk.lowestProjectedAmount and negativeBalanceRisk.lowestProjectedDate together.',
+      'Do not prescribe cutting, optimizing, reducing, or keeping an eye on the largest categories. State the factual category/merchant ranking instead.',
+      'For a next-month negative-balance question, the primary answer is negativeBalanceRisk.hasNegativeInScope. If false, prefer: "No. Your current Keacast forecast does not show a negative balance during {scope month/year}." If mentioning the lowest balance, both amount and date must come from negativeBalanceRisk.lowestProjectedAmount and negativeBalanceRisk.lowestProjectedDate together.',
     ].join(' ')
     : '';
   const affordabilityInstruction = compact.source.includes('affordability_analysis')
     ? [
-      'Do not make a universal judgment such as "You can afford this" solely because there is no negative balance.',
-      'Answer with Keacast-specific qualification, for example: based on the current Keacast forecast, adding the requested expense does not create a negative balance within the current 90-day forecast — then state lowest projected balance, its date, and any existing negative risk from the paired fields.',
-      'Do not say safe, healthy, comfortable, disposable, or "good idea" unless an explicit deterministic metric supports that word.',
-      'If the baseline forecast was already negative, explain that, whether the date moves earlier, and how much the low worsens.',
+      'Preferred conclusion: based on the current Keacast forecast, adding the requested expense would or would not create a negative projected balance within the evaluation horizon.',
+      'You may refer to that window as the evaluation horizon, or as the current 90-day Keacast forecast when horizonDays is present on this affordability evidence.',
+      'Allowed supporting facts: baseline purchase-date projection, hypothetical purchase-date projection, lowest after purchase, low date, existing negative, new negative introduced, negative starts earlier, negative worsened by.',
+      'Do not conclude "you can afford it", "you cannot afford it", safe, unsafe, comfortable, healthy, good idea, bad idea, financially responsible, disposable balance, or comfortable cushion.',
       'If a next_month_first_day assumption is present, say it out loud (for example: "Assuming the purchase is on September 1...").',
-      'If you offer to add the expense to the forecast, keep it a conversational optional next step. Do not treat it as an armed proposal and do not call createTransaction on this turn unless write_proposed is already true.',
+      'If you offer to add the expense to the forecast, keep it a conversational invitation only, for example: "If you want, I can help add that expense to your forecast." Do not stage a draft or call createTransaction on this turn.',
     ].join(' ')
     : '';
   const partialInstruction = compact.status === 'partial'
@@ -928,6 +961,7 @@ module.exports = {
   buildSnapshotEvidence,
   buildEvidenceSystemSection,
   emptyEvidence,
+  azureFacingEvidence,
   isHistoricalSpendQuery,
   isExcludedFromHistoricalSpend,
   shouldForceDirectAnswer,
