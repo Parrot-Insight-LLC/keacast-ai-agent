@@ -302,8 +302,81 @@ async function run() {
   check('forbids overdraft safety from analyzeCashflow', /overdraft safety/.test(scopedBlock));
   check('forbids affordability conclusion from analyzeCashflow', /Do not conclude the user can afford/.test(scopedBlock));
   check('forbids category-cut prescriptions', /Do not prescribe cutting the largest categories/.test(scopedBlock));
-  check('scope vs horizon instruction', /negativeBalanceRisk.scope is the question evaluation window/.test(scopedBlock));
+  check('scope vs horizon instruction', /negativeBalanceRisk.scope is the period the user asked about/.test(scopedBlock));
   check('snapshot compact risk yields to macro', /If snapshot compact negatives disagree/.test(scopedBlock));
+
+  section('Phase 2.2 evidence pairing, missing≠zero, scope vs horizon');
+
+  check('pairs lowestProjectedAmount with lowestProjectedDate', /lowestProjectedAmount and lowestProjectedDate are an inseparable pair/.test(scopedBlock));
+  check('pairs projectedOnDate with projectedOnDateAt', /projectedOnDate and projectedOnDateAt are an inseparable pair/.test(scopedBlock));
+  check('reconciledBalance is not a projected amount', /reconciledBalance is the latest reconciled snapshot/.test(scopedBlock)
+    && /never a projected balance/.test(scopedBlock));
+  check('glossary forbids labeling reconciled as projected', /not a projected balance, not lowestProjectedAmount, not projectedOnDate/.test(scopedBlock));
+  check('missing fields are not zero', /Missing, null, or unprovided financial fields must never be described as zero/.test(scopedBlock));
+  check('postedIncome 0 does not establish forecastIncome 0', /postedIncome=0 does not establish forecastIncome=0/.test(scopedBlock));
+  check('forbids inventing no forecasted income without fields', /Do not say "no forecasted income or expenses are recorded" unless those forecast fields are actually present/.test(scopedBlock));
+  check('remainingForecast is current-month F\/RF not 14\/15 days', /not the next 14 days, and not the next 15 days/.test(scopedBlock));
+  check('next-month primary answer is hasNegativeInScope', /primary answer is negativeBalanceRisk.hasNegativeInScope/.test(scopedBlock));
+
+  const sepRiskEv = {
+    status: 'ok',
+    source: ['cashflow_analysis'],
+    period: { start: '2026-09-01', end: '2026-09-30', label: 'next_month' },
+    dataAsOf: '2026-08-16T12:00:00.000Z',
+    facts: {
+      postedIncome: 0,
+      postedSpending: 0,
+      postedNet: 0,
+      negativeBalanceRisk: {
+        scope: { start: '2026-09-01', end: '2026-09-30', label: 'next_month' },
+        horizonDays: 90,
+        hasNegativeInScope: false,
+        lowestProjectedAmount: 6286,
+        lowestProjectedDate: '2026-09-01',
+      },
+    },
+    observations: [],
+    limitations: [],
+  };
+  const sepRiskBlock = buildEvidenceSystemSection(sepRiskEv);
+  check('next_month evidence has no remainingForecastIncome field', !/"remainingForecastIncome"/.test(JSON.stringify(sepRiskEv.facts)));
+  check('next_month prompt does not authorize forecast income = $0', !/forecast income = \$0/.test(sepRiskBlock));
+  check('next_month prompt does not authorize no forecasted transactions', !/no forecasted transactions/.test(sepRiskBlock));
+  check('next_month distinguishes Sep scope from 90-day horizon', /hasNegativeInScope=false answers only risk.scope/.test(sepRiskBlock));
+  check('next_month does not authorize no risk in next 90 days from September', /Do not say there is no negative risk in the next 90 days unless a separate full-horizon calculation is present/.test(sepRiskBlock));
+  check('JSON period is September', sepRiskBlock.includes('"start":"2026-09-01"') && sepRiskBlock.includes('"end":"2026-09-30"'));
+  check('JSON horizonDays is 90', sepRiskBlock.includes('"horizonDays":90'));
+
+  const affordNarrEv = {
+    status: 'ok',
+    source: ['affordability_analysis'],
+    period: { start: '2026-08-21', end: '2026-11-14', label: 'purchase_horizon' },
+    dataAsOf: '2026-08-16T12:00:00.000Z',
+    facts: {
+      reconciledBalance: 1340.81,
+      baseline: { projectedOnDate: 6286, projectedOnDateAt: '2026-08-21' },
+      hypothetical: { projectedOnDate: 5486, projectedOnDateAt: '2026-08-21' },
+      delta: { newNegativeIntroduced: false },
+    },
+    observations: [],
+    limitations: [],
+  };
+  const affordNarrBlock = buildEvidenceSystemSection(affordNarrEv);
+  check('affordability forbids You can afford this from no-negative', /Do not make a universal judgment such as "You can afford this"/.test(affordNarrBlock));
+  check('affordability requires Keacast-specific qualification', /Answer with Keacast-specific qualification/.test(affordNarrBlock));
+  check('affordability forbids safe\/healthy\/comfortable\/disposable', /Do not say safe, healthy, comfortable, disposable/.test(affordNarrBlock));
+  check('affordability write offer stays conversational', /conversational optional next step/.test(affordNarrBlock));
+  check('affordability pairs projectedOnDate fields', /projectedOnDate and projectedOnDateAt are an inseparable pair/.test(affordNarrBlock));
+
+  const { assembleBaseSystemPrompt } = require('../controllers/systemPromptBuilders');
+  const withPlaybook = assembleBaseSystemPrompt({ currentDate: '2026-08-16' });
+  const withoutPlaybook = assembleBaseSystemPrompt({ currentDate: '2026-08-16', omitPlanningPlaybook: true });
+  check('non-macro prompt includes planning playbook', /FINANCIAL PLANNING PLAYBOOK/.test(withPlaybook.baseSystem));
+  check('non-macro playbook still has MAKE IT REAL', /MAKE IT REAL/.test(withPlaybook.baseSystem));
+  check('successful macro prompt omits planning playbook', !/FINANCIAL PLANNING PLAYBOOK/.test(withoutPlaybook.baseSystem));
+  check('successful macro prompt omits MAKE IT REAL', !/MAKE IT REAL/.test(withoutPlaybook.baseSystem));
+  check('successful macro prompt omits forecasted disposable playbook lever', !/redirect part of the monthly forecasted disposable/.test(withoutPlaybook.baseSystem));
+  check('successful macro still has write policy', /VERIFY BEFORE CREATING/.test(withoutPlaybook.baseSystem));
 }
 
 module.exports = { run };

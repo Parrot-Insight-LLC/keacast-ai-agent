@@ -138,11 +138,14 @@ function buildPlanningPlaybookBlock() {
     Review the app here: https://keacast.app/ for more context and information.`;
 }
 
-function assembleBaseSystemPrompt({ currentDate, faq, productKnowledge } = {}) {
+function assembleBaseSystemPrompt({ currentDate, faq, productKnowledge, omitPlanningPlaybook } = {}) {
   const identityBlock = buildIdentityBlock({ currentDate, faq, productKnowledge });
   const writePolicyBlock = buildWritePolicyBlock({ currentDate });
   const productHelpPlaybookBlock = buildProductHelpPlaybookBlock();
-  const planningPlaybookBlock = buildPlanningPlaybookBlock();
+  const planningPlaybookBlock = omitPlanningPlaybook ? '' : buildPlanningPlaybookBlock();
+  const baseSystem = omitPlanningPlaybook
+    ? `${identityBlock}\n${writePolicyBlock}\n\n${productHelpPlaybookBlock}`
+    : `${identityBlock}\n${writePolicyBlock}\n\n${productHelpPlaybookBlock}\n\n${planningPlaybookBlock}`;
   return {
     identityBlock,
     writePolicyBlock,
@@ -150,7 +153,7 @@ function assembleBaseSystemPrompt({ currentDate, faq, productKnowledge } = {}) {
     planningPlaybookBlock,
     // Preserve historical spacing: write bullets continue "Things to consider";
     // playbooks start new sections after blank lines.
-    baseSystem: `${identityBlock}\n${writePolicyBlock}\n\n${productHelpPlaybookBlock}\n\n${planningPlaybookBlock}`,
+    baseSystem,
   };
 }
 

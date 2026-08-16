@@ -536,10 +536,11 @@ function buildSummarizationUserContent(account, firstName, fallback, opts = {}) 
 // category, a merchant, a date range) is fetched on demand by the
 // function-calling tools, so the model still has full reach without paying the
 // upfront token cost.
-function buildChatAccountContext(account, firstName, currentDate) {
+function buildChatAccountContext(account, firstName, currentDate, options = {}) {
   const today = currentDate || moment().format('YYYY-MM-DD');
   const monthLabel = moment(today, 'YYYY-MM-DD').format('MMMM');
   const monthEnd = moment(today, 'YYYY-MM-DD').endOf('month').format('MMM D');
+  const suppressFinancialSummary = options.suppressFinancialSummary === true;
 
   const name = account.accountname || account.bank_account_name || account.institution_name || 'their account';
   const type = account.account_type || account.type || '';
@@ -569,7 +570,7 @@ function buildChatAccountContext(account, firstName, currentDate) {
   }
 
   const sav = account.savings;
-  if (sav && typeof sav === 'object') {
+  if (!suppressFinancialSummary && sav && typeof sav === 'object') {
     const pot = typeof sav.savingsPotential === 'number' ? sav.savingsPotential : Number(sav.savingsPotential);
     if (Number.isFinite(pot)) {
       lines.push(`savingsPotential ${fmtMoney(pot)} — lowest projected balance through end of ${monthLabel} (${monthEnd}); not available money.`);
@@ -583,29 +584,38 @@ function buildChatAccountContext(account, firstName, currentDate) {
       lines.push(`${monthLabel} forecast: income ${fmtMoney(inc)}, expenses ${fmtMoney(-Math.abs(exp))}, forecasted disposable (net cash flow) ${fmtMoney(net)}.`);
     }
   }
-  if (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number') {
+  if (!suppressFinancialSummary
+    && (typeof account.upcomingExpenseTotal === 'number' || typeof account.upcomingIncomeTotal === 'number')) {
     lines.push(`Next 14 days: income ${fmtMoney(Math.abs(account.upcomingIncomeTotal || 0))}, expenses ${fmtMoney(Math.abs(account.upcomingExpenseTotal || 0))}.`);
   }
 
-  const negs = pickNegativeBalancePreviews(account, 5);
-  if (negs.length > 0) {
-    lines.push(`Future negative projected balances within ~90 days (warn the user; any plan must avoid making these worse): ${negs.join('; ')}.`);
-  } else {
-    lines.push('No negative projected balances in the next ~90 days.');
+  if (!suppressFinancialSummary) {
+    const negs = pickNegativeBalancePreviews(account, 5);
+    if (negs.length > 0) {
+      lines.push(`Future negative projected balances within ~90 days (warn the user; any plan must avoid making these worse): ${negs.join('; ')}.`);
+    } else {
+      lines.push('No negative projected balances in the next ~90 days.');
+    }
   }
 
   const topCats = pickTopSpendingCategories(account, 5);
   if (topCats.length > 0) {
-    lines.push(`Top recent spending categories (posted): ${topCats.join('; ')} — use these as concrete levers when suggesting where to free up cash.`);
+    lines.push(
+      suppressFinancialSummary
+        ? `Top recent spending categories (posted): ${topCats.join('; ')}.`
+        : `Top recent spending categories (posted): ${topCats.join('; ')} — use these as concrete levers when suggesting where to free up cash.`
+    );
   }
 
   const recent = pickRecentTransactions(account, 10);
   if (recent.length > 0) {
     lines.push(`Recent posted (Name|Amt|Date): ${recent.join('; ')}.`);
   }
-  const upc = pickUpcomingTransactions(account, 10);
-  if (upc.length > 0) {
-    lines.push(`Upcoming forecasted (Name|Amt|Date): ${upc.join('; ')}.`);
+  if (!suppressFinancialSummary) {
+    const upc = pickUpcomingTransactions(account, 10);
+    if (upc.length > 0) {
+      lines.push(`Upcoming forecasted (Name|Amt|Date): ${upc.join('; ')}.`);
+    }
   }
 
   lines.push('');
@@ -3213,8 +3223,17 @@ exports.chat = async (req, res) => {
     // handled on demand by the function-calling tools below, so we only seed a
     // small high-signal brief instead of dumping hundreds of rows of JSON.
     const firstName = coerceFirstName(req.body?.userData, selectedAccount?.user || null);
+    const macroOwnsTurn = phase1Performed
+      && (effectiveCap === 'cashflow_analysis' || effectiveCap === 'affordability_or_planning')
+      && phase1Evidence
+      && phase1Evidence.status === 'ok'
+      && Array.isArray(phase1Evidence.source)
+      && (phase1Evidence.source.includes('cashflow_analysis')
+        || phase1Evidence.source.includes('affordability_analysis'));
     const completeContext = hasAccount
-      ? buildChatAccountContext(selectedAccount, firstName, currentDate)
+      ? buildChatAccountContext(selectedAccount, firstName, currentDate, {
+          suppressFinancialSummary: macroOwnsTurn,
+        })
       : buildChatNoAccountContext(firstName);
     console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
 
@@ -3229,7 +3248,12 @@ exports.chat = async (req, res) => {
       productHelpPlaybookBlock,
       planningPlaybookBlock,
       baseSystem,
-    } = assembleBaseSystemPrompt({ currentDate, faq, productKnowledge });
+    } = assembleBaseSystemPrompt({
+      currentDate,
+      faq,
+      productKnowledge,
+      omitPlanningPlaybook: macroOwnsTurn,
+    });
 
     // Attach the compact context block as BACKGROUND inside the system message
     // rather than as a per-turn user message. Injecting it as a `user` turn

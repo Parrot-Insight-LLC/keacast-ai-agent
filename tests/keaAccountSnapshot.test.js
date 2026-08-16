@@ -137,6 +137,24 @@ async function run() {
   check('brief includes upcoming totals', brief.includes('Next 14 days'));
   const goalsBlock = T.buildGoalsBlock(compact.goals, '2026-08-15');
   check('goals block uses compact expectedByNow', goalsBlock.includes('Vacation') && goalsBlock.includes('$400'));
+
+  section('Phase 2.2 reduced macro account brief');
+  const reduced = T.buildChatAccountContext(compact, 'Alex', '2026-08-15', { suppressFinancialSummary: true });
+  check('reduced keeps selected account name', reduced.includes('Checking'));
+  check('reduced keeps account type', reduced.includes('depository'));
+  check('reduced keeps institution', reduced.includes('Bank'));
+  check('reduced keeps availableBalance', reduced.includes('availableBalance $1400'));
+  check('reduced keeps reconciledBalance', reduced.includes('reconciledBalance $1500'));
+  check('reduced keeps posted categories', /Top recent spending categories \(posted\):/.test(reduced) && reduced.includes('Dining'));
+  check('reduced omits Next 14 days', !reduced.includes('Next 14 days'));
+  check('reduced omits forecasted disposable', !/forecasted disposable/.test(reduced));
+  check('reduced omits snapshot savingsPotential line', !/savingsPotential/.test(reduced));
+  check('reduced omits compact 90-day negative summary', !/No negative projected balances in the next ~90 days/.test(reduced)
+    && !/Future negative projected balances within ~90 days/.test(reduced));
+  check('reduced omits upcoming forecasted list', !/Upcoming forecasted/.test(reduced));
+  check('reduced omits category-cut levers', !/concrete levers/.test(reduced));
+  check('full non-macro brief still includes Next 14 days', brief.includes('Next 14 days'));
+  check('full non-macro brief still includes forecasted disposable', /forecasted disposable/.test(brief));
 }
 
 module.exports = { run };

@@ -869,10 +869,14 @@ function buildEvidenceSystemSection(evidence) {
       'GROUNDED EVIDENCE is authoritative for this requested analysis.',
       'Do not substitute overlapping compact snapshot forecast summaries when macro evidence provides the scoped calculation.',
       'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Explain their practical meaning.',
-      'Do not invent an affordability threshold, score, or safe/tight/risky label.',
-      'remainingForecastSpending / remainingForecastIncome = remaining unmatched F/RF in the current calendar month — not the snapshot upcoming window.',
+      'Do not invent an affordability threshold, score, or safe/tight/risky/healthy/comfortable/disposable label.',
+      'remainingForecastSpending / remainingForecastIncome = remaining unmatched F/RF in the current calendar month — not the snapshot upcoming window, not the next 14 days, and not the next 15 days.',
       'Snapshot "Next 14 days" / upcoming totals are a separate ~15-day window. Never attach that upcoming-window label to remainingForecastSpending.',
-      'negativeBalanceRisk.scope is the question evaluation window. horizonDays is the 90-day computation horizon. A negative outside scope does not answer a scoped question such as "next month".',
+      'negativeBalanceRisk.scope is the period the user asked about. horizonDays is the maximum forecast computation window, not the answer scope.',
+      'hasNegativeInScope=false answers only risk.scope. Do not say there is no negative risk in the next 90 days unless a separate full-horizon calculation is present.',
+      'lowestProjectedAmount and lowestProjectedDate are an inseparable pair from the same object. projectedOnDate and projectedOnDateAt are an inseparable pair. Never combine scope.start with an unrelated projected amount.',
+      'reconciledBalance is the latest reconciled snapshot. It is never a projected balance, never lowestProjectedAmount, and never projectedOnDate.',
+      'Missing, null, or unprovided financial fields must never be described as zero. postedIncome=0 does not establish forecastIncome=0. Do not say "no forecasted income or expenses are recorded" unless those forecast fields are actually present.',
       'If snapshot compact negatives disagree with GROUNDED EVIDENCE scoped risk, use GROUNDED EVIDENCE.',
     ].join(' ')
     : '';
@@ -882,10 +886,18 @@ function buildEvidenceSystemSection(evidence) {
       'Do not invent disposable funds, safe-to-spend, overdraft safety, affordability, or "enough money to cover everything" from analyzeCashflow.',
       'analyzeCashflow is not assessAffordability. Do not conclude the user can afford a purchase from this evidence.',
       'Do not prescribe cutting the largest categories, increasing income, or transferring savings merely because those categories are largest. State the factual category/merchant ranking instead.',
+      'For a next-month negative-balance question, the primary answer is negativeBalanceRisk.hasNegativeInScope. If false, prefer: "No. Your current Keacast forecast does not show a negative balance during {scope label / month}." Do not mention a lowest balance unless useful; if you do, both amount and date must come from negativeBalanceRisk.lowestProjectedAmount and negativeBalanceRisk.lowestProjectedDate together.',
     ].join(' ')
     : '';
   const affordabilityInstruction = compact.source.includes('affordability_analysis')
-    ? 'Do not say the user can afford the purchase merely because newNegativeIntroduced is false. If the baseline forecast was already negative, explain that, whether the date moves earlier, and how much the low worsens. If neither baseline nor hypothetical goes negative, you may say the purchase does not create a negative balance in the current 90-day Keacast forecast and report the remaining lowest projected balance — not a universal financial recommendation. If a next_month_first_day assumption is present, say it out loud (for example: "Assuming the purchase is on September 1...").'
+    ? [
+      'Do not make a universal judgment such as "You can afford this" solely because there is no negative balance.',
+      'Answer with Keacast-specific qualification, for example: based on the current Keacast forecast, adding the requested expense does not create a negative balance within the current 90-day forecast — then state lowest projected balance, its date, and any existing negative risk from the paired fields.',
+      'Do not say safe, healthy, comfortable, disposable, or "good idea" unless an explicit deterministic metric supports that word.',
+      'If the baseline forecast was already negative, explain that, whether the date moves earlier, and how much the low worsens.',
+      'If a next_month_first_day assumption is present, say it out loud (for example: "Assuming the purchase is on September 1...").',
+      'If you offer to add the expense to the forecast, keep it a conversational optional next step. Do not treat it as an armed proposal and do not call createTransaction on this turn unless write_proposed is already true.',
+    ].join(' ')
     : '';
   const partialInstruction = compact.status === 'partial'
     ? (compact.lookups
@@ -894,7 +906,7 @@ function buildEvidenceSystemSection(evidence) {
     : '';
   return [
     'GROUNDED EVIDENCE (authoritative for this answer — do not contradict; do not invent missing dollar values or dates; respect limitations; partial evidence does not justify unsupported certainty):',
-    'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available); savingsPotential = lowest projected balance through the current month (not available money).',
+    'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available, not a projected balance, not lowestProjectedAmount, not projectedOnDate); savingsPotential = lowest projected balance through the current month (not available money).',
     spendingGlossary,
     JSON.stringify(compact),
     lookupInstructions,
