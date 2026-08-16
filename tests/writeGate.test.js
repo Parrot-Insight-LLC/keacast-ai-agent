@@ -13,6 +13,9 @@ async function run() {
   check('block write when armed but not affirmative', T.isWriteAllowed(false, true, T.isAffirmativeMessage('actually, maybe later')) === false);
   check('goal write blocked when only tx draft is complete', T.isGoalWriteAllowed(false, false, true, false) === false);
   check('goal write allowed when goal draft complete + affirmative', T.isGoalWriteAllowed(false, true, true, false) === true);
+  check('emptyDialogueState has continuation fields', T.emptyDialogueState().lastCapability === null);
+  check('emptyDialogueState lastPeriod starts null', T.emptyDialogueState().lastPeriod === null);
+  check('emptyDialogueState lastAccountId starts null', T.emptyDialogueState().lastAccountId === null);
 
   section('write-gate identity strip does not change allow condition');
   const ctx = { userId: 5, token: 'trusted', accountId: 22 };

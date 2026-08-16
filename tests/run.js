@@ -16,10 +16,14 @@ const suites = [
   './corsPreflight.test.js',
   './writeGate.test.js',
   './rollingSummary.test.js',
+  './keaCapabilityRouter.test.js',
+  './keaGroundingPolicy.test.js',
+  './keaToolBundles.test.js',
+  './keaGroundingPrefetch.test.js',
 ];
 
 async function main() {
-  console.log('\nKea Phase 0 tests\n=================');
+  console.log('\nKea Phase 0+1 tests\n===================');
   for (const file of suites) {
     const mod = require(file);
     await mod.run();
@@ -35,7 +39,7 @@ async function main() {
   const memoryFailed = mem.status !== 0;
 
   const { passed, failed } = totals();
-  console.log(`\n=================\nPhase 0 suite: Passed: ${passed}  Failed: ${failed}`);
+  console.log(`\n=================\nPhase 0+1 suite: Passed: ${passed}  Failed: ${failed}`);
   console.log(`test-kea-memory.js: ${memoryFailed ? 'FAILED' : 'PASSED'}`);
   process.exit(failed === 0 && !memoryFailed ? 0 : 1);
 }

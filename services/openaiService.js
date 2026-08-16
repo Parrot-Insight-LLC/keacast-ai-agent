@@ -41,15 +41,17 @@ const SIM_PROPOSE_TOOL_NAMES = new Set([
  */
 function filterFunctionSchemas(
   schemas = functionSchemas,
-  { simulationMode = false, goalsAvailable = true, simulationAvailable = true } = {}
+  { simulationMode = false, goalsAvailable = true, simulationAvailable = true, allowedTools } = {}
 ) {
   const list = Array.isArray(schemas) ? schemas : [];
+  const allow = allowedTools instanceof Set ? allowedTools : null;
   return list.filter((item) => {
     const name = item?.function?.name;
     if (!name) return true;
-    if (simulationMode && SIM_MODE_OMIT_TOOLS.has(name)) return false;
+    if (allow && !allow.has(name)) return false;
     if (!simulationAvailable && SIM_PROPOSE_TOOL_NAMES.has(name)) return false;
     if (goalsAvailable === false && GOAL_UNAVAILABLE_OMIT_TOOLS.has(name)) return false;
+    if (simulationMode && SIM_MODE_OMIT_TOOLS.has(name)) return false;
     return true;
   });
 }

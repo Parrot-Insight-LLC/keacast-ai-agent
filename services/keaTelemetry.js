@@ -4,8 +4,9 @@ const crypto = require('crypto');
 
 /**
  * Per-turn Kea chat telemetry. One JSON line, no PII / amounts / JWT / message text.
- * Phase 1 grounding fields are present as null/false placeholders so the schema
- * is stable before grounding is implemented.
+ * Phase 1 grounding fields are recorded via recordGrounding. Defaults stay
+ * false/null until the chat turn fills them. Never log evidence values, amounts,
+ * merchants, or message text.
  */
 
 function hashKeyedId(prefix, id) {
@@ -71,6 +72,17 @@ function createKeaTelemetry({ requestId } = {}) {
   let summary_overflow_message_count = 0;
   let rolling_summary_chars = 0;
   let response_sent_ms = null;
+  const grounding = {
+    grounding_required: false,
+    grounding_performed: false,
+    grounding_strategy: null,
+    conversation_intent: null,
+    response_mode: 'unspecified',
+    grounding_source_count: 0,
+    grounding_prefetch_ms: 0,
+    capability_confidence_bucket: null,
+    continuation_used: false,
+  };
 
   function markStart(name) {
     marks[name] = { t0: Date.now() };
@@ -108,6 +120,37 @@ function createKeaTelemetry({ requestId } = {}) {
 
   function recordWriteFlags(flags) {
     Object.assign(write, flags || {});
+  }
+
+  function recordGrounding(flags) {
+    if (!flags || typeof flags !== 'object') return;
+    if (flags.grounding_required === true || flags.grounding_required === false) {
+      grounding.grounding_required = flags.grounding_required;
+    }
+    if (flags.grounding_performed === true || flags.grounding_performed === false) {
+      grounding.grounding_performed = flags.grounding_performed;
+    }
+    if (flags.grounding_strategy === null || typeof flags.grounding_strategy === 'string') {
+      grounding.grounding_strategy = flags.grounding_strategy;
+    }
+    if (flags.conversation_intent === null || typeof flags.conversation_intent === 'string') {
+      grounding.conversation_intent = flags.conversation_intent;
+    }
+    if (typeof flags.response_mode === 'string') {
+      grounding.response_mode = flags.response_mode;
+    }
+    if (flags.grounding_source_count != null) {
+      grounding.grounding_source_count = Number(flags.grounding_source_count) || 0;
+    }
+    if (flags.grounding_prefetch_ms != null) {
+      grounding.grounding_prefetch_ms = Number(flags.grounding_prefetch_ms) || 0;
+    }
+    if (flags.capability_confidence_bucket === null || typeof flags.capability_confidence_bucket === 'string') {
+      grounding.capability_confidence_bucket = flags.capability_confidence_bucket;
+    }
+    if (flags.continuation_used === true || flags.continuation_used === false) {
+      grounding.continuation_used = flags.continuation_used;
+    }
   }
 
   function setResponseCharacterCount(n) {
@@ -228,11 +271,15 @@ function createKeaTelemetry({ requestId } = {}) {
       write_attempted: !!write.write_attempted,
       write_committed: !!write.write_committed,
       write_blocked: !!write.write_blocked,
-      grounding_required: false,
-      grounding_performed: false,
-      grounding_strategy: null,
-      conversation_intent: null,
-      response_mode: 'unspecified',
+      grounding_required: !!grounding.grounding_required,
+      grounding_performed: !!grounding.grounding_performed,
+      grounding_strategy: grounding.grounding_strategy,
+      conversation_intent: grounding.conversation_intent,
+      response_mode: grounding.response_mode,
+      grounding_source_count: grounding.grounding_source_count,
+      grounding_prefetch_ms: grounding.grounding_prefetch_ms,
+      capability_confidence_bucket: grounding.capability_confidence_bucket,
+      continuation_used: !!grounding.continuation_used,
       estimated_block_chars: blocks,
     };
     for (const r of azureRounds) {
@@ -266,6 +313,7 @@ function createKeaTelemetry({ requestId } = {}) {
     recordTool,
     recordBlock,
     recordWriteFlags,
+    recordGrounding,
     setResponseCharacterCount,
     setIdentity,
     setSelectedAccountMeta,

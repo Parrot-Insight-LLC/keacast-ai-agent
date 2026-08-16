@@ -1,0 +1,85 @@
+'use strict';
+
+const { check, section } = require('./harness');
+const { routeCapability } = require('../services/keaCapabilityRouter');
+const {
+  resolveGroundingPolicy,
+  isFailSoft,
+  responseModeFor,
+  groundingStrategyFor,
+  FAIL_SOFT_TEXT,
+  MATRIX,
+} = require('../services/keaGroundingPolicy');
+
+function policyFor(message, extra = {}) {
+  const route = routeCapability({
+    message,
+    currentDate: '2026-08-16',
+    accountId: '10',
+    dialogueState: extra.dialogueState || {},
+    pendingWrite: extra.pendingWrite,
+    pendingGoalWrite: extra.pendingGoalWrite,
+    userAffirmative: extra.userAffirmative,
+    simulationMode: extra.simulationMode,
+  });
+  return { route, policy: resolveGroundingPolicy(route, { message }) };
+}
+
+async function run() {
+  section('grounding matrix');
+
+  check('product_help NONE', policyFor('What is reconciliation?').policy.grounding === 'NONE');
+  check('product_help not required', policyFor('What is reconciliation?').policy.groundingRequired === false);
+  check('casual NONE', policyFor('Hi Kea').policy.grounding === 'NONE');
+  check('lookup REQUIRED', policyFor('How much did I spend at Walmart last month?').policy.groundingRequired === true);
+  check('forecast REQUIRED', policyFor('Will I go negative next month?').policy.groundingRequired === true);
+  check('affordability REQUIRED', policyFor('Can I afford $800 next month?').policy.groundingRequired === true);
+  check(
+    'unknown amount question is REQUIRED so we do not invent',
+    policyFor('how much is it').policy.groundingRequired === true
+    && policyFor('how much is it').policy.effectiveCapability === 'unknown'
+  );
+  check('confirmation OPTIONAL', MATRIX.confirmation === 'OPTIONAL');
+  check('transaction_write OPTIONAL', MATRIX.transaction_write === 'OPTIONAL');
+  check('simulation OPTIONAL', MATRIX.simulation === 'OPTIONAL');
+
+  const cont = policyFor('What about $1,200?', {
+    dialogueState: {
+      lastCapability: 'affordability_or_planning',
+      lastSubjectKind: 'amount',
+      lastSubjectValue: '800',
+      lastPeriod: { start: '2026-09-01', end: '2026-09-30', label: 'next_month' },
+      lastAccountId: '10',
+    },
+  });
+  check('continuation inherits REQUIRED', cont.policy.groundingRequired === true);
+  check('continuation effective affordability', cont.policy.effectiveCapability === 'affordability_or_planning');
+
+  check('lookup prefetch_read for merchant period', policyFor('How much did I spend at Walmart last month?').policy.prefetchKind === 'prefetch_read');
+  check('balance uses snapshot', policyFor("What's my balance?").policy.prefetchKind === 'snapshot');
+  check('forecast uses snapshot', policyFor('Will I go negative next month?').policy.prefetchKind === 'snapshot');
+  check('affordability uses snapshot', policyFor('Can I afford $800 next month?').policy.prefetchKind === 'snapshot');
+
+  section('fail-soft policy');
+
+  const required = policyFor('How much did I spend at Walmart last month?').policy;
+  check('REQUIRED + no evidence is fail-soft', isFailSoft(required, null) === true);
+  check('REQUIRED + unavailable is fail-soft', isFailSoft(required, { status: 'unavailable' }) === true);
+  check('REQUIRED + ok is not fail-soft', isFailSoft(required, { status: 'ok' }) === false);
+  check('REQUIRED + partial is not fail-soft', isFailSoft(required, { status: 'partial' }) === false);
+  check('fail-soft text has no dollar amount', !/\$\s*\d/.test(FAIL_SOFT_TEXT));
+  check(
+    'fail-soft response_mode',
+    responseModeFor({ policy: required, failSoft: true, capability: 'financial_lookup' }) === 'fail_soft'
+  );
+  check(
+    'failed strategy',
+    groundingStrategyFor({ policy: required, failSoft: true }) === 'failed'
+  );
+  check(
+    'confirmation response_mode',
+    responseModeFor({ capability: 'confirmation', failSoft: false }) === 'confirmation'
+  );
+}
+
+module.exports = { run };

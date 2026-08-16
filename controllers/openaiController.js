@@ -21,6 +21,16 @@ const { assertAccountAccess } = require('../services/keaAccountAccess');
 const { invalidateSelectedAccountToolCache } = require('../services/keaAccountCache');
 const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
 const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
+const { routeCapability, applyContinuationPersistence } = require('../services/keaCapabilityRouter');
+const {
+  resolveGroundingPolicy,
+  isFailSoft,
+  responseModeFor,
+  groundingStrategyFor,
+  FAIL_SOFT_TEXT,
+} = require('../services/keaGroundingPolicy');
+const { prefetchGrounding, buildEvidenceSystemSection } = require('../services/keaGroundingPrefetch');
+const { allowedToolsFor } = require('../services/keaToolBundles');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 20; // verbatim conversation window (older turns are folded into a rolling summary)
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
@@ -1067,6 +1077,11 @@ function emptyDialogueState() {
     // Only overwritten when the client sends a new focusedEntity — never cleared
     // just because the current turn's uiContext.focusedEntity is null.
     uiReferent: null,
+    lastCapability: null,
+    lastSubjectKind: null,
+    lastSubjectValue: null,
+    lastPeriod: null,
+    lastAccountId: null,
     updatedAt: null,
   };
 }
@@ -3017,11 +3032,71 @@ exports.chat = async (req, res) => {
       ? `Loaded account context via ${selectedAccountSource}`
       : 'No account context (missing account or tool-layer unavailable)';
 
+    // Redis-eviction fallback flags — needed for capability routing before Azure.
+    const proposalInTranscript = transcriptShowsPendingProposal(history);
+    const goalProposalInTranscript = transcriptShowsPendingGoalProposal(history);
+
+    telemetry.markStart('context_build');
+    const phase1Route = routeCapability({
+      message,
+      simulationMode,
+      pendingWrite: pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript,
+      pendingGoalWrite: pendingGoalConfirmationAtStart || goalDraftCompleteAtStart || goalProposalInTranscript,
+      userAffirmative,
+      dialogueState,
+      accountId: accountid,
+      currentDate,
+    });
+    const phase1Policy = resolveGroundingPolicy(phase1Route, { message });
+    let phase1Evidence = null;
+    let groundingPrefetchMs = 0;
+    if (phase1Policy.groundingRequired) {
+      const tPrefetch = Date.now();
+      phase1Evidence = await prefetchGrounding({
+        trustedUserId: req.cashflowUser?.id,
+        accountId: accountid,
+        snapshot: selectedAccount,
+        currentDate,
+        policy: phase1Policy,
+        route: phase1Route,
+      });
+      groundingPrefetchMs = Date.now() - tPrefetch;
+    }
+    const phase1FailSoft = isFailSoft(phase1Policy, phase1Evidence);
+    applyContinuationPersistence(dialogueState, phase1Route, {
+      accountId: accountid,
+      failSoft: phase1FailSoft,
+    });
+    const phase1Performed = !phase1FailSoft
+      && !!phase1Evidence
+      && (phase1Evidence.status === 'ok' || phase1Evidence.status === 'partial')
+      && Array.isArray(phase1Evidence.source)
+      && phase1Evidence.source.length > 0;
+    telemetry.recordGrounding({
+      conversation_intent: phase1Route.capability,
+      grounding_required: !!phase1Policy.groundingRequired,
+      grounding_performed: phase1Performed,
+      grounding_strategy: groundingStrategyFor({
+        policy: phase1Policy,
+        evidence: phase1Evidence,
+        failSoft: phase1FailSoft,
+      }),
+      response_mode: responseModeFor({
+        policy: phase1Policy,
+        evidence: phase1Evidence,
+        capability: phase1Route.capability,
+        failSoft: phase1FailSoft,
+      }),
+      grounding_source_count: Array.isArray(phase1Evidence?.source) ? phase1Evidence.source.length : 0,
+      grounding_prefetch_ms: groundingPrefetchMs,
+      capability_confidence_bucket: phase1Route.confidence,
+      continuation_used: !!phase1Route.continuationUsed,
+    });
+
     // ── Build a compact, token-minimal context block ─────────────────────
     // Specific lookups (a single transaction, a category, a date range) are
     // handled on demand by the function-calling tools below, so we only seed a
     // small high-signal brief instead of dumping hundreds of rows of JSON.
-    telemetry.markStart('context_build');
     const firstName = coerceFirstName(req.body?.userData, selectedAccount?.user || null);
     const completeContext = hasAccount
       ? buildChatAccountContext(selectedAccount, firstName, currentDate)
@@ -3082,6 +3157,8 @@ exports.chat = async (req, res) => {
     if (recentWritesBlock) systemContent += `\n\n---\n${recentWritesBlock}`;
     if (recentToolOutcomesBlock) systemContent += `\n\n---\n${recentToolOutcomesBlock}`;
     if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
+    const groundedEvidenceBlock = buildEvidenceSystemSection(phase1Evidence);
+    if (groundedEvidenceBlock) systemContent += `\n\n---\n${groundedEvidenceBlock}`;
     // Goals feature availability steers whether the model may offer goal writes.
     if (goalsAvailable) {
       systemContent += `\n\n---\nGOALS ARE AVAILABLE: You may use getGoals, previewGoalCadence, updateDraftGoal, and (after propose+confirm) createGoal/updateGoal/deleteGoal. Stage goal proposals with updateDraftGoal — never with updateDraftTransaction.`;
@@ -3148,6 +3225,7 @@ exports.chat = async (req, res) => {
       recentWrites: recentWritesBlock,
       recentToolOutcomes: recentToolOutcomesBlock,
       dialogue: dialogueBlock,
+      groundedEvidence: groundedEvidenceBlock,
       systemTotal: systemContent,
     });
 
@@ -3222,8 +3300,6 @@ exports.chat = async (req, res) => {
     // enforce the confirm-before-write rule in code, not just the prompt.
     // Redis-eviction fallback: a proposal visible in the client transcript can
     // arm the write gate even when the dialogue-state draft is gone/incomplete.
-    const proposalInTranscript = transcriptShowsPendingProposal(history);
-    const goalProposalInTranscript = transcriptShowsPendingGoalProposal(history);
     // Concrete values from the last assistant proposal — the authoritative
     // payload on the confirmation turn when no draft was staged (or the draft
     // is missing slots). Prevents the model's re-estimated args + normalizer
@@ -3236,6 +3312,10 @@ exports.chat = async (req, res) => {
       simulationMode,
       goalsAvailable,
       simulationAvailable,
+      allowedTools: allowedToolsFor(phase1Route.capability, {
+        parentCapability: phase1Route.parentCapability,
+        pendingType: phase1Route.pendingType,
+      }),
     });
 
     const ctx = {
@@ -3263,11 +3343,15 @@ exports.chat = async (req, res) => {
     telemetry.markEnd('context_build');
     telemetry.recordBlock('currentContext', completeContext ? completeContext.length : 0);
     telemetry.recordBlock('systemTotal', systemContent.length);
+    if (groundedEvidenceBlock) telemetry.recordBlock('groundedEvidence', groundedEvidenceBlock.length);
     
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
     let error;
-    try {
+    if (phase1FailSoft) {
+      result = { content: FAIL_SOFT_TEXT };
+    } else {
+      try {
       console.log('Attempting to get response with tools...');
       const tAzure = Date.now();
       const responseWithTools = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'auto', requestId: req.id });
@@ -3301,6 +3385,7 @@ exports.chat = async (req, res) => {
       } catch (directError) {
         console.log('All attempts failed, returning error message');
         result = { content: '## ❌ Error\n\n**I apologize, but I encountered an error while processing your request. Please try again.**', raw: null, error: directError };
+      }
       }
     }
 

@@ -40,6 +40,10 @@ async function run() {
   check('write_gate_armed_at_start aliases write_proposed', payload.write_gate_armed_at_start === true && payload.write_proposed === true);
   check('no message text field', payload.message === undefined && payload.token === undefined);
   check('grounding placeholders present', payload.grounding_performed === false && payload.grounding_strategy === null);
+  check('grounding_source_count defaults 0', payload.grounding_source_count === 0);
+  check('grounding_prefetch_ms defaults 0', payload.grounding_prefetch_ms === 0);
+  check('continuation_used defaults false', payload.continuation_used === false);
+  check('capability_confidence_bucket defaults null', payload.capability_confidence_bucket === null);
   check('response_character_count', payload.response_character_count === 250);
   check('summary_updated defaults false', payload.summary_updated === false);
   check('summary_update_ms is 0 when no summary call', payload.summary_update_ms === 0);
@@ -204,6 +208,34 @@ async function run() {
   check('summary_failed true when set', pResp.summary_failed === true);
   check('response_sent payload has no message text', pResp.message === undefined && pResp.summary === undefined);
   check('request_total_ms still present', typeof pResp.request_total_ms === 'number');
+
+  section('keaTelemetry Phase 1 grounding fields');
+  const tG = createKeaTelemetry({ requestId: 'req-grounding' });
+  tG.recordGrounding({
+    conversation_intent: 'financial_lookup',
+    grounding_required: true,
+    grounding_performed: true,
+    grounding_strategy: 'prefetch_read',
+    response_mode: 'grounded',
+    grounding_source_count: 1,
+    grounding_prefetch_ms: 42,
+    capability_confidence_bucket: 'high',
+    continuation_used: true,
+  });
+  const pG = tG.toPayload();
+  check('conversation_intent recorded', pG.conversation_intent === 'financial_lookup');
+  check('grounding_required true', pG.grounding_required === true);
+  check('grounding_performed true', pG.grounding_performed === true);
+  check('grounding_strategy prefetch_read', pG.grounding_strategy === 'prefetch_read');
+  check('response_mode grounded', pG.response_mode === 'grounded');
+  check('grounding_source_count', pG.grounding_source_count === 1);
+  check('grounding_prefetch_ms', pG.grounding_prefetch_ms === 42);
+  check('capability_confidence_bucket', pG.capability_confidence_bucket === 'high');
+  check('continuation_used true', pG.continuation_used === true);
+  check('grounding payload has no evidence', pG.evidence === undefined && pG.facts === undefined);
+  check('grounding payload has no merchant', pG.merchant === undefined && pG.lastSubjectValue === undefined);
+  check('grounding payload has no amounts', pG.amount === undefined && pG.expenseTotal === undefined);
+  check('grounding payload has no message', pG.message === undefined && pG.prompt === undefined);
 
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;
