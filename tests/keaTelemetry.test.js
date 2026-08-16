@@ -41,6 +41,11 @@ async function run() {
   check('no message text field', payload.message === undefined && payload.token === undefined);
   check('grounding placeholders present', payload.grounding_performed === false && payload.grounding_strategy === null);
   check('response_character_count', payload.response_character_count === 250);
+  check('summary_updated defaults false', payload.summary_updated === false);
+  check('summary_update_ms is 0 when no summary call', payload.summary_update_ms === 0);
+  check('history_save_ms defaults 0', payload.history_save_ms === 0);
+  check('dialogue_state_save_ms defaults 0', payload.dialogue_state_save_ms === 0);
+  check('no summary content field', payload.summary === undefined && payload.rolling_summary === undefined && payload.summary_text === undefined);
 
   section('keaTelemetry selected-account fields omitted when unused');
   check('source null until set', payload.selected_account_source === null);
@@ -150,6 +155,33 @@ async function run() {
   tWrite.recordWriteFlags({ write_gate_armed_at_start: true });
   const pWrite = tWrite.toPayload();
   check('write_gate_armed_at_start sets write_proposed alias', pWrite.write_gate_armed_at_start === true && pWrite.write_proposed === true);
+
+  section('keaTelemetry post-Azure lifecycle spans (Phase 0.6C)');
+  const tPost = createKeaTelemetry({ requestId: 'req-post-azure' });
+  tPost.setSummaryUpdated(false);
+  await tPost.measureSpan('history_save', async () => {
+    await new Promise((r) => setTimeout(r, 12));
+  });
+  await tPost.measureSpan('dialogue_state_save', async () => {
+    await new Promise((r) => setTimeout(r, 12));
+  });
+  const pNoSummary = tPost.toPayload();
+  check('summary_updated false when call did not run', pNoSummary.summary_updated === false);
+  check('summary_update_ms is 0 when call did not run', pNoSummary.summary_update_ms === 0);
+  check('history_save_ms populated', typeof pNoSummary.history_save_ms === 'number' && pNoSummary.history_save_ms >= 10);
+  check('dialogue_state_save_ms populated', typeof pNoSummary.dialogue_state_save_ms === 'number' && pNoSummary.dialogue_state_save_ms >= 10);
+  check('post-azure payload has no summary text', pNoSummary.summary === undefined && pNoSummary.messages === undefined);
+
+  const tSummary = createKeaTelemetry({ requestId: 'req-summary' });
+  tSummary.setSummaryUpdated(true);
+  await tSummary.measureSpan('summary_update', async () => {
+    await new Promise((r) => setTimeout(r, 18));
+  });
+  const pSummary = tSummary.toPayload();
+  check('summary_updated true when call ran', pSummary.summary_updated === true);
+  check('summary_update_ms measures the call', typeof pSummary.summary_update_ms === 'number' && pSummary.summary_update_ms >= 15);
+  check('summary_update_ms is not mixed into azure_round_1', pSummary.azure_round_1_ms === undefined);
+  check('summary_updated true still has no summary content', pSummary.summary === undefined && pSummary.rolling_summary === undefined);
 
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;

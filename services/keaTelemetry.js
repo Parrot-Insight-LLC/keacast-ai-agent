@@ -65,6 +65,7 @@ function createKeaTelemetry({ requestId } = {}) {
   let selected_account_payload_bytes = null;
   let selected_account_full_payload_bytes = null;
   let selected_account_payload_key_bytes = null;
+  let summary_updated = false;
 
   function markStart(name) {
     marks[name] = { t0: Date.now() };
@@ -111,6 +112,19 @@ function createKeaTelemetry({ requestId } = {}) {
   function setIdentity(identity) {
     authenticated = !!(identity && identity.authenticated);
     userKey = identity && identity.userKey ? String(identity.userKey) : null;
+  }
+
+  function setSummaryUpdated(ran) {
+    summary_updated = !!ran;
+  }
+
+  async function measureSpan(name, fn) {
+    markStart(name);
+    try {
+      return await fn();
+    } finally {
+      markEnd(name);
+    }
   }
 
   function setSelectedAccountMeta({
@@ -162,6 +176,10 @@ function createKeaTelemetry({ requestId } = {}) {
       selected_account_full_payload_bytes,
       selected_account_payload_key_bytes,
       memory_load_ms: marks.memory_load?.ms ?? null,
+      summary_updated: !!summary_updated,
+      summary_update_ms: marks.summary_update?.ms ?? 0,
+      history_save_ms: marks.history_save?.ms ?? 0,
+      dialogue_state_save_ms: marks.dialogue_state_save?.ms ?? 0,
       azure_round_count,
       tool_call_count: tools.length,
       tool_execution_total_ms: tools.reduce((sum, t) => sum + t.ms, 0),
@@ -217,6 +235,8 @@ function createKeaTelemetry({ requestId } = {}) {
     setResponseCharacterCount,
     setIdentity,
     setSelectedAccountMeta,
+    setSummaryUpdated,
+    measureSpan,
     toPayload,
     emit,
   };

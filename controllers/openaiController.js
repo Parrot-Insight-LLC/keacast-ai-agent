@@ -3244,6 +3244,7 @@ exports.chat = async (req, res) => {
     ];
     const updatedHistory = fullTurn.slice(-MAX_MEMORY);
 
+    telemetry.markStart('history_save');
     if (hasScopedSession) {
       try {
         await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
@@ -3252,27 +3253,39 @@ exports.chat = async (req, res) => {
         console.warn('Chat endpoint: Failed to save history to Redis:', redisError.message);
       }
     }
+    telemetry.markEnd('history_save');
 
     // Persist dialogue state (mutated in-place by executeToolCalls). Fail-soft.
+    telemetry.markStart('dialogue_state_save');
     await saveDialogueState(userId, ctx.dialogueState || dialogueState);
+    telemetry.markEnd('dialogue_state_save');
 
     // Refresh the rolling summary once the conversation grows past the trigger:
     // fold the turns that fell OUT of the verbatim window into the summary so
     // long chats stay coherent without unbounded token growth. Fail-soft.
+    // Phase 0.6C: measure the call; do not change SUMMARY_TRIGGER / MAX_MEMORY.
+    let summaryUpdated = false;
     try {
       if (userId && fullTurn.length > SUMMARY_TRIGGER) {
         const overflow = fullTurn.slice(0, fullTurn.length - MAX_MEMORY);
         if (overflow.length > 0) {
-          const newSummary = await generateRollingSummary(rollingSummary, overflow);
-          if (newSummary && newSummary !== rollingSummary) {
-            await redis.set(buildSummaryKey(userId), newSummary, 'EX', SUMMARY_TTL);
-            console.log('Chat endpoint: rolling summary refreshed (', newSummary.length, 'chars )');
+          summaryUpdated = true;
+          telemetry.markStart('summary_update');
+          try {
+            const newSummary = await generateRollingSummary(rollingSummary, overflow);
+            if (newSummary && newSummary !== rollingSummary) {
+              await redis.set(buildSummaryKey(userId), newSummary, 'EX', SUMMARY_TTL);
+              console.log('Chat endpoint: rolling summary refreshed (', newSummary.length, 'chars )');
+            }
+          } finally {
+            telemetry.markEnd('summary_update');
           }
         }
       }
     } catch (e) {
       console.warn('Chat endpoint: rolling summary refresh failed (fail-soft):', e.message);
     }
+    telemetry.setSummaryUpdated(summaryUpdated);
 
     // Structured outcome of any real writes this turn. The UI keys off
     // reloadSelectedAccount to refresh account data (instead of sniffing the
