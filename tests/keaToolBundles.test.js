@@ -70,6 +70,9 @@ async function run() {
     !bundleForCapability('unknown').includes('createTransaction')
     && !bundleForCapability('unknown').includes('createGoal')
   );
+  check('invitation_continuation has no tools', bundleForCapability('invitation_continuation').length === 0);
+  check('bare_affirmative_unresolved has no tools', bundleForCapability('bare_affirmative_unresolved').length === 0);
+  check('unknown still has getFocusedEntityDetails', bundleForCapability('unknown').includes('getFocusedEntityDetails'));
 
   section('bundle ∩ availability; simulation omit LAST');
 

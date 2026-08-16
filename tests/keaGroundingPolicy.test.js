@@ -42,6 +42,8 @@ async function run() {
   check('confirmation OPTIONAL', MATRIX.confirmation === 'OPTIONAL');
   check('transaction_write OPTIONAL', MATRIX.transaction_write === 'OPTIONAL');
   check('simulation OPTIONAL', MATRIX.simulation === 'OPTIONAL');
+  check('invitation_continuation NONE', MATRIX.invitation_continuation === 'NONE');
+  check('bare_affirmative_unresolved NONE', MATRIX.bare_affirmative_unresolved === 'NONE');
 
   const cont = policyFor('What about $1,200?', {
     dialogueState: {

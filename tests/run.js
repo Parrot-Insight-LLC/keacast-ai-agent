@@ -21,6 +21,7 @@ const suites = [
   './keaToolBundles.test.js',
   './keaGroundingPrefetch.test.js',
   './keaFinancialMacros.test.js',
+  './keaInvitationContinuation.test.js',
   './keaPhase12.test.js',
 ];
 

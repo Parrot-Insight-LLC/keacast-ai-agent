@@ -5,6 +5,8 @@ const moment = require('moment');
 const CAPABILITIES = Object.freeze([
   'confirmation',
   'continuation',
+  'invitation_continuation',
+  'bare_affirmative_unresolved',
   'product_help',
   'casual_conversation',
   'financial_lookup',
@@ -285,6 +287,19 @@ function isShortFollowUp(text) {
   if (!m || m.length > 80) return false;
   return /^(what about|how about|and (what about|how about)?|this month|last month|next month|that month)\b/i.test(m)
     || /^\$\s*[\d,]+(?:\.\d+)?\s*\??$/i.test(m);
+}
+
+function isBareAffirmative(text) {
+  const m = String(text || '').trim();
+  if (!m || m.length > 40) return false;
+  return /^(y(es|ep|eah|up)?|sure|ok(ay)?)(\s+please)?[.!?]*$/i.test(m)
+    || /^(go ahead|do it|please do)[.!?]*$/i.test(m);
+}
+
+function isBareNegative(text) {
+  const m = String(text || '').trim();
+  if (!m || m.length > 40) return false;
+  return /^(no|nope|nah|no thanks|not now|no thank you)[.!?]*$/i.test(m);
 }
 
 function accountsMatch(a, b) {
@@ -602,6 +617,134 @@ function pendingWriteType(input) {
   return null;
 }
 
+const INVITATION_KINDS = new Set(['add_affordability_expense']);
+
+function normalizePendingInvitation(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (!INVITATION_KINDS.has(raw.kind)) return null;
+  const amount = Number(raw.amount);
+  const date = raw.date ? String(raw.date).slice(0, 10) : '';
+  if (!(amount > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const status = raw.status === 'referent_asked' ? 'referent_asked' : 'offered';
+  return {
+    kind: 'add_affordability_expense',
+    sourceCapability: 'affordability_or_planning',
+    amount,
+    date,
+    accountId: raw.accountId == null || raw.accountId === '' ? null : String(raw.accountId),
+    status,
+  };
+}
+
+function buildAffordabilityInvitation(route, accountId) {
+  const cap = route && (route.capability === 'continuation' ? route.parentCapability : route.capability);
+  if (cap !== 'affordability_or_planning') return null;
+  const slots = (route && route.slots) || {};
+  const amount = Number(slots.amount);
+  const date = slots.purchaseDate ? String(slots.purchaseDate).slice(0, 10) : '';
+  if (!(amount > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  return {
+    kind: 'add_affordability_expense',
+    sourceCapability: 'affordability_or_planning',
+    amount,
+    date,
+    accountId: accountId == null || accountId === '' ? null : String(accountId),
+    status: 'offered',
+  };
+}
+
+function formatInvitationAmount(amount) {
+  const n = Number(amount);
+  if (!Number.isFinite(n)) return '';
+  if (Number.isInteger(n)) return `$${n}`;
+  const fixed = n.toFixed(2).replace(/\.00$/, '');
+  return `$${fixed}`;
+}
+
+function formatInvitationDate(date) {
+  const m = moment(String(date || ''), 'YYYY-MM-DD', true);
+  return m.isValid() ? m.format('MMMM D') : '';
+}
+
+function buildInvitationClarifyText(invitation) {
+  const inv = normalizePendingInvitation(invitation);
+  if (!inv) return 'Sure — what would you like me to continue with?';
+  const amount = formatInvitationAmount(inv.amount);
+  const date = formatInvitationDate(inv.date);
+  return `Do you mean you'd like me to add the ${amount} expense on ${date}?`;
+}
+
+function buildDeterministicAffirmativeText(route) {
+  const resolution = route && route.affirmativeResolution;
+  if (resolution === 'declined') return 'Okay.';
+  if (resolution === 'invitation_clarify') {
+    return buildInvitationClarifyText({
+      kind: 'add_affordability_expense',
+      amount: route.slots && route.slots.amount,
+      date: route.slots && route.slots.purchaseDate,
+      status: 'offered',
+    });
+  }
+  if (resolution === 'analysis_clarify') {
+    return 'Which would you like me to look at more closely?';
+  }
+  return 'Sure — what would you like me to continue with?';
+}
+
+function isDeterministicAffirmativeCapability(capability) {
+  return capability === 'invitation_continuation' || capability === 'bare_affirmative_unresolved';
+}
+
+function invitationMatchesAccount(invitation, accountId) {
+  const inv = normalizePendingInvitation(invitation);
+  if (!inv || !inv.accountId) return false;
+  return accountsMatch(inv.accountId, accountId);
+}
+
+function applyInvitationLifecycle(dialogueState, route, { accountId } = {}) {
+  if (!dialogueState || typeof dialogueState !== 'object') return dialogueState;
+  const inv = normalizePendingInvitation(dialogueState.pendingInvitation);
+  if (!inv) {
+    dialogueState.pendingInvitation = null;
+    return dialogueState;
+  }
+  const cap = route && route.capability;
+  if (cap === 'invitation_continuation') {
+    if (route.affirmativeResolution === 'declined') {
+      dialogueState.pendingInvitation = null;
+    } else if (route.affirmativeResolution === 'invitation_clarify') {
+      dialogueState.pendingInvitation = { ...inv, status: 'referent_asked' };
+    }
+    return dialogueState;
+  }
+  if (cap === 'bare_affirmative_unresolved') {
+    dialogueState.pendingInvitation = null;
+    return dialogueState;
+  }
+  if (cap === 'transaction_write') {
+    dialogueState.pendingInvitation = null;
+    return dialogueState;
+  }
+  if (cap === 'confirmation') return dialogueState;
+  if (cap) dialogueState.pendingInvitation = null;
+  return dialogueState;
+}
+
+function maybeSetAffordabilityInvitation(dialogueState, {
+  route,
+  accountId,
+  failSoft,
+  macroOwnsTurn,
+  evidence,
+} = {}) {
+  if (!dialogueState || typeof dialogueState !== 'object') return dialogueState;
+  if (failSoft || !macroOwnsTurn) return dialogueState;
+  if (!evidence || evidence.status !== 'ok') return dialogueState;
+  const inv = buildAffordabilityInvitation(route, accountId);
+  if (inv) dialogueState.pendingInvitation = inv;
+  return dialogueState;
+}
+
 /**
  * Deterministic first-match capability router. No LLM.
  */
@@ -622,6 +765,8 @@ function routeCapabilityUnwrapped(input = {}) {
     continuationUsed: false,
     slots,
     accountChanged: false,
+    affirmativeResolution: 'none',
+    invitationWriteHandoff: false,
   };
 
   // 1. Simulation constraints: real-write / what-if language in sim mode
@@ -644,7 +789,7 @@ function routeCapabilityUnwrapped(input = {}) {
       || (pendingType === 'transaction' && txSuspended)
       || (pendingType === 'both' && (txSuspended || goalSuspended));
     if (!confirmationSuspended) {
-      return { ...base, capability: 'confirmation', confidence: 'high' };
+      return { ...base, capability: 'confirmation', confidence: 'high', affirmativeResolution: 'write_confirmation' };
     }
   }
 
@@ -733,7 +878,26 @@ function routeCapabilityUnwrapped(input = {}) {
     return { ...base, capability: 'goal_write', confidence: 'high', accountChanged };
   }
   if (isWriteUtterance(message)) {
-    return { ...base, capability: 'transaction_write', confidence: 'high', accountChanged };
+    const invitation = normalizePendingInvitation(last.pendingInvitation);
+    const invitationOk = invitation && invitationMatchesAccount(invitation, currentAccountId);
+    const writeSlots = invitationOk && slots.amount == null && !slots.purchaseDate
+      ? {
+          ...slots,
+          amount: invitation.amount,
+          purchaseDate: invitation.date,
+          subjectKind: slots.subjectKind || 'amount',
+          subjectValue: slots.subjectValue || String(invitation.amount),
+        }
+      : slots;
+    return {
+      ...base,
+      capability: 'transaction_write',
+      confidence: 'high',
+      accountChanged,
+      slots: writeSlots,
+      invitationWriteHandoff: !!invitationOk,
+      affirmativeResolution: invitationOk ? 'write_handoff' : 'none',
+    };
   }
   if (isNavUtterance(message)) {
     return { ...base, capability: 'navigation_ui', confidence: 'high', accountChanged };
@@ -805,7 +969,89 @@ function routeCapabilityUnwrapped(input = {}) {
     };
   }
 
-  // 6. unknown
+  // 6. Bare-affirmative continuation — never unknown, never UI deixis.
+  const invitation = normalizePendingInvitation(last.pendingInvitation);
+  const invitationOk = invitation && invitationMatchesAccount(invitation, currentAccountId);
+  if (isBareNegative(message) && invitation) {
+    return {
+      ...base,
+      capability: 'invitation_continuation',
+      confidence: 'high',
+      accountChanged,
+      affirmativeResolution: 'declined',
+    };
+  }
+  if (isBareAffirmative(message) && !pendingType) {
+    if (invitation && !invitationOk) {
+      return {
+        ...base,
+        capability: 'bare_affirmative_unresolved',
+        confidence: 'high',
+        accountChanged: true,
+        affirmativeResolution: 'unresolved_clarify',
+      };
+    }
+    if (invitationOk && invitation.status === 'referent_asked') {
+      return {
+        ...base,
+        capability: 'transaction_write',
+        confidence: 'high',
+        accountChanged: false,
+        invitationWriteHandoff: true,
+        affirmativeResolution: 'write_handoff',
+        slots: {
+          ...slots,
+          amount: invitation.amount,
+          purchaseDate: invitation.date,
+          subjectKind: 'amount',
+          subjectValue: String(invitation.amount),
+        },
+      };
+    }
+    if (invitationOk) {
+      return {
+        ...base,
+        capability: 'invitation_continuation',
+        confidence: 'high',
+        accountChanged: false,
+        affirmativeResolution: 'invitation_clarify',
+        slots: {
+          ...slots,
+          amount: invitation.amount,
+          purchaseDate: invitation.date,
+          subjectKind: 'amount',
+          subjectValue: String(invitation.amount),
+        },
+      };
+    }
+    if (last.lastCapability === 'cashflow_analysis') {
+      return {
+        ...base,
+        capability: 'bare_affirmative_unresolved',
+        confidence: 'high',
+        accountChanged,
+        affirmativeResolution: 'analysis_clarify',
+      };
+    }
+    return {
+      ...base,
+      capability: 'bare_affirmative_unresolved',
+      confidence: 'high',
+      accountChanged,
+      affirmativeResolution: 'unresolved_clarify',
+    };
+  }
+  if (input.userAffirmative && !pendingType) {
+    return {
+      ...base,
+      capability: 'bare_affirmative_unresolved',
+      confidence: 'high',
+      accountChanged,
+      affirmativeResolution: 'unresolved_clarify',
+    };
+  }
+
+  // 7. unknown
   return { ...base, capability: 'unknown', confidence: 'low', accountChanged };
 }
 
@@ -833,7 +1079,9 @@ function shouldPersistContinuation(route, { failSoft } = {}) {
   if (route.capability === 'confirmation'
     || route.capability === 'casual_conversation'
     || route.capability === 'product_help'
-    || route.capability === 'navigation_ui') {
+    || route.capability === 'navigation_ui'
+    || route.capability === 'invitation_continuation'
+    || route.capability === 'bare_affirmative_unresolved') {
     return false;
   }
   return PERSIST_CAPABILITIES.has(route.capability);
@@ -917,4 +1165,14 @@ module.exports = {
   buildOpenSearchAction,
   mergeOpenSearchUiActions,
   isKnownCategoryToken,
+  isBareAffirmative,
+  isBareNegative,
+  isShortFollowUp,
+  normalizePendingInvitation,
+  buildAffordabilityInvitation,
+  applyInvitationLifecycle,
+  maybeSetAffordabilityInvitation,
+  buildInvitationClarifyText,
+  buildDeterministicAffirmativeText,
+  isDeterministicAffirmativeCapability,
 };

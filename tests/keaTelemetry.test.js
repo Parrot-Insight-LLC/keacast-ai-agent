@@ -43,6 +43,7 @@ async function run() {
   check('grounding_source_count defaults 0', payload.grounding_source_count === 0);
   check('grounding_prefetch_ms defaults 0', payload.grounding_prefetch_ms === 0);
   check('continuation_used defaults false', payload.continuation_used === false);
+  check('affirmative_resolution defaults none', payload.affirmative_resolution === 'none');
   check('capability_confidence_bucket defaults null', payload.capability_confidence_bucket === null);
   check('response_character_count', payload.response_character_count === 250);
   check('summary_updated defaults false', payload.summary_updated === false);
@@ -223,6 +224,7 @@ async function run() {
     continuation_used: true,
     effective_capability: 'financial_lookup',
     pending_write_routing_reason: 'topic_switch',
+    affirmative_resolution: 'invitation_clarify',
     grounding_evidence_status: 'ok',
     historical_prefetch_page_count: 3,
     historical_prefetch_row_count: 120,
@@ -243,6 +245,7 @@ async function run() {
   check('continuation_used true', pG.continuation_used === true);
   check('effective_capability recorded', pG.effective_capability === 'financial_lookup');
   check('pending_write_routing_reason topic_switch', pG.pending_write_routing_reason === 'topic_switch');
+  check('affirmative_resolution recorded', pG.affirmative_resolution === 'invitation_clarify');
   check('grounding_evidence_status ok', pG.grounding_evidence_status === 'ok');
   check('historical_prefetch_page_count', pG.historical_prefetch_page_count === 3);
   check('historical_prefetch_row_count', pG.historical_prefetch_row_count === 120);

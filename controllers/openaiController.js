@@ -21,7 +21,7 @@ const { assertAccountAccess } = require('../services/keaAccountAccess');
 const { invalidateSelectedAccountToolCache } = require('../services/keaAccountCache');
 const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
 const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
-const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions } = require('../services/keaCapabilityRouter');
+const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions, applyInvitationLifecycle, maybeSetAffordabilityInvitation, isDeterministicAffirmativeCapability, buildDeterministicAffirmativeText } = require('../services/keaCapabilityRouter');
 const {
   resolveGroundingPolicy,
   isFailSoft,
@@ -1146,6 +1146,7 @@ function emptyDialogueState() {
     lastPurchaseDateAssumption: null,
     lastPurchaseDateAssumptionText: null,
     lastAccountId: null,
+    pendingInvitation: null,
     updatedAt: null,
   };
 }
@@ -1937,7 +1938,7 @@ function buildAvailableAccountsBlock(uiContext) {
 
 // Compact, hard-capped block describing the in-progress action for the system
 // prompt. Returns '' when there's nothing worth injecting.
-function buildDialogueStateBlock(state) {
+function buildDialogueStateBlock(state, { omitUiReferent } = {}) {
   if (!state || typeof state !== 'object') return '';
   const draft = state.draftTransaction || {};
   const hasDraft = draft && Object.keys(draft).some(
@@ -1947,7 +1948,7 @@ function buildDialogueStateBlock(state) {
   const hasGoalDraft = goalDraft && Object.keys(goalDraft).some(
     (k) => goalDraft[k] !== undefined && goalDraft[k] !== null && String(goalDraft[k]).trim() !== ''
   );
-  const uiRefLine = formatUiReferentLine(state.uiReferent);
+  const uiRefLine = omitUiReferent ? '' : formatUiReferentLine(state.uiReferent);
   if (!state.intent && !state.goalIntent && !hasDraft && !hasGoalDraft && !uiRefLine) return '';
 
   const lines = ['DIALOGUE STATE (background — an in-progress action / last UI referent, NOT a message from the user):'];
@@ -3185,6 +3186,8 @@ exports.chat = async (req, res) => {
         || pendingGoalConfirmationAtStart || goalDraftCompleteAtStart || goalProposalInTranscript,
       userAffirmative,
     });
+    applyInvitationLifecycle(dialogueState, phase1Route, { accountId: accountid });
+    const skipAzureAffirmative = isDeterministicAffirmativeCapability(phase1Route.capability);
     const phase1Policy = resolveGroundingPolicy(phase1Route, { message });
     let phase1Evidence = null;
     let groundingPrefetchMs = 0;
@@ -3231,6 +3234,7 @@ exports.chat = async (req, res) => {
       conversation_intent: phase1Route.capability,
       effective_capability: phase1Policy.effectiveCapability,
       pending_write_routing_reason: pendingWriteRouting.reason || 'none',
+      affirmative_resolution: phase1Route.affirmativeResolution || 'none',
       grounding_required: !!phase1Policy.groundingRequired,
       grounding_performed: phase1Performed,
       grounding_strategy: groundingStrategyFor({
@@ -3302,7 +3306,16 @@ exports.chat = async (req, res) => {
     let groundedEvidenceBlock = '';
     let systemContent;
 
-    if (macroOwnsTurn) {
+    if (skipAzureAffirmative) {
+      identityBlock = '';
+      writePolicyBlock = '';
+      productHelpPlaybookBlock = '';
+      planningPlaybookBlock = '';
+      baseSystem = '';
+      completeContext = '';
+      systemContent = '';
+      console.log('Chat endpoint: context block size: 0 chars (source: deterministic_affirmative)');
+    } else if (macroOwnsTurn) {
       const macroPrompt = buildMacroAnalysisPrompt({
         currentDate,
         firstName,
@@ -3338,9 +3351,10 @@ exports.chat = async (req, res) => {
 
       factsBlock = buildFactsBlock(longTermFacts);
       summaryBlock = buildSummaryBlock(rollingSummary);
-      dialogueBlock = buildDialogueStateBlock(dialogueState);
+      const omitUiForInvitation = !!phase1Route.invitationWriteHandoff;
+      dialogueBlock = buildDialogueStateBlock(dialogueState, { omitUiReferent: omitUiForInvitation });
       dateRefBlock = buildDateReferenceBlock(currentDate);
-      uiContextBlock = buildUiContextBlock(uiContextRaw);
+      uiContextBlock = omitUiForInvitation ? '' : buildUiContextBlock(uiContextRaw);
       availableAccountsBlock = buildAvailableAccountsBlock(uiContextRaw);
       recentWritesBlock = buildRecentWritesBlock(dialogueState);
       recentToolOutcomesBlock = buildRecentToolOutcomesBlock(dialogueState);
@@ -3352,6 +3366,9 @@ exports.chat = async (req, res) => {
           )
         : '';
       systemContent += `\n\n---\n${dateRefBlock}`;
+      if (omitUiForInvitation && phase1Route.slots && phase1Route.slots.amount != null && phase1Route.slots.purchaseDate) {
+        systemContent += `\n\n---\nINVITATION WRITE: The user accepted adding a $${Number(phase1Route.slots.amount)} expense on ${phase1Route.slots.purchaseDate} from the prior affordability invitation. Propose that exact expense. Do not use ON-SCREEN focusedEntity or last uiReferent. Stage a draft and ask for confirmation. Do not create yet.`;
+      }
       if (uiContextBlock) systemContent += `\n\n---\n${uiContextBlock}`;
       if (availableAccountsBlock) systemContent += `\n\n---\n${availableAccountsBlock}`;
       if (categoriesBlock) systemContent += `\n\n---\n${categoriesBlock}`;
@@ -3518,7 +3535,7 @@ exports.chat = async (req, res) => {
       && Array.isArray(phase1Evidence.source)
       && phase1Evidence.source.includes('user_transactions')
     );
-    const toolsForTurn = forceDirectAnswer
+    const toolsForTurn = (forceDirectAnswer || skipAzureAffirmative)
       ? []
       : filterFunctionSchemas(functionSchemas, {
           simulationMode,
@@ -3528,10 +3545,11 @@ exports.chat = async (req, res) => {
             parentCapability: phase1Route.parentCapability,
             pendingType: phase1Route.pendingType,
             omitGetUserTransactions: hasTxnEvidence,
+            omitFocusedEntityTools: !!phase1Route.invitationWriteHandoff,
             includeOpenTransactionSearch: !!phase1Route.wantsUiAction,
           }),
         });
-    const primaryToolChoice = forceDirectAnswer ? 'none' : 'auto';
+    const primaryToolChoice = (forceDirectAnswer || skipAzureAffirmative) ? 'none' : 'auto';
 
     const ctx = {
       userId,
@@ -3565,6 +3583,10 @@ exports.chat = async (req, res) => {
     let error;
     if (phase1FailSoft) {
       result = { content: failSoftTextFor(phase1Evidence) || FAIL_SOFT_TEXT };
+    } else if (skipAzureAffirmative) {
+      requestSize = 0;
+      console.log('Chat endpoint: deterministic affirmative, skipping Azure:', phase1Route.affirmativeResolution);
+      result = { content: buildDeterministicAffirmativeText(phase1Route) };
     } else {
       try {
       console.log('Attempting to get response with tools...');
@@ -3612,6 +3634,13 @@ exports.chat = async (req, res) => {
     });
     
     const finalText = stripCurrencyCommas(result.content || '## ❌ No Response\n\n**Sorry, no response generated.**');
+    maybeSetAffordabilityInvitation(dialogueState, {
+      route: phase1Route,
+      accountId: accountid,
+      failSoft: phase1FailSoft,
+      macroOwnsTurn,
+      evidence: phase1Evidence,
+    });
     // Full turn transcript BEFORE trimming — used to decide what overflows into
     // the rolling summary.
     const fullTurn = [

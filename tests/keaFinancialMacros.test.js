@@ -609,6 +609,14 @@ async function run() {
 
   const affordMacroDs = T.emptyDialogueState();
   affordMacroDs.lastCapability = 'affordability_or_planning';
+  affordMacroDs.pendingInvitation = {
+    kind: 'add_affordability_expense',
+    sourceCapability: 'affordability_or_planning',
+    amount: 800,
+    date: '2026-08-21',
+    accountId: '10',
+    status: 'offered',
+  };
   const cashflowMacroDs = T.emptyDialogueState();
   cashflowMacroDs.lastCapability = 'cashflow_analysis';
   const invitationExact = [{
@@ -642,6 +650,7 @@ async function run() {
     dialogueState: affordMacroDs,
   });
   check('yes after invitation is not confirmation', yesAfterInvite.capability !== 'confirmation');
+  check('yes after invitation is invitation_continuation', yesAfterInvite.capability === 'invitation_continuation');
   check('yes after invitation does not arm write', T.isWriteAllowed(
     false,
     false,

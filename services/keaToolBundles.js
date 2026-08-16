@@ -59,6 +59,8 @@ const BUNDLES = Object.freeze({
   cashflow_analysis: CASHFLOW_ANALYSIS,
   affordability_or_planning: AFFORDABILITY,
   mixed_macro: Object.freeze([]),
+  invitation_continuation: Object.freeze([]),
+  bare_affirmative_unresolved: Object.freeze([]),
   transaction_write: TRANSACTION_WRITE,
   goal_write: GOAL_WRITE,
   simulation: SIMULATION,
@@ -96,6 +98,9 @@ function allowedToolsFor(capability, opts = {}) {
   let out = names;
   if (opts.omitGetUserTransactions) {
     out = out.filter((n) => n !== 'getUserTransactions');
+  }
+  if (opts.omitFocusedEntityTools) {
+    out = out.filter((n) => n !== 'getFocusedEntityDetails' && n !== 'getUserTransactions');
   }
   if (opts.includeOpenTransactionSearch && !out.includes('openTransactionSearch')) {
     out = out.concat(['openTransactionSearch']);

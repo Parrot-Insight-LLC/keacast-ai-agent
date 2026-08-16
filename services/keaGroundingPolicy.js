@@ -19,6 +19,8 @@ const MATRIX = Object.freeze({
   cashflow_analysis: GROUNDING_REQUIRED,
   affordability_or_planning: GROUNDING_REQUIRED,
   mixed_macro: GROUNDING_REQUIRED,
+  invitation_continuation: GROUNDING_NONE,
+  bare_affirmative_unresolved: GROUNDING_NONE,
   continuation: 'inherited',
   unknown: GROUNDING_OPTIONAL,
 });

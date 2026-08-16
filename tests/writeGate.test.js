@@ -14,6 +14,7 @@ async function run() {
   check('goal write blocked when only tx draft is complete', T.isGoalWriteAllowed(false, false, true, false) === false);
   check('goal write allowed when goal draft complete + affirmative', T.isGoalWriteAllowed(false, true, true, false) === true);
   check('emptyDialogueState has continuation fields', T.emptyDialogueState().lastCapability === null);
+  check('emptyDialogueState has no pendingInvitation', T.emptyDialogueState().pendingInvitation === null);
   check('emptyDialogueState lastPeriod starts null', T.emptyDialogueState().lastPeriod === null);
   check('emptyDialogueState lastAccountId starts null', T.emptyDialogueState().lastAccountId === null);
   check('emptyDialogueState needsReconfirm starts false', T.emptyDialogueState().needsReconfirm === false);

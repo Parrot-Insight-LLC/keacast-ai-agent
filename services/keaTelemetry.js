@@ -84,6 +84,7 @@ function createKeaTelemetry({ requestId } = {}) {
     continuation_used: false,
     effective_capability: null,
     pending_write_routing_reason: 'none',
+    affirmative_resolution: 'none',
     grounding_evidence_status: null,
     historical_prefetch_page_count: null,
     historical_prefetch_row_count: null,
@@ -172,6 +173,9 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (typeof flags.pending_write_routing_reason === 'string') {
       grounding.pending_write_routing_reason = flags.pending_write_routing_reason;
+    }
+    if (typeof flags.affirmative_resolution === 'string') {
+      grounding.affirmative_resolution = flags.affirmative_resolution;
     }
     if (flags.grounding_evidence_status === null || typeof flags.grounding_evidence_status === 'string') {
       grounding.grounding_evidence_status = flags.grounding_evidence_status;
@@ -346,6 +350,7 @@ function createKeaTelemetry({ requestId } = {}) {
       continuation_used: !!grounding.continuation_used,
       effective_capability: grounding.effective_capability,
       pending_write_routing_reason: grounding.pending_write_routing_reason || 'none',
+      affirmative_resolution: grounding.affirmative_resolution || 'none',
       grounding_evidence_status: grounding.grounding_evidence_status,
       historical_prefetch_page_count: grounding.historical_prefetch_page_count,
       historical_prefetch_row_count: grounding.historical_prefetch_row_count,
