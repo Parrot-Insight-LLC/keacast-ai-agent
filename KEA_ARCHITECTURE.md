@@ -55,9 +55,13 @@ Write-gate conditions in `executeToolCalls` were not changed.
 No PII, amounts, JWT, or message text.
 
 - `requestId`
+- `authenticated` (`true` after cashflowAuth) / `userKey` (HMAC-SHA256 prefix of JWT `id`; never the raw user id)
 - `request_total_ms`
 - `context_build_ms`
-- `selected_account_fetch_ms`
+- `selected_account_fetch_ms` (whole selected-account span)
+- `selected_account_source` (`snapshot` | `tool-cache` | `tool-fresh` | `none`)
+- `selected_account_cache_hit` (`true`/`false` when Redis was consulted; `null` if that phase did not run)
+- `selected_account_cache_lookup_ms` / `selected_account_http_ms` / `selected_account_parse_ms` / `selected_account_cache_write_ms` (`null` if that phase did not run)
 - `memory_load_ms`
 - `azure_round_count`
 - `azure_round_<n>_ms`
@@ -66,11 +70,12 @@ No PII, amounts, JWT, or message text.
 - `tool_<name>_ms`
 - `input_tokens` / `cached_input_tokens` / `output_tokens` / `total_tokens` (from Azure `usage` when present)
 - `estimated_block_chars`
-- `write_proposed` / `write_confirmation_detected` / `write_attempted` / `write_committed` / `write_blocked`
+- `write_gate_armed_at_start` (proposal/write-gate state present at **turn start**; not “this turn created a proposal”). `write_proposed` is kept as an identical alias.
+- `write_confirmation_detected` / `write_attempted` / `write_committed` / `write_blocked`
 - `response_character_count`
 - Phase 1 placeholders: `grounding_required` (false), `grounding_performed` (false), `grounding_strategy` (null), `conversation_intent` (null), `response_mode` (`unspecified`)
 
-Clients may send `x-request-id`; the agent echoes `X-Request-Id` and includes `requestId` on the chat JSON.
+Clients may send `x-request-id`; the agent echoes `X-Request-Id` and includes `requestId` on the chat JSON. On a selected-account cache miss, the same id is forwarded as `X-Request-Id` on `POST /account/selected/:userid/:accid` so cashflow `selectedAccountPerf` can join the turn.
 
 ## Environment / configuration required
 

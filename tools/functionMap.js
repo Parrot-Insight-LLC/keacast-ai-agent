@@ -499,6 +499,7 @@ const functionMap = {
       token,
       body: args.body,
       timeoutMs: args.timeoutMs,
+      requestId: args.requestId ?? ctx?.requestId,
     });
     return result;
   },

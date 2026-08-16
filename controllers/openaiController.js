@@ -15,7 +15,7 @@ const {
   assembleBaseSystemPrompt,
   logSystemPromptBlockSizes,
 } = require('./systemPromptBuilders');
-const { createKeaTelemetry } = require('../services/keaTelemetry');
+const { createKeaTelemetry, identityFromCashflowAuth } = require('../services/keaTelemetry');
 const { injectTrustedIdentity } = require('../services/keaIdentity');
 const { assertAccountAccess } = require('../services/keaAccountAccess');
 const {
@@ -2738,6 +2738,7 @@ exports.chat = async (req, res) => {
     const token = req.cashflowToken || extracted.token;
     const userId = req.cashflowUser?.id ?? extracted.userId;
     const authHeader = req.headers.authorization || extracted.authHeader;
+    telemetry.setIdentity(identityFromCashflowAuth(req));
     console.log('Chat endpoint: Session key:', sessionKey, 'User ID:', userId);
 
     // When no session identifier was provided, buildSessionKey falls back to
@@ -2846,6 +2847,7 @@ exports.chat = async (req, res) => {
     const accountSnapshot = req.body?.accountSnapshot;
     let selectedAccount = null;
     let selectedAccountSource = 'none';
+    let selectedAccountCacheHit = null;
     telemetry.markStart('selected_account_fetch');
 
     if (
@@ -2859,37 +2861,56 @@ exports.chat = async (req, res) => {
 
     if (!selectedAccount && userId && token && accountid) {
       const toolCacheKey = selectedAccountToolCacheKey(userId, accountid);
+      selectedAccountCacheHit = false;
+      telemetry.markStart('selected_account_cache_lookup');
       try {
         const cached = await redis.get(toolCacheKey);
+        telemetry.markEnd('selected_account_cache_lookup');
         if (cached) {
-          selectedAccount = JSON.parse(cached);
-          selectedAccountSource = 'tool-cache';
-          console.log('Chat endpoint: Using cached selected-account blob for account', accountid);
+          telemetry.markStart('selected_account_parse');
+          try {
+            selectedAccount = JSON.parse(cached);
+            telemetry.markEnd('selected_account_parse');
+            selectedAccountSource = 'tool-cache';
+            selectedAccountCacheHit = true;
+            console.log('Chat endpoint: Using cached selected-account blob for account', accountid);
+          } catch (parseErr) {
+            telemetry.markEnd('selected_account_parse');
+            console.warn('Chat endpoint: tool-layer cache parse failed:', parseErr.message);
+            selectedAccount = null;
+            selectedAccountCacheHit = false;
+          }
         }
       } catch (e) {
+        telemetry.markEnd('selected_account_cache_lookup');
         console.warn('Chat endpoint: tool-layer cache read failed:', e.message);
       }
 
       if (!selectedAccount) {
         try {
-          const t0 = Date.now();
+          telemetry.markStart('selected_account_http');
           selectedAccount = await functionMap.getSelectedAccount({
             userId,
             accountId: accountid,
             token,
             body: { clientDate: currentDate },
             timeoutMs: SELECTED_ACCOUNT_TOOL_TIMEOUT_MS,
-          }, { userId, token, accountId: accountid });
-          console.log('Chat endpoint: tool-layer fetch completed in', Date.now() - t0, 'ms');
+            requestId: req.id,
+          }, { userId, token, accountId: accountid, requestId: req.id });
+          const httpMs = telemetry.markEnd('selected_account_http');
+          console.log('Chat endpoint: tool-layer fetch completed in', httpMs, 'ms');
           selectedAccountSource = 'tool-fresh';
           if (selectedAccount && typeof selectedAccount === 'object') {
+            telemetry.markStart('selected_account_cache_write');
             try {
               await redis.set(toolCacheKey, JSON.stringify(selectedAccount), 'EX', SELECTED_ACCOUNT_TOOL_TTL);
             } catch (e) {
               console.warn('Chat endpoint: tool-layer cache write failed:', e.message);
             }
+            telemetry.markEnd('selected_account_cache_write');
           }
         } catch (toolErr) {
+          telemetry.markEnd('selected_account_http');
           console.warn(
             'Chat endpoint: tool-layer fetch failed —',
             'status:', toolErr?.response?.status,
@@ -2902,6 +2923,10 @@ exports.chat = async (req, res) => {
       console.log('Chat endpoint: Skipping account preload (missing userId, token, or accountid)');
     }
     telemetry.markEnd('selected_account_fetch');
+    telemetry.setSelectedAccountMeta({
+      source: selectedAccountSource,
+      cacheHit: selectedAccountCacheHit,
+    });
 
     const hasAccount = !!(
       selectedAccount &&
@@ -3262,8 +3287,10 @@ exports.chat = async (req, res) => {
     };
 
     telemetry.setResponseCharacterCount(finalText.length);
+    const writeGateArmedAtStart = pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript;
     telemetry.recordWriteFlags({
-      write_proposed: pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript,
+      write_gate_armed_at_start: writeGateArmedAtStart,
+      write_proposed: writeGateArmedAtStart,
       write_confirmation_detected: userAffirmative,
       write_attempted: writes.length > 0 || blocked.length > 0,
       write_committed: writes.length > 0,
@@ -3567,7 +3594,8 @@ exports.summarization = async (req, res) => {
             token,
             body: { clientDate },
             timeoutMs: SELECTED_ACCOUNT_TOOL_TIMEOUT_MS,
-          });
+            requestId: req.id,
+          }, { userId, token, accountId, requestId: req.id });
           console.log('Summarization: Tool-layer fetch completed in', Date.now() - t0, 'ms');
           selectedAccountSource = 'tool-fresh';
           if (selectedAccount && typeof selectedAccount === 'object') {
@@ -5226,6 +5254,7 @@ exports.__testables = {
   pickTopSpendingCategories,
   redactChatBodyForLog,
   injectTrustedIdentity,
+  buildSessionKey,
   ACCOUNT_SCOPED_READ_TOOLS: Array.from(ACCOUNT_SCOPED_READ_TOOLS),
   // Mirrors the write-gate condition enforced inside executeToolCalls: armed by
   // an explicit pendingConfirmation flag, a complete draft staged earlier, OR a

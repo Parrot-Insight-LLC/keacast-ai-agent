@@ -76,10 +76,18 @@ async function getSelectedKeacastAccounts({ userId, token, body }) {
 //
 // Use this when an LLM endpoint needs ground-truth context for ONE selected
 // account without paying the multi-account cost of getSelectedKeacastAccounts.
-async function getSelectedAccount({ userId, accountId, token, body, timeoutMs }) {
-  const url = `${BASE_URL}/account/selected/${userId}/${accountId}`;
+function buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId } = {}) {
   const config = AUTH_HEADER(token);
   if (Number.isFinite(timeoutMs)) config.timeout = timeoutMs;
+  if (requestId != null && String(requestId).trim() !== '') {
+    config.headers['X-Request-Id'] = String(requestId).trim();
+  }
+  return config;
+}
+
+async function getSelectedAccount({ userId, accountId, token, body, timeoutMs, requestId }) {
+  const url = `${BASE_URL}/account/selected/${userId}/${accountId}`;
+  const config = buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId });
   const response = await axios.post(url, body || {}, config);
   return response.data;
 }
@@ -238,5 +246,6 @@ module.exports = {
   deleteGoal,
   rememberFact,
   recallFacts,
+  buildSelectedAccountAxiosConfig,
   functionMap // 👈 Exported for OpenAI tool handler integration
 };

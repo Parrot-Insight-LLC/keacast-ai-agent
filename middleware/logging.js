@@ -1,5 +1,14 @@
 const pinoHttp = require('pino-http');
 
+// Identity belongs on kea_chat_turn after cashflowAuth (authenticated + hashed
+// userKey). Do not bind userId/sessionId here: this runs before body parse and
+// JWT verify, which produced the misleading userId:"anon" / sessionId:null.
+function buildPinoCustomProps(req) {
+  return {
+    requestId: req && req.id != null ? req.id : null,
+  };
+}
+
 const logger = pinoHttp({
   // redact secrets in logs
   redact: {
@@ -12,11 +21,7 @@ const logger = pinoHttp({
     if (res.statusCode >= 400) return 'warn';
     return 'info';
   },
-  customProps: (req) => ({
-    requestId: req.id,
-    userId: req.user?.id || 'anon',
-    sessionId: req.body?.sessionId || null
-  }),
+  customProps: (req) => buildPinoCustomProps(req),
   serializers: {
     // log only minimal request/response for signal
     req(req) { return { id: req.id, method: req.method, url: req.url }; },
@@ -24,4 +29,5 @@ const logger = pinoHttp({
   }
 });
 
+logger.buildPinoCustomProps = buildPinoCustomProps;
 module.exports = logger;
