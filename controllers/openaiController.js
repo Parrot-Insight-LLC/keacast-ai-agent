@@ -40,7 +40,6 @@ const DIALOGUE_STATE_MAX_CHARS = 900;    // hard cap on the injected dialogue bl
 // turns older than the verbatim window so long chats stay coherent + lean.
 const SUMMARY_TTL = 604800;              // 1 week (matches MEMORY_TTL)
 const SUMMARY_MAX_CHARS = 1200;          // hard cap on the injected summary block
-const SUMMARY_TRIGGER = 16;              // start summarizing once history exceeds this many turns
 // Long-term durable facts (fetched from cashflow-backend-api) budget.
 const FACTS_MAX_CHARS = 1200;            // hard cap on the injected long-term-facts block
 const GOALS_BLOCK_MAX_CHARS = 1100;      // hard cap on the injected active-goals block
@@ -1871,26 +1870,103 @@ function buildSummaryBlock(summary) {
   return truncateText(`CONVERSATION SUMMARY SO FAR (background — earlier turns condensed):\n${s}`, SUMMARY_MAX_CHARS);
 }
 
+/**
+ * Messages that have actually left the MAX_MEMORY verbatim window.
+ * Must not use a negative slice end (that re-summarized in-window turns at n=17–19).
+ */
+function computeRollingSummaryOverflow(fullTurn, maxMemory = MAX_MEMORY) {
+  if (!Array.isArray(fullTurn) || fullTurn.length <= maxMemory) return [];
+  return fullTurn.slice(0, fullTurn.length - maxMemory);
+}
+
+function capRecentHistory(fullTurn, maxMemory = MAX_MEMORY) {
+  if (!Array.isArray(fullTurn)) return [];
+  return fullTurn.slice(-maxMemory);
+}
+
+/**
+ * History + dialogue persist, then HTTP response, then rolling-summary Azure.
+ * Summary failures are swallowed here so they cannot mutate the already-sent response.
+ */
+async function persistAnswerThenRefreshSummary({
+  saveHistory,
+  saveDialogue,
+  sendResponse,
+  refreshSummary,
+  onSummaryError,
+} = {}) {
+  if (typeof saveHistory === 'function') await saveHistory();
+  if (typeof saveDialogue === 'function') await saveDialogue();
+  if (typeof sendResponse === 'function') sendResponse();
+  try {
+    if (typeof refreshSummary === 'function') await refreshSummary();
+  } catch (e) {
+    if (typeof onSummaryError === 'function') onSummaryError(e);
+    else console.warn('Chat endpoint: rolling summary refresh failed (fail-soft):', e && e.message);
+  }
+}
+
+async function refreshRollingSummary({
+  userId,
+  overflow,
+  rollingSummary,
+  telemetry,
+  generate = generateRollingSummary,
+  redisClient = redis,
+} = {}) {
+  const overflowTurns = Array.isArray(overflow) ? overflow : [];
+  if (telemetry && typeof telemetry.setRollingSummaryMeta === 'function') {
+    telemetry.setRollingSummaryMeta({
+      overflowMessageCount: overflowTurns.length,
+      rollingSummaryChars: (rollingSummary || '').length,
+    });
+  }
+  if (!userId || overflowTurns.length === 0) {
+    if (telemetry && typeof telemetry.setSummaryUpdated === 'function') {
+      telemetry.setSummaryUpdated(false);
+    }
+    return { summaryUpdated: false, summaryFailed: false };
+  }
+  if (telemetry && typeof telemetry.setSummaryUpdated === 'function') {
+    telemetry.setSummaryUpdated(true);
+  }
+  if (telemetry && typeof telemetry.markStart === 'function') telemetry.markStart('summary_update');
+  try {
+    const newSummary = await generate(rollingSummary, overflowTurns);
+    if (newSummary && newSummary !== rollingSummary) {
+      await redisClient.set(buildSummaryKey(userId), newSummary, 'EX', SUMMARY_TTL);
+      if (telemetry && typeof telemetry.setRollingSummaryMeta === 'function') {
+        telemetry.setRollingSummaryMeta({ rollingSummaryChars: String(newSummary).length });
+      }
+    }
+    return { summaryUpdated: true, summaryFailed: false };
+  } catch (e) {
+    if (telemetry && typeof telemetry.setSummaryFailed === 'function') {
+      telemetry.setSummaryFailed(true);
+    }
+    console.warn('Chat endpoint: rolling summary refresh failed (fail-soft):', e && e.message);
+    return { summaryUpdated: true, summaryFailed: true };
+  } finally {
+    if (telemetry && typeof telemetry.markEnd === 'function') telemetry.markEnd('summary_update');
+  }
+}
+
 // Merge the prior summary with the turns that fell out of the verbatim window
-// into an updated compact summary. Fail-soft: returns the prior summary on error.
+// into an updated compact summary. Throws on Azure failure so the post-response
+// wrapper can set summary_failed without sending a second HTTP body.
 async function generateRollingSummary(prevSummary, overflowTurns) {
   if (!Array.isArray(overflowTurns) || overflowTurns.length === 0) return prevSummary || '';
-  try {
-    const convoText = overflowTurns
-      .map((m) => `${m.role}: ${String(m.content || '').replace(/\s+/g, ' ').slice(0, 500)}`)
-      .join('\n');
-    const sys = 'You maintain a compact running memory of a personal-finance chat between a user and the Kea Assistant. Merge the PRIOR SUMMARY with the NEW TURNS into a single updated summary under 900 characters. Preserve durable, actionable facts: goals, planned purchases and their estimated amounts/dates, decisions, stated preferences, and any transaction that was proposed or created. Drop pleasantries and small talk. Write terse notes, not prose.';
-    const usr = `PRIOR SUMMARY:\n${prevSummary || '(none)'}\n\nNEW TURNS:\n${convoText}\n\nUpdated summary:`;
-    const resp = await queryAzureOpenAI(
-      [{ role: 'system', content: sys }, { role: 'user', content: usr }],
-      { tool_choice: 'none', temperature: 0.2, max_tokens: 320 }
-    );
-    const out = resp?.choices?.[0]?.message?.content || '';
-    return truncateText(out.trim(), SUMMARY_MAX_CHARS) || (prevSummary || '');
-  } catch (e) {
-    console.warn('Rolling summary generation failed (fail-soft):', e.message);
-    return prevSummary || '';
-  }
+  const convoText = overflowTurns
+    .map((m) => `${m.role}: ${String(m.content || '').replace(/\s+/g, ' ').slice(0, 500)}`)
+    .join('\n');
+  const sys = 'You maintain a compact running memory of a personal-finance chat between a user and the Kea Assistant. Merge the PRIOR SUMMARY with the NEW TURNS into a single updated summary under 900 characters. Preserve durable, actionable facts: goals, planned purchases and their estimated amounts/dates, decisions, stated preferences, and any transaction that was proposed or created. Drop pleasantries and small talk. Write terse notes, not prose.';
+  const usr = `PRIOR SUMMARY:\n${prevSummary || '(none)'}\n\nNEW TURNS:\n${convoText}\n\nUpdated summary:`;
+  const resp = await queryAzureOpenAI(
+    [{ role: 'system', content: sys }, { role: 'user', content: usr }],
+    { tool_choice: 'none', temperature: 0.2, max_tokens: 320 }
+  );
+  const out = resp?.choices?.[0]?.message?.content || '';
+  return truncateText(out.trim(), SUMMARY_MAX_CHARS) || (prevSummary || '');
 }
 
 // ─── Kea Assistant: long-term memory (durable facts) helpers ────────────────
@@ -3242,50 +3318,15 @@ exports.chat = async (req, res) => {
       { role: 'user', content: message },
       { role: 'assistant', content: finalText }
     ];
-    const updatedHistory = fullTurn.slice(-MAX_MEMORY);
-
-    telemetry.markStart('history_save');
-    if (hasScopedSession) {
-      try {
-        await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
-        console.log('Chat endpoint: Saved updated history to Redis');
-      } catch (redisError) {
-        console.warn('Chat endpoint: Failed to save history to Redis:', redisError.message);
-      }
+    const overflow = computeRollingSummaryOverflow(fullTurn, MAX_MEMORY);
+    const updatedHistory = capRecentHistory(fullTurn, MAX_MEMORY);
+    if (typeof telemetry.setRollingSummaryMeta === 'function') {
+      telemetry.setRollingSummaryMeta({
+        fullTurnMessageCount: fullTurn.length,
+        overflowMessageCount: overflow.length,
+        rollingSummaryChars: (rollingSummary || '').length,
+      });
     }
-    telemetry.markEnd('history_save');
-
-    // Persist dialogue state (mutated in-place by executeToolCalls). Fail-soft.
-    telemetry.markStart('dialogue_state_save');
-    await saveDialogueState(userId, ctx.dialogueState || dialogueState);
-    telemetry.markEnd('dialogue_state_save');
-
-    // Refresh the rolling summary once the conversation grows past the trigger:
-    // fold the turns that fell OUT of the verbatim window into the summary so
-    // long chats stay coherent without unbounded token growth. Fail-soft.
-    // Phase 0.6C: measure the call; do not change SUMMARY_TRIGGER / MAX_MEMORY.
-    let summaryUpdated = false;
-    try {
-      if (userId && fullTurn.length > SUMMARY_TRIGGER) {
-        const overflow = fullTurn.slice(0, fullTurn.length - MAX_MEMORY);
-        if (overflow.length > 0) {
-          summaryUpdated = true;
-          telemetry.markStart('summary_update');
-          try {
-            const newSummary = await generateRollingSummary(rollingSummary, overflow);
-            if (newSummary && newSummary !== rollingSummary) {
-              await redis.set(buildSummaryKey(userId), newSummary, 'EX', SUMMARY_TTL);
-              console.log('Chat endpoint: rolling summary refreshed (', newSummary.length, 'chars )');
-            }
-          } finally {
-            telemetry.markEnd('summary_update');
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Chat endpoint: rolling summary refresh failed (fail-soft):', e.message);
-    }
-    telemetry.setSummaryUpdated(summaryUpdated);
 
     // Structured outcome of any real writes this turn. The UI keys off
     // reloadSelectedAccount to refresh account data (instead of sniffing the
@@ -3313,9 +3354,8 @@ exports.chat = async (req, res) => {
       write_committed: writes.length > 0,
       write_blocked: blocked.length > 0,
     });
-    telemetry.emit(req.log);
 
-    res.json({
+    const responsePayload = {
       response: finalText,
       memoryUsed: updatedHistory.length,
       contextLoaded: hasAccount,
@@ -3330,14 +3370,50 @@ exports.chat = async (req, res) => {
       uiActions: Array.isArray(result?.uiActions) ? result.uiActions : [],
       transactionResult,
       error: result?.error,
+    };
+
+    await persistAnswerThenRefreshSummary({
+      saveHistory: async () => {
+        telemetry.markStart('history_save');
+        if (hasScopedSession) {
+          try {
+            await redis.set(sessionKey, JSON.stringify(updatedHistory), 'EX', MEMORY_TTL);
+            console.log('Chat endpoint: Saved updated history to Redis');
+          } catch (redisError) {
+            console.warn('Chat endpoint: Failed to save history to Redis:', redisError.message);
+          }
+        }
+        telemetry.markEnd('history_save');
+      },
+      saveDialogue: async () => {
+        telemetry.markStart('dialogue_state_save');
+        await saveDialogueState(userId, ctx.dialogueState || dialogueState);
+        telemetry.markEnd('dialogue_state_save');
+      },
+      sendResponse: () => {
+        res.json(responsePayload);
+        if (typeof telemetry.markResponseSent === 'function') telemetry.markResponseSent();
+      },
+      refreshSummary: () => refreshRollingSummary({
+        userId,
+        overflow,
+        rollingSummary,
+        telemetry,
+      }),
+      onSummaryError: () => {
+        if (typeof telemetry.setSummaryFailed === 'function') telemetry.setSummaryFailed(true);
+      },
     });
+    telemetry.emit(req.log);
 
   } catch (error) {
     console.error('Chat endpoint error:', error);
     console.error('Error stack:', error.stack);
     try { telemetry.emit(req.log); } catch (e) { /* ignore */ }
-    
-    // Handle specific error types
+
+    if (res.headersSent) {
+      return;
+    }
     if (error.code === 'ECONNREFUSED') {
       return res.status(503).json({ error: 'Service temporarily unavailable - Redis connection failed', requestId: req.id });
     }
@@ -5246,12 +5322,18 @@ exports.__testables = {
   formatUiReferentLine,
   buildFactsBlock,
   buildSummaryBlock,
+  buildSummaryKey,
   buildGoalsBlock,
   pickTopSpendingCategories,
   buildChatAccountContext,
   redactChatBodyForLog,
   injectTrustedIdentity,
   buildSessionKey,
+  normalizeClientHistory,
+  computeRollingSummaryOverflow,
+  capRecentHistory,
+  persistAnswerThenRefreshSummary,
+  refreshRollingSummary,
   ACCOUNT_SCOPED_READ_TOOLS: Array.from(ACCOUNT_SCOPED_READ_TOOLS),
   // Mirrors the write-gate condition enforced inside executeToolCalls: armed by
   // an explicit pendingConfirmation flag, a complete draft staged earlier, OR a
@@ -5266,7 +5348,6 @@ exports.__testables = {
   constants: {
     MAX_MEMORY,
     MAX_TOOL_ROUNDS,
-    SUMMARY_TRIGGER,
     DIALOGUE_STATE_MAX_CHARS,
     SUMMARY_MAX_CHARS,
     FACTS_MAX_CHARS,

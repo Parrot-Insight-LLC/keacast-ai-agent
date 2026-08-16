@@ -66,6 +66,11 @@ function createKeaTelemetry({ requestId } = {}) {
   let selected_account_full_payload_bytes = null;
   let selected_account_payload_key_bytes = null;
   let summary_updated = false;
+  let summary_failed = false;
+  let full_turn_message_count = null;
+  let summary_overflow_message_count = 0;
+  let rolling_summary_chars = 0;
+  let response_sent_ms = null;
 
   function markStart(name) {
     marks[name] = { t0: Date.now() };
@@ -116,6 +121,30 @@ function createKeaTelemetry({ requestId } = {}) {
 
   function setSummaryUpdated(ran) {
     summary_updated = !!ran;
+  }
+
+  function setSummaryFailed(failed) {
+    summary_failed = !!failed;
+  }
+
+  function markResponseSent() {
+    response_sent_ms = Date.now() - startedAt;
+  }
+
+  function setRollingSummaryMeta({
+    fullTurnMessageCount,
+    overflowMessageCount,
+    rollingSummaryChars,
+  } = {}) {
+    if (fullTurnMessageCount != null) {
+      full_turn_message_count = Number(fullTurnMessageCount) || 0;
+    }
+    if (overflowMessageCount != null) {
+      summary_overflow_message_count = Number(overflowMessageCount) || 0;
+    }
+    if (rollingSummaryChars != null) {
+      rolling_summary_chars = Number(rollingSummaryChars) || 0;
+    }
   }
 
   async function measureSpan(name, fn) {
@@ -176,10 +205,15 @@ function createKeaTelemetry({ requestId } = {}) {
       selected_account_full_payload_bytes,
       selected_account_payload_key_bytes,
       memory_load_ms: marks.memory_load?.ms ?? null,
+      response_sent_ms,
       summary_updated: !!summary_updated,
+      summary_failed: !!summary_failed,
       summary_update_ms: marks.summary_update?.ms ?? 0,
       history_save_ms: marks.history_save?.ms ?? 0,
       dialogue_state_save_ms: marks.dialogue_state_save?.ms ?? 0,
+      full_turn_message_count,
+      summary_overflow_message_count,
+      rolling_summary_chars,
       azure_round_count,
       tool_call_count: tools.length,
       tool_execution_total_ms: tools.reduce((sum, t) => sum + t.ms, 0),
@@ -236,6 +270,9 @@ function createKeaTelemetry({ requestId } = {}) {
     setIdentity,
     setSelectedAccountMeta,
     setSummaryUpdated,
+    setSummaryFailed,
+    setRollingSummaryMeta,
+    markResponseSent,
     measureSpan,
     toPayload,
     emit,

@@ -15,6 +15,7 @@ const suites = [
   './selectedAccountObservability.test.js',
   './corsPreflight.test.js',
   './writeGate.test.js',
+  './rollingSummary.test.js',
 ];
 
 async function main() {

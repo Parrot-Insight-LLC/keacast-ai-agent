@@ -45,6 +45,11 @@ async function run() {
   check('summary_update_ms is 0 when no summary call', payload.summary_update_ms === 0);
   check('history_save_ms defaults 0', payload.history_save_ms === 0);
   check('dialogue_state_save_ms defaults 0', payload.dialogue_state_save_ms === 0);
+  check('summary_failed defaults false', payload.summary_failed === false);
+  check('response_sent_ms null until marked', payload.response_sent_ms === null);
+  check('full_turn_message_count null until set', payload.full_turn_message_count === null);
+  check('summary_overflow_message_count defaults 0', payload.summary_overflow_message_count === 0);
+  check('rolling_summary_chars defaults 0', payload.rolling_summary_chars === 0);
   check('no summary content field', payload.summary === undefined && payload.rolling_summary === undefined && payload.summary_text === undefined);
 
   section('keaTelemetry selected-account fields omitted when unused');
@@ -182,6 +187,23 @@ async function run() {
   check('summary_update_ms measures the call', typeof pSummary.summary_update_ms === 'number' && pSummary.summary_update_ms >= 15);
   check('summary_update_ms is not mixed into azure_round_1', pSummary.azure_round_1_ms === undefined);
   check('summary_updated true still has no summary content', pSummary.summary === undefined && pSummary.rolling_summary === undefined);
+
+  const tResp = createKeaTelemetry({ requestId: 'req-response-sent' });
+  tResp.markResponseSent();
+  tResp.setRollingSummaryMeta({
+    fullTurnMessageCount: 21,
+    overflowMessageCount: 1,
+    rollingSummaryChars: 80,
+  });
+  tResp.setSummaryFailed(true);
+  const pResp = tResp.toPayload();
+  check('response_sent_ms is a number after mark', typeof pResp.response_sent_ms === 'number' && pResp.response_sent_ms >= 0);
+  check('full_turn_message_count recorded', pResp.full_turn_message_count === 21);
+  check('summary_overflow_message_count recorded', pResp.summary_overflow_message_count === 1);
+  check('rolling_summary_chars recorded', pResp.rolling_summary_chars === 80);
+  check('summary_failed true when set', pResp.summary_failed === true);
+  check('response_sent payload has no message text', pResp.message === undefined && pResp.summary === undefined);
+  check('request_total_ms still present', typeof pResp.request_total_ms === 'number');
 
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;
