@@ -22,7 +22,7 @@ const { assertAccountAccess } = require('../services/keaAccountAccess');
 const { invalidateSelectedAccountToolCache } = require('../services/keaAccountCache');
 const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
 const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
-const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions, applyInvitationLifecycle, maybeSetAffordabilityInvitation, shouldSkipAzureForRoute, buildDeterministicAffirmativeText } = require('../services/keaCapabilityRouter');
+const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions, applyInvitationLifecycle, applyRepeatWriteLifecycle, maybeSetAffordabilityInvitation, shouldSkipAzureForRoute, buildDeterministicAffirmativeText } = require('../services/keaCapabilityRouter');
 const {
   resolveGroundingPolicy,
   isFailSoft,
@@ -1514,6 +1514,8 @@ function isAffirmativeMessage(message, draft) {
     /\bsounds good\b/, /\block it in\b/, /\bproceed\b/, /\bok(ay)?\b/, /\bsure\b/, /\babsolutely\b/,
     /\b(please )?add (it|that|this)\b/, /\badd this (forecast|transaction)\b/, /\bcreate it\b/,
     /\blog it\b/, /\bput (it|that) in\b/, /\bthat'?s? (right|correct)\b/, /\blooks good\b/,
+    /\b(this|that|it) is (correct|right)\b/, /\blooks (right|correct)\b/, /\bsounds right\b/,
+    /\b(this|that) looks (right|correct|good)\b/,
     // Natural confirmations users actually type (added after observing the
     // carpet-replacement flow miss "this definitely works for me").
     /\bworks for me\b/, /\b(this|that|it) works\b/, /\bdefinitely\b/, /\bperfect\b/,
@@ -1671,6 +1673,27 @@ function commitMatchesExpected(committed, expected) {
   return { ok: mismatched.length === 0, mismatched };
 }
 
+function looksLikeConcreteWriteProposal(text) {
+  const t = String(text || '');
+  const asksConfirm = /\bconfirm\?\b/i.test(t)
+    || /\bplease confirm\b/i.test(t)
+    || /\bwould you like me to add this exact transaction\b/i.test(t);
+  if (!asksConfirm) return false;
+  const hasFieldList = /\bamount\s*:/i.test(t)
+    && (/\bfrequency\s*:/i.test(t) || /\bcategory\s*:/i.test(t));
+  const hasDollar = /\$\s*\d/.test(t);
+  const hasCadence = /\b(frequency|one-time|once|weekly|monthly|category)\b/i.test(t);
+  return hasFieldList || (hasDollar && hasCadence);
+}
+
+function enforceProposalStateInvariant(content, dialogueState) {
+  const staged = !!(dialogueState
+    && dialogueState.pendingConfirmation === true
+    && isDraftProposable(dialogueState.draftTransaction));
+  if (!looksLikeConcreteWriteProposal(content) || staged) return content;
+  return 'Sure — what would you like me to continue with?';
+}
+
 function buildCreateAckLines(write, { accountName } = {}) {
   const title = String((write && write.title) || '').trim() || 'transaction';
   const amount = formatCommitAmount(write && write.amount);
@@ -1716,10 +1739,11 @@ function buildDuplicateCreateAck(recentWrite, { accountName } = {}) {
   return lines.join('\n');
 }
 
-// After a successful createTransaction (or in-turn duplicate replay), skip the
-// free-form Azure narration round. Cashflow create does not detect DB duplicates;
-// duplicate here is agent lastCommitSignature protection only.
-function resolvePostCreateAck({ createMeta, sawCreateDuplicate, recentWrites, accountName } = {}) {
+// After a successful createTransaction (or same-request technical retry), skip
+// the free-form Azure narration round. Cashflow create does not detect DB
+// duplicates; duplicate here is request-local createTransaction retry protection
+// only — Redis lastCommitSignature is not used to suppress a later user turn.
+function resolvePostCreateAck({ createMeta, sawCreateDuplicate, accountName } = {}) {
   const meta = Array.isArray(createMeta) && createMeta.length > 0
     ? createMeta[createMeta.length - 1]
     : null;
@@ -1732,20 +1756,20 @@ function resolvePostCreateAck({ createMeta, sawCreateDuplicate, recentWrites, ac
         mode: 'deterministic_commit',
       };
     }
+    if (sawCreateDuplicate) {
+      return {
+        content: buildDuplicateCreateAck(meta.write, { accountName }),
+        mode: 'duplicate_commit',
+      };
+    }
     return {
       content: buildCreateAckLines(meta.write, { accountName }),
       mode: 'deterministic_commit',
     };
   }
   if (sawCreateDuplicate) {
-    const writes = Array.isArray(recentWrites) ? recentWrites : [];
-    let last = null;
-    for (let i = writes.length - 1; i >= 0; i--) {
-      if (writes[i] && writes[i].action === 'create') { last = writes[i]; break; }
-    }
-    if (!last && writes.length > 0) last = writes[writes.length - 1];
     return {
-      content: buildDuplicateCreateAck(last, { accountName }),
+      content: buildDuplicateCreateAck(null, { accountName }),
       mode: 'duplicate_commit',
     };
   }
@@ -2295,10 +2319,13 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   // Client-side UI actions requested this turn (e.g. open the transaction
   // search panel). Returned alongside the prose for the frontend to execute.
   const uiActions = [];
-  // Phase 2.8: successful createTransaction (or in-turn duplicate) skips the
-  // free-form Azure narration round. createMeta holds committed create records
-  // plus the expected draft/effectiveArgs snapshot for proposal-vs-commit check.
+  // Phase 2.8: successful createTransaction (or same-request technical retry)
+  // skips the free-form Azure narration round. createMeta holds committed create
+  // records plus the expected draft/effectiveArgs snapshot for proposal-vs-commit
+  // check. committedSignaturesThisTurn is request-local only — it must not be
+  // loaded from Redis lastCommitSignature.
   const createMeta = [];
+  const committedSignaturesThisTurn = new Set();
   let sawCreateDuplicate = false;
 
   // Execute one batch of tool calls, applying dialogue-state handling + the
@@ -2750,12 +2777,25 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         // the model asked for, and what we actually sent to the backend.
         console.log(`[write-audit] tool=${name} user=${ctx.userId} account=${ctx.accountId} draft=${JSON.stringify(state.draftTransaction)} modelArgs=${JSON.stringify(args)} effectiveArgs=${JSON.stringify(effectiveArgs)}`);
 
-        // Idempotency: refuse a duplicate write within the same turn/session.
-        // This is agent in-turn protection via lastCommitSignature, not a
-        // Cashflow backend duplicate/existing-record check.
+        // Technical-retry idempotency: refuse a second createTransaction in
+        // THIS confirmation HTTP/tool loop. Do not use Redis-persisted
+        // lastCommitSignature — a later user turn with similar fields is a
+        // new write operation (including an intentional identical second
+        // expense). Cashflow createTransaction still has no HTTP idempotency
+        // key; a true transport retry outside this loop can still insert two rows.
         const sig = draftSignature(effectiveArgs);
-        if (sig && state.lastCommitSignature && sig === state.lastCommitSignature) {
-          if (name === 'createTransaction') sawCreateDuplicate = true;
+        const isCreate = name === 'createTransaction';
+        const isTechnicalRetry = isCreate
+          ? (sig && committedSignaturesThisTurn.has(sig))
+          : (sig && state.lastCommitSignature && sig === state.lastCommitSignature);
+        if (isTechnicalRetry) {
+          if (isCreate) {
+            sawCreateDuplicate = true;
+            state.pendingConfirmation = false;
+            state.draftTransaction = {};
+            state.needsReconfirm = false;
+            state.intent = null;
+          }
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             duplicate: true,
             message: 'That transaction was just created; not creating it again.'
@@ -2783,6 +2823,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
           // Mark committed + clear the draft so a re-called round can't refire.
           state.lastCommitSignature = sig;
+          if (isCreate && sig) committedSignaturesThisTurn.add(sig);
           state.committed = true;
           state.pendingConfirmation = false;
           state.draftTransaction = {};
@@ -3041,7 +3082,6 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     const postCreateAck = resolvePostCreateAck({
       createMeta,
       sawCreateDuplicate,
-      recentWrites: state.recentWrites,
       accountName: ctx.accountName,
     });
     if (postCreateAck) {
@@ -3354,6 +3394,7 @@ exports.chat = async (req, res) => {
       userAffirmative,
     });
     applyInvitationLifecycle(dialogueState, phase1Route, { accountId: accountid, categoryNames });
+    applyRepeatWriteLifecycle(dialogueState, phase1Route);
     const skipAzureAffirmative = shouldSkipAzureForRoute(phase1Route);
     const phase1Policy = resolveGroundingPolicy(phase1Route, { message });
     let phase1Evidence = null;
@@ -3518,7 +3559,7 @@ exports.chat = async (req, res) => {
 
       factsBlock = buildFactsBlock(longTermFacts);
       summaryBlock = buildSummaryBlock(rollingSummary);
-      const omitUiForInvitation = !!phase1Route.invitationWriteHandoff;
+      const omitUiForInvitation = !!phase1Route.invitationWriteHandoff || !!phase1Route.repeatWriteHandoff;
       dialogueBlock = buildDialogueStateBlock(dialogueState, { omitUiReferent: omitUiForInvitation });
       dateRefBlock = buildDateReferenceBlock(currentDate);
       uiContextBlock = omitUiForInvitation ? '' : buildUiContextBlock(uiContextRaw);
@@ -3587,6 +3628,11 @@ exports.chat = async (req, res) => {
         systemContent += `\n\n---\nWHAT-IF SIMULATIONS: When the user asks a hypothetical "what if" question about adding, changing, or removing a transaction (rather than asking you to actually do it), use the proposeSimulation* tools (proposeSimulationAdd / proposeSimulationModify / proposeSimulationRemove). They stage the change on the user's calendar as a reviewable simulation without writing data and need no confirmation turn. Only use createTransaction/updateTransaction/deleteTransaction when the user wants the REAL change made (propose→confirm→write). A prior simulation op is NOT confirmation for a real write — if they later ask to make it permanent, start a fresh propose→confirm cycle.`;
       } else {
         systemContent += `\n\n---\nDo not use the proposeSimulation* tools — this user's plan does not include Simulation Mode. For hypothetical questions, explain the impact in prose instead.`;
+      }
+      if (phase1Route.capability === 'unknown'
+        && dialogueState.pendingConfirmation !== true
+        && !isDraftProposable(dialogueState.draftTransaction)) {
+        systemContent += `\n\n---\nYou do not have transaction-write tools on this turn and there is no staged proposal. Do not present a transaction as ready for confirmation, do not say "Confirm?" or "please confirm" about adding one, and do not claim you added a transaction.`;
       }
     }
 
@@ -3712,7 +3758,7 @@ exports.chat = async (req, res) => {
             parentCapability: phase1Route.parentCapability,
             pendingType: phase1Route.pendingType,
             omitGetUserTransactions: hasTxnEvidence,
-            omitFocusedEntityTools: !!phase1Route.invitationWriteHandoff,
+            omitFocusedEntityTools: !!phase1Route.invitationWriteHandoff || !!phase1Route.repeatWriteHandoff,
             includeOpenTransactionSearch: !!phase1Route.wantsUiAction,
           }),
         });
@@ -3807,7 +3853,13 @@ exports.chat = async (req, res) => {
       hasError: !!result?.error
     });
     
-    const finalText = stripCurrencyCommas(result.content || '## ❌ No Response\n\n**Sorry, no response generated.**');
+    const guardedContent = skipAzureAffirmative || (result && result.writeResponseMode && result.writeResponseMode !== 'none')
+      ? (result.content || '## ❌ No Response\n\n**Sorry, no response generated.**')
+      : enforceProposalStateInvariant(
+          result.content || '## ❌ No Response\n\n**Sorry, no response generated.**',
+          dialogueState
+        );
+    const finalText = stripCurrencyCommas(guardedContent);
     maybeSetAffordabilityInvitation(dialogueState, {
       route: phase1Route,
       accountId: accountid,
@@ -5818,6 +5870,8 @@ exports.__testables = {
   buildDuplicateCreateAck,
   resolvePostCreateAck,
   executeToolCalls,
+  looksLikeConcreteWriteProposal,
+  enforceProposalStateInvariant,
   nextWeekdayOnOrAfter,
   buildDateReferenceBlock,
   buildUiContextBlock,

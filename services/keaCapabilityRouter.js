@@ -1,6 +1,7 @@
 'use strict';
 
 const moment = require('moment');
+const { frequencyLabel } = require('../utils/frequencyLabel');
 
 const CAPABILITIES = Object.freeze([
   'confirmation',
@@ -294,6 +295,43 @@ function isBareAffirmative(text) {
   if (!m || m.length > 40) return false;
   return /^(y(es|ep|eah|up)?|sure|ok(ay)?)(\s+please)?[.!?]*$/i.test(m)
     || /^(go ahead|do it|please do)[.!?]*$/i.test(m);
+}
+
+function isAgreementPhrase(text) {
+  const m = String(text || '').trim();
+  if (!m || m.length > 60) return false;
+  return /^(this|that|it) is (correct|right)[.!?]*$/i.test(m)
+    || /^(that'?s|thats) (correct|right)[.!?]*$/i.test(m)
+    || /^(this|that) looks (right|correct|good)[.!?]*$/i.test(m)
+    || /^looks (right|correct|good)[.!?]*$/i.test(m)
+    || /^sounds (right|correct|good)[.!?]*$/i.test(m);
+}
+
+function lastCommittedCreate(dialogueState) {
+  const writes = Array.isArray(dialogueState && dialogueState.recentWrites)
+    ? dialogueState.recentWrites
+    : [];
+  for (let i = writes.length - 1; i >= 0; i--) {
+    if (writes[i] && writes[i].action === 'create') return writes[i];
+  }
+  return null;
+}
+
+function isSeedableCommittedWrite(prior) {
+  if (!prior) return false;
+  const title = String(prior.title || '').trim();
+  const amount = Math.abs(Number(prior.amount));
+  const start = String(prior.start || '').slice(0, 10);
+  return !!(title && Number.isFinite(amount) && amount > 0 && /^\d{4}-\d{2}-\d{2}$/.test(start));
+}
+
+function isRepeatWriteUtterance(text) {
+  const m = String(text || '').trim();
+  if (!m || m.length > 80) return false;
+  return /^(please\s+)?(add|create)\s+(another(\s+one)?|it again|that again)[.!?]*$/i.test(m)
+    || /^(please\s+)?(add|create)\s+another\s+(expense|transaction|forecast)[.!?]*$/i.test(m)
+    || /^(please\s+)?duplicate that (expense|transaction|forecast)[.!?]*$/i.test(m)
+    || /^(please\s+)?(add|create) (it|that|the (expense|transaction|forecast)) anyway[.!?]*$/i.test(m);
 }
 
 function isBareNegative(text) {
@@ -860,6 +898,15 @@ function buildInvitationTitleAskText(src) {
   return `I can prepare the ${amt} expense for ${date}. What would you like to call it?`;
 }
 
+function frequencyDisplayLabelLocal(freq) {
+  const f = Number(freq);
+  if (!Number.isFinite(f) || f <= 0 || f === 2) return 'One-time';
+  return frequencyLabel(f)
+    .split('-')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join('-');
+}
+
 function buildInvitationProposalText(draft, { accountName } = {}) {
   const amount = formatInvitationAmount(draft && draft.amount);
   const date = formatInvitationDateLong(draft && draft.start);
@@ -882,6 +929,60 @@ function buildInvitationProposalText(draft, { accountName } = {}) {
   ].join('\n');
 }
 
+function buildRepeatWriteProposalText(draft, { accountName } = {}) {
+  const amount = formatInvitationAmount(draft && draft.amount);
+  const date = formatInvitationDateLong(draft && draft.start);
+  const freq = Number(draft && draft.frequency);
+  const freqLabel = frequencyDisplayLabelLocal(freq);
+  const dateLabel = freq === 2 || !Number.isFinite(freq) || freq <= 0 ? 'Date' : 'Start date';
+  const category = draft && draft.category && String(draft.category).trim()
+    ? String(draft.category).trim()
+    : INVITATION_DEFAULT_CATEGORY;
+  const account = accountName && String(accountName).trim() ? String(accountName).trim() : 'your account';
+  const title = draft && draft.title ? String(draft.title).trim() : 'expense';
+  return [
+    `I can add another ${title}:`,
+    '',
+    `- Amount: ${amount}`,
+    `- ${dateLabel}: ${date}`,
+    `- Frequency: ${freqLabel}`,
+    `- Category: ${category}`,
+    `- Account: ${account}`,
+    '',
+    'This will create a second transaction.',
+    '',
+    'Confirm?',
+  ].join('\n');
+}
+
+function seedRepeatWriteDraft(dialogueState, prior) {
+  if (!dialogueState || !isSeedableCommittedWrite(prior)) return false;
+  dialogueState.draftTransaction = {
+    title: String(prior.title).trim(),
+    type: prior.type && String(prior.type).trim() ? String(prior.type).trim() : 'expense',
+    amount: Math.abs(Number(prior.amount)),
+    start: String(prior.start).slice(0, 10),
+    frequency: prior.frequency != null && Number.isFinite(Number(prior.frequency))
+      ? Number(prior.frequency)
+      : INVITATION_FREQUENCY_ONCE,
+    category: prior.category && String(prior.category).trim()
+      ? String(prior.category).trim()
+      : INVITATION_DEFAULT_CATEGORY,
+  };
+  dialogueState.pendingConfirmation = true;
+  dialogueState.needsReconfirm = false;
+  dialogueState.intent = 'repeat_write';
+  dialogueState.pendingInvitation = null;
+  return true;
+}
+
+function applyRepeatWriteLifecycle(dialogueState, route) {
+  if (!dialogueState || typeof dialogueState !== 'object') return dialogueState;
+  if (!route || !route.repeatWriteHandoff) return dialogueState;
+  seedRepeatWriteDraft(dialogueState, lastCommittedCreate(dialogueState));
+  return dialogueState;
+}
+
 function buildDeterministicAffirmativeText(route, dialogueState, extras = {}) {
   const resolution = route && route.affirmativeResolution;
   if (resolution === 'declined') return 'Okay.';
@@ -897,6 +998,12 @@ function buildDeterministicAffirmativeText(route, dialogueState, extras = {}) {
     return 'Which would you like me to look at more closely?';
   }
   const draft = dialogueState && dialogueState.draftTransaction;
+  if (resolution === 'repeat_write') {
+    if (invitationDraftIsProposable(draft) && dialogueState && dialogueState.pendingConfirmation === true) {
+      return buildRepeatWriteProposalText(draft, extras);
+    }
+    return 'Sure — what would you like me to continue with?';
+  }
   if (invitationDraftIsProposable(draft) && dialogueState && dialogueState.pendingConfirmation === true) {
     return buildInvitationProposalText(draft, extras);
   }
@@ -922,7 +1029,9 @@ function isDeterministicAffirmativeCapability(capability) {
 
 function shouldSkipAzureForRoute(route) {
   if (!route) return false;
-  return isDeterministicAffirmativeCapability(route.capability) || !!route.invitationWriteHandoff;
+  return isDeterministicAffirmativeCapability(route.capability)
+    || !!route.invitationWriteHandoff
+    || !!route.repeatWriteHandoff;
 }
 
 function invitationMatchesAccount(invitation, accountId) {
@@ -1014,6 +1123,7 @@ function routeCapabilityUnwrapped(input = {}) {
     accountChanged: false,
     affirmativeResolution: 'none',
     invitationWriteHandoff: false,
+    repeatWriteHandoff: false,
   };
 
   // 1. Simulation constraints: real-write / what-if language in sim mode
@@ -1022,6 +1132,20 @@ function routeCapabilityUnwrapped(input = {}) {
     if (isWriteUtterance(message) || isGoalWriteUtterance(message) || isSimUtterance(message)) {
       return { ...base, capability: 'simulation', confidence: 'high' };
     }
+  }
+
+  // 1b. Explicit repeat-write ("add another one") is a NEW write operation,
+  //     never confirmation of the prior proposal, and never unknown.
+  if (!input.simulationMode
+    && isRepeatWriteUtterance(message)
+    && isSeedableCommittedWrite(lastCommittedCreate(last))) {
+    return {
+      ...base,
+      capability: 'transaction_write',
+      confidence: 'high',
+      repeatWriteHandoff: true,
+      affirmativeResolution: 'repeat_write',
+    };
   }
 
   // 2. Pending write + affirmative → confirmation, unless a topic switch
@@ -1277,6 +1401,32 @@ function routeCapabilityUnwrapped(input = {}) {
       affirmativeResolution: 'unresolved_clarify',
     };
   }
+  if (isAgreementPhrase(message) && !pendingType) {
+    if (invitationOk && (invitation.status === 'referent_asked' || invitation.status === 'awaiting_title')) {
+      return {
+        ...base,
+        capability: 'invitation_continuation',
+        confidence: 'high',
+        accountChanged: false,
+        invitationWriteHandoff: true,
+        affirmativeResolution: 'invitation_title_ask',
+        slots: {
+          ...slots,
+          amount: invitation.amount,
+          purchaseDate: invitation.date,
+          subjectKind: 'amount',
+          subjectValue: String(invitation.amount),
+        },
+      };
+    }
+    return {
+      ...base,
+      capability: 'bare_affirmative_unresolved',
+      confidence: 'high',
+      accountChanged,
+      affirmativeResolution: 'unresolved_clarify',
+    };
+  }
   if (input.userAffirmative && !pendingType) {
     return {
       ...base,
@@ -1426,10 +1576,14 @@ module.exports = {
   isKnownCategoryToken,
   isBareAffirmative,
   isBareNegative,
+  isAgreementPhrase,
+  isRepeatWriteUtterance,
   isShortFollowUp,
+  lastCommittedCreate,
   normalizePendingInvitation,
   buildAffordabilityInvitation,
   applyInvitationLifecycle,
+  applyRepeatWriteLifecycle,
   maybeSetAffordabilityInvitation,
   buildInvitationClarifyText,
   buildDeterministicAffirmativeText,

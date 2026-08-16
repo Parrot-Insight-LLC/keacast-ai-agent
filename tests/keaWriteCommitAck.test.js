@@ -147,13 +147,21 @@ async function run() {
   const dupAck = T.resolvePostCreateAck({
     createMeta: [],
     sawCreateDuplicate: true,
-    recentWrites: [onceWrite],
     accountName: 'Main Account',
   });
   check('duplicate mode', dupAck && dupAck.mode === 'duplicate_commit');
   check('duplicate copy is not already-been-added', dupAck && !/already been added/i.test(dupAck.content));
   check('duplicate copy names in-turn protection', dupAck && /already created/.test(dupAck.content) && /duplicate/.test(dupAck.content));
-  check('duplicate restates One-time', dupAck && /One-time/.test(dupAck.content));
+  check('duplicate without this-turn write does not restate old recentWrites', dupAck && !/Test 3/.test(dupAck.content) && !/Uncategorized/.test(dupAck.content));
+
+  const currentOpDup = T.resolvePostCreateAck({
+    createMeta: [{ write: onceWrite, expected: baseDraft() }],
+    sawCreateDuplicate: true,
+    accountName: 'Main Account',
+  });
+  check('same-op duplicate uses current write category', currentOpDup && /Uncategorized/.test(currentOpDup.content));
+  check('same-op duplicate does not use older Test 3', currentOpDup && !/Test 3/.test(currentOpDup.content));
+  check('same-op duplicate restates One-time', currentOpDup && /One-time/.test(currentOpDup.content));
 
   section('Phase 2.8 executeToolCalls skips post-create Azure narration');
   const messages = [{ role: 'user', content: 'Yes' }];
@@ -223,8 +231,12 @@ async function run() {
   });
   const dupBatch = await T.executeToolCalls(messages, [createCall('d1'), createCall('d2')], ctxDupBatch);
   check('same-turn second create does not POST again', createCount === 1);
-  check('same-turn duplicate still success ack', /Added Test Expense/.test(dupBatch.content));
+  check('same-turn duplicate uses current operation', /Test Expense/.test(dupBatch.content) && /Uncategorized/.test(dupBatch.content));
+  check('same-turn duplicate is not Test 3', !/Test 3/.test(dupBatch.content));
+  check('same-turn duplicate mode', dupBatch.writeResponseMode === 'duplicate_commit');
   check('same-turn duplicate skips Azure', azureCalls === 0);
+  check('same-turn duplicate clears pending', ctxDupBatch.dialogueState.pendingConfirmation === false);
+  check('same-turn duplicate clears draft', Object.keys(ctxDupBatch.dialogueState.draftTransaction || {}).length === 0);
 
   azureCalls = 0;
   createCount = 0;
@@ -233,11 +245,19 @@ async function run() {
     queryAzureOpenAI: async () => { azureCalls += 1; return { choices: [{ message: { content: 'already been added' } }] }; },
   });
   ctxReplay.dialogueState.lastCommitSignature = T.draftSignature(baseDraft());
+  ctxReplay.dialogueState.recentWrites = [{
+    action: 'create',
+    title: 'Test Expense',
+    amount: -800,
+    start: '2026-08-21',
+    frequency: 2,
+    category: 'Test 3',
+  }];
   const replay = await T.executeToolCalls(messages, [createCall('r1')], ctxReplay);
-  check('in-turn replay does not create', createCount === 0);
-  check('in-turn replay is duplicate_commit', replay.writeResponseMode === 'duplicate_commit');
-  check('in-turn replay skips Azure', azureCalls === 0);
-  check('in-turn replay is not already-been-added', !/already been added/i.test(replay.content));
+  check('cross-turn Redis signature does not block create', createCount === 1);
+  check('cross-turn Redis signature is deterministic_commit', replay.writeResponseMode === 'deterministic_commit');
+  check('cross-turn create uses current Uncategorized', /Uncategorized/.test(replay.content) && !/Test 3/.test(replay.content));
+  check('cross-turn Redis signature skips Azure', azureCalls === 0);
 
   azureCalls = 0;
   createCount = 0;
