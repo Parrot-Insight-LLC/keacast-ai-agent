@@ -252,7 +252,9 @@ async function run() {
   check('ui_action_count', pG.ui_action_count === 1);
   check('grounding payload has no evidence', pG.evidence === undefined && pG.facts === undefined);
   check('grounding payload has no merchant', pG.merchant === undefined && pG.lastSubjectValue === undefined);
-  check('grounding payload has no amounts', pG.amount === undefined && pG.expenseTotal === undefined);
+  check('grounding payload has no amounts', pG.amount === undefined && pG.expenseTotal === undefined
+    && pG.spentTotal === undefined);
+  check('grounding payload has no search account filter flag', pG.search_account_filter_applied === undefined);
   check('grounding payload has no message', pG.message === undefined && pG.prompt === undefined);
 
   const tDefault = createKeaTelemetry({ requestId: 'req-grounding-default' });

@@ -210,6 +210,12 @@ function isExcludedFromHistoricalSpend(t) {
   return false;
 }
 
+function nonnegativeSpendMagnitude(value) {
+  const n = num(value);
+  if (n == null || n <= 0) return 0;
+  return n;
+}
+
 function aggregateTransactions(transactions, { subjectKind, subjectValue, postedExpensesOnly } = {}) {
   let expenseTotal = 0;
   let incomeTotal = 0;
@@ -223,7 +229,8 @@ function aggregateTransactions(transactions, { subjectKind, subjectValue, posted
     if (amount < 0) expenseTotal += Math.abs(amount);
     else incomeTotal += amount;
   }
-  return { transactionCount, expenseTotal, incomeTotal };
+  const spentTotal = nonnegativeSpendMagnitude(expenseTotal);
+  return { transactionCount, expenseTotal: spentTotal, spentTotal, incomeTotal };
 }
 
 function periodKey(period) {
@@ -246,7 +253,7 @@ function resolveLookupRequests(route, period, slots) {
   return [];
 }
 
-function lookupResult({ request, status, transactionCount, expenseTotal, incomeTotal }) {
+function lookupResult({ request, status, transactionCount, expenseTotal, spentTotal, incomeTotal }) {
   const out = {
     subjectKind: request.subjectKind || null,
     subjectValue: request.subjectValue || null,
@@ -254,8 +261,10 @@ function lookupResult({ request, status, transactionCount, expenseTotal, incomeT
     status,
   };
   if (status === 'ok') {
+    const magnitude = nonnegativeSpendMagnitude(spentTotal != null ? spentTotal : expenseTotal);
     out.transactionCount = transactionCount || 0;
-    out.expenseTotal = expenseTotal || 0;
+    out.spentTotal = magnitude;
+    out.expenseTotal = magnitude;
     if (incomeTotal != null) out.incomeTotal = incomeTotal;
   }
   return out;
@@ -366,6 +375,7 @@ async function prefetchGroupedLookups({
         status: 'ok',
         transactionCount: agg.transactionCount,
         expenseTotal: agg.expenseTotal,
+        spentTotal: agg.spentTotal,
         incomeTotal: agg.incomeTotal,
       }));
       prefetchMeta.matchCount += agg.transactionCount;
@@ -406,6 +416,7 @@ async function prefetchGroupedLookups({
   const facts = firstOk
     ? {
         transactionCount: firstOk.transactionCount,
+        spentTotal: firstOk.spentTotal,
         expenseTotal: firstOk.expenseTotal,
         incomeTotal: firstOk.incomeTotal,
       }
@@ -609,6 +620,11 @@ function buildEvidenceSystemSection(evidence) {
       'Do not invent a result for missing/partial clauses.',
     ].join(' ')
     : '';
+  const hasSpendFacts = compact.facts
+    && (compact.facts.spentTotal != null || compact.facts.expenseTotal != null);
+  const spendingGlossary = (compact.lookups || hasSpendFacts)
+    ? 'Spending glossary: spentTotal / expenseTotal represents a positive posted-spending magnitude. Prefer spentTotal for user-facing spending statements. When saying "you spent", "your expenses totaled", or "you had X in expenses", present the value as positive currency. Do not add a minus sign. Individual ledger transaction amounts may remain signed elsewhere.'
+    : '';
   const partialInstruction = compact.status === 'partial'
     ? (compact.lookups
       ? 'Partial evidence: answer completed lookup results and clearly state which requested result could not be fully verified. Do not invent a missing total.'
@@ -617,6 +633,7 @@ function buildEvidenceSystemSection(evidence) {
   return [
     'GROUNDED EVIDENCE (authoritative for this answer — do not contradict; do not invent missing dollar values or dates; respect limitations; partial evidence does not justify unsupported certainty):',
     'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available); savingsPotential = lowest projected balance through the current month (not available money).',
+    spendingGlossary,
     JSON.stringify(compact),
     lookupInstructions,
     partialInstruction,

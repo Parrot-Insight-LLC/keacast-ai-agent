@@ -164,6 +164,8 @@ async function run() {
   check('paged past default 50-row page', calls.length >= 3);
   check('complete period not first-page-only', walmartEv.facts.transactionCount === 40);
   check('walmart expense total 400', walmartEv.facts.expenseTotal === 400);
+  check('walmart spentTotal is the same nonnegative magnitude', walmartEv.facts.spentTotal === 400
+    && walmartEv.facts.spentTotal === walmartEv.facts.expenseTotal);
   check('does not dump transactions into facts', walmartEv.facts.transactions === undefined);
   check('fetch used trusted userId', calls.every((c) => c.userId === 5));
 
@@ -181,6 +183,7 @@ async function run() {
   });
   check('oversize period is unavailable not a false total', bigEv.status === 'unavailable');
   check('oversize does not publish expenseTotal', bigEv.facts.expenseTotal === undefined);
+  check('oversize does not publish spentTotal', bigEv.facts.spentTotal === undefined);
   check('oversize stopped after first page total', bigCalls.length === 1);
 
   section('authorized prefetch — owner / satellite / denied / identity');
@@ -377,6 +380,38 @@ async function run() {
   const halfOpenKeeps = monthEndRow >= july.start && monthEndRow < july.endExclusive;
   check('inclusive YYYY-MM-DD end would drop month-end DATETIME', inclusiveEndWouldDrop === false);
   check('half-open range keeps month-end DATETIME', halfOpenKeeps === true);
+
+  section('Phase 1.3 — positive spending magnitude');
+
+  const mag = aggregateTransactions([
+    { name: 'Walmart', amount: -100, start: '2026-07-01', forecast_type: 'A' },
+    { name: 'Walmart', amount: -50, start: '2026-07-02', forecast_type: 'A' },
+    { name: 'Walmart', amount: -20, start: '2026-07-03', forecast_type: 'A' },
+  ]);
+  check('spentTotal is 170 not -170', mag.spentTotal === 170 && mag.expenseTotal === 170);
+  check('spentTotal is not negative', mag.spentTotal >= 0);
+
+  const { fetchPage: zeroFetch } = paginatedFetch([], 100);
+  const zeroEv = await prefetchGrounding({
+    trustedUserId: 5,
+    accountId: 10,
+    snapshot: SNAPSHOT,
+    currentDate: '2026-08-16',
+    policy: resolveGroundingPolicy(walmartRoute, { message: 'How much did I spend at Walmart last month?' }),
+    route: walmartRoute,
+    message: 'How much did I spend at Walmart last month?',
+    fetchPage: zeroFetch,
+    assertFn: async () => ({ access: 'owner' }),
+  });
+  check('zero spending status ok', zeroEv.status === 'ok');
+  check('zero transactionCount', zeroEv.facts.transactionCount === 0 && zeroEv.lookups[0].transactionCount === 0);
+  check('zero spentTotal is +0', zeroEv.facts.spentTotal === 0 && zeroEv.lookups[0].spentTotal === 0);
+  check('zero expenseTotal alias is +0', zeroEv.facts.expenseTotal === 0 && zeroEv.lookups[0].expenseTotal === 0);
+  check('never negative zero spentTotal', !Object.is(zeroEv.facts.spentTotal, -0)
+    && !Object.is(zeroEv.lookups[0].spentTotal, -0));
+  const zeroBlock = buildEvidenceSystemSection(zeroEv);
+  check('zero evidence includes spending glossary', /positive posted-spending magnitude/.test(zeroBlock));
+  check('zero evidence prefers spentTotal', /Prefer spentTotal/.test(zeroBlock));
 }
 
 module.exports = { run };

@@ -166,6 +166,12 @@ async function run() {
   check('Restaurants July total 15', fourEv.lookups[1].expenseTotal === 15 && fourEv.lookups[1].subjectKind === 'category');
   check('Groceries July total 40', fourEv.lookups[2].expenseTotal === 40);
   check('Amazon June excludes duplicate', fourEv.lookups[3].expenseTotal === 30 && fourEv.lookups[3].status === 'ok');
+  check('every successful lookup spentTotal >= 0', fourEv.lookups.every((l) => l.status !== 'ok'
+    || (l.spentTotal >= 0 && l.spentTotal === l.expenseTotal && !Object.is(l.spentTotal, -0))));
+  check('Walmart spentTotal 20', fourEv.lookups[0].spentTotal === 20);
+  check('Restaurants spentTotal 15', fourEv.lookups[1].spentTotal === 15);
+  check('Groceries spentTotal 40', fourEv.lookups[2].spentTotal === 40);
+  check('Amazon spentTotal 30', fourEv.lookups[3].spentTotal === 30);
   check('overall evidence ok', fourEv.status === 'ok');
   check('no raw transaction arrays', fourEv.lookups.every((l) => l.transactions === undefined) && fourEv.facts.transactions === undefined);
   check('fetch identity is trusted user 5', calls.every((c) => c.userId === 5 && c.accountId === 10));
@@ -176,6 +182,8 @@ async function run() {
   check('evidence instructs answering every lookup', /Answer every requested lookup/.test(block));
   check('evidence JSON omits prefetchMeta', !/"prefetchMeta"/.test(block));
   check('evidence JSON has no transactions array', !/"transactions"\s*:/.test(block));
+  check('compound evidence includes spending glossary', /positive posted-spending magnitude/.test(block));
+  check('compound evidence prefers spentTotal', /Prefer spentTotal/.test(block));
 
   section('Phase 1.2 — period failure isolation');
 
@@ -199,7 +207,8 @@ async function run() {
   check('July Walmart unavailable', isoEv.lookups[0].status === 'unavailable' && isoEv.lookups[0].expenseTotal === undefined);
   check('July restaurants unavailable', isoEv.lookups[1].status === 'unavailable');
   check('July groceries unavailable', isoEv.lookups[2].status === 'unavailable');
-  check('Amazon June still ok', isoEv.lookups[3].status === 'ok' && isoEv.lookups[3].expenseTotal === 30);
+  check('Amazon June still ok', isoEv.lookups[3].status === 'ok' && isoEv.lookups[3].expenseTotal === 30
+    && isoEv.lookups[3].spentTotal === 30);
   check('no invented July totals', isoEv.lookups[0].expenseTotal === undefined && isoEv.lookups[1].expenseTotal === undefined);
   check('both periods still read', isoEv.prefetchMeta.periodReadCount === 2);
   check('July oversize stopped after first page', isoCalls.filter((c) => c.startDate === '2026-07-01').length === 1);
@@ -243,7 +252,8 @@ async function run() {
   check('open_search term Walmart', action && action.type === 'open_search' && action.search_term === 'Walmart');
   check('open_search July 1 start', action.startDate === '2026-07-01');
   check('open_search July 31 end', action.endDate === '2026-07-31');
-  check('no account id on search action', action.accountId === undefined);
+  check('no account id on search action', action.accountId === undefined
+    && action.accountName === undefined && action.selectedAccount === undefined);
   check('navigation keeps Search tool', allowedToolsFor('navigation_ui').has('openTransactionSearch'));
   check('lookup can opt back into Search', allowedToolsFor('financial_lookup', { includeOpenTransactionSearch: true }).has('openTransactionSearch'));
   check('direct-answer helper ignores navigation', shouldForceDirectAnswer({
