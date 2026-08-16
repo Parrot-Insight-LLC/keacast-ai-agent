@@ -47,6 +47,12 @@ async function run() {
   check('lookup_ms null when unused', payload.selected_account_cache_lookup_ms === null);
   check('http_ms null when unused', payload.selected_account_http_ms === null);
   check('parse_ms null when unused', payload.selected_account_parse_ms === null);
+  check('stringify_ms null when unused', payload.selected_account_stringify_ms === null);
+  check('redis_set_ms null when unused', payload.selected_account_redis_set_ms === null);
+  check('redis_ping_ms null when unused', payload.selected_account_redis_ping_ms === null);
+  check('payload_bytes null when unused', payload.selected_account_payload_bytes === null);
+  check('full_payload_bytes null when unused', payload.selected_account_full_payload_bytes === null);
+  check('payload_key_bytes null when unused', payload.selected_account_payload_key_bytes === null);
   check('write_ms null when unused', payload.selected_account_cache_write_ms === null);
   check('no raw userId on payload', payload.userId === undefined);
   check('no sessionId on payload', payload.sessionId === undefined);
@@ -59,15 +65,29 @@ async function run() {
   t2.markEnd('selected_account_cache_lookup');
   t2.markStart('selected_account_http');
   t2.markEnd('selected_account_http');
-  t2.markStart('selected_account_cache_write');
-  t2.markEnd('selected_account_cache_write');
+  t2.markStart('selected_account_stringify');
+  t2.markEnd('selected_account_stringify');
+  t2.markStart('selected_account_redis_set');
+  t2.markEnd('selected_account_redis_set');
+  t2.setSelectedAccountMeta({
+    source: 'tool-fresh',
+    cacheHit: false,
+    payloadBytes: 2048,
+    fullPayloadBytes: 4_000_000,
+    payloadKeyBytes: { cfTransactions: 3_000_000 },
+  });
   const p2 = t2.toPayload();
   check('source tool-fresh', p2.selected_account_source === 'tool-fresh');
   check('cache_hit false on miss', p2.selected_account_cache_hit === false);
   check('lookup_ms number on miss path', typeof p2.selected_account_cache_lookup_ms === 'number');
   check('http_ms number on miss path', typeof p2.selected_account_http_ms === 'number');
   check('parse_ms still null (axios already parsed)', p2.selected_account_parse_ms === null);
-  check('write_ms number after cache set', typeof p2.selected_account_cache_write_ms === 'number');
+  check('stringify_ms number on miss path', typeof p2.selected_account_stringify_ms === 'number');
+  check('redis_set_ms number on miss path', typeof p2.selected_account_redis_set_ms === 'number');
+  check('cache_write_ms is stringify+set', p2.selected_account_cache_write_ms === p2.selected_account_stringify_ms + p2.selected_account_redis_set_ms);
+  check('payload_bytes compact size', p2.selected_account_payload_bytes === 2048);
+  check('full_payload_bytes recorded on miss', p2.selected_account_full_payload_bytes === 4_000_000);
+  check('payload_key_bytes histogram present', p2.selected_account_payload_key_bytes.cfTransactions === 3_000_000);
 
   const t3 = createKeaTelemetry({ requestId: 'req-3' });
   t3.setSelectedAccountMeta({ source: 'tool-cache', cacheHit: true });

@@ -22,6 +22,11 @@ const {
   selectedAccountToolCacheKey,
   invalidateSelectedAccountToolCache,
 } = require('../services/keaAccountCache');
+const {
+  compactSelectedAccount,
+  measurePayloadKeyBytes,
+  utf8Bytes,
+} = require('../services/keaAccountSnapshot');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 20; // verbatim conversation window (older turns are folded into a rolling summary)
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
@@ -174,11 +179,28 @@ function buildSummarizationCacheKey(sessionKey, accountId, plaidTransactions, fo
 // They are intentionally tiny and side-effect-free so the prompt builder
 // stays readable and so we can unit-test (or swap them out) easily.
 
-const SELECTED_ACCOUNT_TOOL_TTL = 300;   // 5 min Redis cache for the tool-layer fetch
+const SELECTED_ACCOUNT_TOOL_TTL = 300;   // 5 min Redis cache for the compact chat snapshot
 // /account/selected is heavy (live Plaid + multi-table joins + chart compute),
 // routinely 8–15s on cold accounts. 25s gives us reasonable headroom while
 // still surfacing a clear timeout instead of hanging forever.
 const SELECTED_ACCOUNT_TOOL_TIMEOUT_MS = 25000;
+
+async function cacheCompactSelectedAccount(toolCacheKey, account, currentDate, telemetry) {
+  const compact = compactSelectedAccount(account, currentDate);
+  if (!compact) return { compact: null, payloadBytes: 0 };
+  if (telemetry) telemetry.markStart('selected_account_stringify');
+  const compactJson = JSON.stringify(compact);
+  if (telemetry) telemetry.markEnd('selected_account_stringify');
+  const payloadBytes = Buffer.byteLength(compactJson, 'utf8');
+  if (telemetry) telemetry.markStart('selected_account_redis_set');
+  try {
+    await redis.set(toolCacheKey, compactJson, 'EX', SELECTED_ACCOUNT_TOOL_TTL);
+  } catch (e) {
+    console.warn('Selected-account compact cache write failed:', e.message);
+  }
+  if (telemetry) telemetry.markEnd('selected_account_redis_set');
+  return { compact, payloadBytes };
+}
 
 
 // Build a cheap, stable fingerprint for the cache key when we have the
@@ -382,6 +404,14 @@ function pickNextIncome(account) {
 // Returns ["Merchant -$X", ...] highest-first, so the model can surface real
 // behavioural patterns without inventing categories or totals.
 function topSpendingMerchants(account, limit = 3) {
+  if (Array.isArray(account?.topSpendingMerchants) && account.topSpendingMerchants.length > 0) {
+    return account.topSpendingMerchants.slice(0, limit).map((row) => {
+      const name = (row?.name || 'Other').toString().slice(0, 28);
+      const total = Number(row?.total);
+      if (!Number.isFinite(total)) return null;
+      return `${name} ${fmtMoney(-Math.abs(total))}`;
+    }).filter(Boolean);
+  }
   const flat = flattenRecents(account);
   const totals = new Map();
   for (const t of flat) {
@@ -600,6 +630,14 @@ function buildChatAccountContext(account, firstName, currentDate) {
 // levers ("Dining is your #2 category at $410/mo") instead of staying vague.
 function pickTopSpendingCategories(account, limit = 5) {
   if (!account || typeof account !== 'object') return [];
+  if (Array.isArray(account.topSpendingCategories) && account.topSpendingCategories.length > 0) {
+    return account.topSpendingCategories.slice(0, limit).map((row) => {
+      const cat = String(row?.category || '').trim();
+      const total = Number(row?.total);
+      if (!cat || !Number.isFinite(total)) return null;
+      return `${cat} ${fmtMoney(total)}`;
+    }).filter(Boolean);
+  }
   const rows = [];
   const pools = [account.breakdown, account.recents];
   for (const pool of pools) {
@@ -638,11 +676,15 @@ function buildGoalsBlock(goals, currentDate) {
     const accumulated = Number(g.accumulated_amount) || 0;
     const pct = target > 0 ? Math.min(100, Math.round((accumulated / target) * 100)) : 0;
     // Expected-by-now from the contribution schedule → on-track signal.
-    let expected = 0;
-    for (const c of (Array.isArray(g.contributions) ? g.contributions : [])) {
-      if (!c || c.status === 'Skipped') continue;
-      const start = moment(c.start);
-      if (start.isValid() && start.isSameOrBefore(today, 'day')) expected += Math.abs(Number(c.amount) || 0);
+    // Compact snapshots store this precomputed so Redis need not keep every contribution row.
+    let expected = Number(g.expectedByNow);
+    if (!Number.isFinite(expected)) {
+      expected = 0;
+      for (const c of (Array.isArray(g.contributions) ? g.contributions : [])) {
+        if (!c || c.status === 'Skipped') continue;
+        const start = moment(c.start);
+        if (start.isValid() && start.isSameOrBefore(today, 'day')) expected += Math.abs(Number(c.amount) || 0);
+      }
     }
     const end = g.end_date ? moment(g.end_date) : null;
     const daysLeft = end && end.isValid() ? Math.max(0, end.diff(today, 'days')) : null;
@@ -2848,6 +2890,9 @@ exports.chat = async (req, res) => {
     let selectedAccount = null;
     let selectedAccountSource = 'none';
     let selectedAccountCacheHit = null;
+    let selectedAccountPayloadBytes = null;
+    let selectedAccountFullPayloadBytes = null;
+    let selectedAccountPayloadKeyBytes = null;
     telemetry.markStart('selected_account_fetch');
 
     if (
@@ -2855,24 +2900,46 @@ exports.chat = async (req, res) => {
       typeof accountSnapshot === 'object' &&
       (accountSnapshot.accountid !== undefined || typeof accountSnapshot.balance === 'number')
     ) {
-      selectedAccount = accountSnapshot;
+      selectedAccount = compactSelectedAccount(accountSnapshot, currentDate) || accountSnapshot;
       selectedAccountSource = 'snapshot';
     }
 
     if (!selectedAccount && userId && token && accountid) {
       const toolCacheKey = selectedAccountToolCacheKey(userId, accountid);
       selectedAccountCacheHit = false;
+      telemetry.markStart('selected_account_redis_ping');
+      try {
+        await redis.ping();
+      } catch (e) {
+        console.warn('Chat endpoint: redis ping failed:', e.message);
+      }
+      telemetry.markEnd('selected_account_redis_ping');
       telemetry.markStart('selected_account_cache_lookup');
       try {
         const cached = await redis.get(toolCacheKey);
         telemetry.markEnd('selected_account_cache_lookup');
         if (cached) {
+          selectedAccountPayloadBytes = Buffer.byteLength(cached, 'utf8');
           telemetry.markStart('selected_account_parse');
           try {
             selectedAccount = JSON.parse(cached);
             telemetry.markEnd('selected_account_parse');
             selectedAccountSource = 'tool-cache';
             selectedAccountCacheHit = true;
+            if (selectedAccount && selectedAccount._keaCompact !== true) {
+              selectedAccountFullPayloadBytes = selectedAccountPayloadBytes;
+              selectedAccountPayloadKeyBytes = measurePayloadKeyBytes(selectedAccount);
+              const rewritten = await cacheCompactSelectedAccount(
+                toolCacheKey,
+                selectedAccount,
+                currentDate,
+                telemetry
+              );
+              if (rewritten.compact) {
+                selectedAccount = rewritten.compact;
+                selectedAccountPayloadBytes = rewritten.payloadBytes;
+              }
+            }
             console.log('Chat endpoint: Using cached selected-account blob for account', accountid);
           } catch (parseErr) {
             telemetry.markEnd('selected_account_parse');
@@ -2901,13 +2968,18 @@ exports.chat = async (req, res) => {
           console.log('Chat endpoint: tool-layer fetch completed in', httpMs, 'ms');
           selectedAccountSource = 'tool-fresh';
           if (selectedAccount && typeof selectedAccount === 'object') {
-            telemetry.markStart('selected_account_cache_write');
-            try {
-              await redis.set(toolCacheKey, JSON.stringify(selectedAccount), 'EX', SELECTED_ACCOUNT_TOOL_TTL);
-            } catch (e) {
-              console.warn('Chat endpoint: tool-layer cache write failed:', e.message);
+            selectedAccountFullPayloadBytes = utf8Bytes(selectedAccount);
+            selectedAccountPayloadKeyBytes = measurePayloadKeyBytes(selectedAccount);
+            const written = await cacheCompactSelectedAccount(
+              toolCacheKey,
+              selectedAccount,
+              currentDate,
+              telemetry
+            );
+            if (written.compact) {
+              selectedAccount = written.compact;
+              selectedAccountPayloadBytes = written.payloadBytes;
             }
-            telemetry.markEnd('selected_account_cache_write');
           }
         } catch (toolErr) {
           telemetry.markEnd('selected_account_http');
@@ -2926,6 +2998,9 @@ exports.chat = async (req, res) => {
     telemetry.setSelectedAccountMeta({
       source: selectedAccountSource,
       cacheHit: selectedAccountCacheHit,
+      payloadBytes: selectedAccountPayloadBytes,
+      fullPayloadBytes: selectedAccountFullPayloadBytes,
+      payloadKeyBytes: selectedAccountPayloadKeyBytes,
     });
 
     const hasAccount = !!(
@@ -3578,6 +3653,15 @@ exports.summarization = async (req, res) => {
         if (cached) {
           selectedAccount = JSON.parse(cached);
           selectedAccountSource = 'tool-cache';
+          if (selectedAccount && selectedAccount._keaCompact !== true) {
+            const rewritten = await cacheCompactSelectedAccount(
+              toolCacheKey,
+              selectedAccount,
+              clientDate,
+              null
+            );
+            if (rewritten.compact) selectedAccount = rewritten.compact;
+          }
           console.log('Summarization: Using cached selected-account blob (5min TTL) for account', accountId);
         }
       } catch (e) {
@@ -3599,11 +3683,13 @@ exports.summarization = async (req, res) => {
           console.log('Summarization: Tool-layer fetch completed in', Date.now() - t0, 'ms');
           selectedAccountSource = 'tool-fresh';
           if (selectedAccount && typeof selectedAccount === 'object') {
-            try {
-              await redis.set(toolCacheKey, JSON.stringify(selectedAccount), 'EX', SELECTED_ACCOUNT_TOOL_TTL);
-            } catch (e) {
-              console.warn('Summarization: Tool-layer cache write failed:', e.message);
-            }
+            const written = await cacheCompactSelectedAccount(
+              toolCacheKey,
+              selectedAccount,
+              clientDate,
+              null
+            );
+            if (written.compact) selectedAccount = written.compact;
           }
         } catch (toolErr) {
           // Surface enough detail to actually diagnose this in production logs:
@@ -5252,6 +5338,7 @@ exports.__testables = {
   buildSummaryBlock,
   buildGoalsBlock,
   pickTopSpendingCategories,
+  buildChatAccountContext,
   redactChatBodyForLog,
   injectTrustedIdentity,
   buildSessionKey,

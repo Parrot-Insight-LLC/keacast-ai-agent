@@ -54,6 +54,9 @@ function createKeaTelemetry({ requestId } = {}) {
   let userKey = null;
   let selected_account_source = null;
   let selected_account_cache_hit = null;
+  let selected_account_payload_bytes = null;
+  let selected_account_full_payload_bytes = null;
+  let selected_account_payload_key_bytes = null;
 
   function markStart(name) {
     marks[name] = { t0: Date.now() };
@@ -102,13 +105,25 @@ function createKeaTelemetry({ requestId } = {}) {
     userKey = identity && identity.userKey ? String(identity.userKey) : null;
   }
 
-  function setSelectedAccountMeta({ source, cacheHit } = {}) {
+  function setSelectedAccountMeta({
+    source,
+    cacheHit,
+    payloadBytes,
+    fullPayloadBytes,
+    payloadKeyBytes,
+  } = {}) {
     selected_account_source = source == null ? null : String(source);
     if (cacheHit === true || cacheHit === false) {
       selected_account_cache_hit = cacheHit;
     } else {
       selected_account_cache_hit = null;
     }
+    if (payloadBytes == null) selected_account_payload_bytes = null;
+    else selected_account_payload_bytes = Number(payloadBytes) || 0;
+    if (fullPayloadBytes == null) selected_account_full_payload_bytes = null;
+    else selected_account_full_payload_bytes = Number(fullPayloadBytes) || 0;
+    selected_account_payload_key_bytes =
+      payloadKeyBytes && typeof payloadKeyBytes === 'object' ? payloadKeyBytes : null;
   }
 
   function toPayload() {
@@ -126,7 +141,17 @@ function createKeaTelemetry({ requestId } = {}) {
       selected_account_cache_lookup_ms: marks.selected_account_cache_lookup?.ms ?? null,
       selected_account_http_ms: marks.selected_account_http?.ms ?? null,
       selected_account_parse_ms: marks.selected_account_parse?.ms ?? null,
-      selected_account_cache_write_ms: marks.selected_account_cache_write?.ms ?? null,
+      selected_account_stringify_ms: marks.selected_account_stringify?.ms ?? null,
+      selected_account_redis_set_ms: marks.selected_account_redis_set?.ms ?? null,
+      selected_account_redis_ping_ms: marks.selected_account_redis_ping?.ms ?? null,
+      selected_account_cache_write_ms: (
+        marks.selected_account_stringify?.ms != null || marks.selected_account_redis_set?.ms != null
+      )
+        ? (marks.selected_account_stringify?.ms || 0) + (marks.selected_account_redis_set?.ms || 0)
+        : (marks.selected_account_cache_write?.ms ?? null),
+      selected_account_payload_bytes,
+      selected_account_full_payload_bytes,
+      selected_account_payload_key_bytes,
       memory_load_ms: marks.memory_load?.ms ?? null,
       azure_round_count,
       tool_call_count: tools.length,

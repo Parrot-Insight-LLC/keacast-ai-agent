@@ -61,7 +61,11 @@ No PII, amounts, JWT, or message text.
 - `selected_account_fetch_ms` (whole selected-account span)
 - `selected_account_source` (`snapshot` | `tool-cache` | `tool-fresh` | `none`)
 - `selected_account_cache_hit` (`true`/`false` when Redis was consulted; `null` if that phase did not run)
-- `selected_account_cache_lookup_ms` / `selected_account_http_ms` / `selected_account_parse_ms` / `selected_account_cache_write_ms` (`null` if that phase did not run)
+- `selected_account_cache_lookup_ms` / `selected_account_http_ms` / `selected_account_parse_ms` / `selected_account_stringify_ms` / `selected_account_redis_set_ms` / `selected_account_redis_ping_ms` (`null` if that phase did not run)
+- `selected_account_cache_write_ms` (stringify + SET when those phases ran)
+- `selected_account_payload_bytes` (compact snapshot UTF-8 size)
+- `selected_account_full_payload_bytes` (full `/account/selected` size on miss; `null` on compact hit)
+- `selected_account_payload_key_bytes` (per-key byte histogram of the full blob; no values, secrets omitted)
 - `memory_load_ms`
 - `azure_round_count`
 - `azure_round_<n>_ms`
@@ -76,6 +80,14 @@ No PII, amounts, JWT, or message text.
 - Phase 1 placeholders: `grounding_required` (false), `grounding_performed` (false), `grounding_strategy` (null), `conversation_intent` (null), `response_mode` (`unspecified`)
 
 Clients may send `x-request-id`; the agent echoes `X-Request-Id` and includes `requestId` on the chat JSON. On a selected-account cache miss, the same id is forwarded as `X-Request-Id` on `POST /account/selected/:userid/:accid` so cashflow `selectedAccountPerf` can join the turn.
+
+## Phase 0.6 — compact selected-account Redis value
+
+The chat brief (`buildChatAccountContext`) is ~1–2 KB. Redis previously stored the full Cashflow `/account/selected` UI blob (multi-MB), so a cache **hit** still paid a bulk GET + blocking `JSON.parse`.
+
+**Now:** after a miss (or a leftover full-blob hit), Kea stores a compact snapshot (`_keaCompact: true`) — scalars, savings, 14-day totals, ≤5 negatives, ≤10 recents, ≤10 upcoming, category names, compact goals. Same key (`summarization:tool:selectedaccount:{userId}:{accountId}`), same TTL (300), same invalidation hook. `access_token` and other chart/UI arrays are not stored.
+
+**Still unchanged:** miss path still calls live `/account/selected` (no `quickRefresh`, no new Cashflow endpoint). Write tools still propose → confirm → write. Client `accountSnapshot` is not a write/grounding source.
 
 ## Environment / configuration required
 
@@ -96,7 +108,7 @@ npm test          # tests/run.js + legacy test-kea-memory.js
 npm run test:memory
 ```
 
-Coverage added in Phase 0: cashflow JWT (valid / forged / setup / share / revoked jti), satellite vs owner vs denied account access, schema identity strip, `args.token` ignored, telemetry shape, write-gate regressions.
+Coverage added in Phase 0: cashflow JWT (valid / forged / setup / share / revoked jti), satellite vs owner vs denied account access, schema identity strip, `args.token` ignored, telemetry shape, write-gate regressions. Phase 0.6 adds compact-snapshot size/field tests and stringify vs SET telemetry.
 
 ## Deferred (not Phase 0)
 
