@@ -37,6 +37,9 @@ async function run() {
   check('tool_call_count', payload.tool_call_count === 1);
   check('tool_getUpcomingTransactions_ms', payload.tool_getUpcomingTransactions_ms === 8);
   check('write flags', payload.write_proposed === true && payload.write_blocked === true && payload.write_committed === false);
+  check('write_response_mode defaults none', payload.write_response_mode === 'none');
+  t.recordWriteFlags({ write_response_mode: 'deterministic_commit' });
+  check('write_response_mode recorded', t.toPayload().write_response_mode === 'deterministic_commit');
   check('write_gate_armed_at_start aliases write_proposed', payload.write_gate_armed_at_start === true && payload.write_proposed === true);
   check('no message text field', payload.message === undefined && payload.token === undefined);
   check('grounding placeholders present', payload.grounding_performed === false && payload.grounding_strategy === null);

@@ -52,6 +52,7 @@ function createKeaTelemetry({ requestId } = {}) {
     write_attempted: false,
     write_committed: false,
     write_blocked: false,
+    write_response_mode: 'none',
   };
   let input_tokens = 0;
   let cached_input_tokens = 0;
@@ -339,6 +340,7 @@ function createKeaTelemetry({ requestId } = {}) {
       write_attempted: !!write.write_attempted,
       write_committed: !!write.write_committed,
       write_blocked: !!write.write_blocked,
+      write_response_mode: write.write_response_mode || 'none',
       grounding_required: !!grounding.grounding_required,
       grounding_performed: !!grounding.grounding_performed,
       grounding_strategy: grounding.grounding_strategy,

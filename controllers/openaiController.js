@@ -11,6 +11,7 @@ const crypto = require('crypto');
 // variants ("AMZN Mktp" / "Amazon.com", "COSTCO GAS #421" / "Costco gas") the
 // same way the Sankey / pivot views do — strengthening history matching.
 const { mergeVendorName } = require('../utils/vendorNormalize');
+const { frequencyLabel } = require('../utils/frequencyLabel');
 const {
   assembleBaseSystemPrompt,
   logSystemPromptBlockSizes,
@@ -1393,7 +1394,8 @@ function applyPendingWriteTopicSwitch(dialogueState, route, { pendingArmedAtStar
 }
 
 // Stable signature for a draft/create payload so a multi-round loop (or a retry)
-// can't create the same transaction twice within one turn.
+// can't create the same transaction twice within one turn. Agent-side only —
+// Cashflow createTransaction does not currently apply request-level idempotency.
 function draftSignature(obj) {
   if (!obj || typeof obj !== 'object') return null;
   const amt = Number(obj.amount);
@@ -1622,18 +1624,132 @@ const RECURRENCE_PATTERNS = [
   [/\bone[-\s]?time\b/i, 2],
 ];
 
-function frequencyLabel(freq) {
+// User-facing cadence for write receipts. Same mapping as frequencyLabel;
+// Once stays "One-time" to match the deterministic proposal copy.
+function frequencyDisplayLabel(freq) {
   const f = Number(freq);
-  if (f === 1) return 'daily';
-  if (f === 7) return 'weekly';
-  if (f === 14) return 'bi-weekly';
-  if (f === 15 || f === 16) return 'semi-monthly';
-  if (f >= 28 && f <= 31) return 'monthly';
-  if (f === 60) return 'bi-monthly';
-  if (f === 91) return 'quarterly';
-  if (f === 182 || f === 183) return 'semi-annually';
-  if (f === 365 || f === 366) return 'annually';
-  return 'one-time';
+  if (!Number.isFinite(f) || f <= 0 || f === 2) return 'One-time';
+  return frequencyLabel(f)
+    .split('-')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join('-');
+}
+
+function formatCommitAmount(amount) {
+  const n = Math.abs(Number(amount));
+  if (!Number.isFinite(n)) return '';
+  if (Number.isInteger(n)) return `$${n}`;
+  return `$${n.toFixed(2).replace(/\.00$/, '')}`;
+}
+
+// Date-only: take YYYY-MM-DD prefix so a UTC midnight ISO cannot shift the day.
+function formatCommitDate(start) {
+  const iso = String(start || '').slice(0, 10);
+  const m = moment(iso, 'YYYY-MM-DD', true);
+  return m.isValid() ? m.format('MMMM D, YYYY') : '';
+}
+
+function commitMatchesExpected(committed, expected) {
+  if (!committed || !expected || typeof expected !== 'object') {
+    return { ok: true, mismatched: [] };
+  }
+  const mismatched = [];
+  const filled = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+  const sameStr = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  if (filled(expected.title) && !sameStr(committed.title, expected.title)) mismatched.push('title');
+  if (filled(expected.type) && !sameStr(committed.type, expected.type)) mismatched.push('type');
+  if (expected.amount != null && Number.isFinite(Number(expected.amount)) && Number.isFinite(Number(committed.amount))) {
+    if (Math.abs(Number(committed.amount)) !== Math.abs(Number(expected.amount))) mismatched.push('amount');
+  }
+  if (filled(expected.start)) {
+    if (String(committed.start || '').slice(0, 10) !== String(expected.start).slice(0, 10)) mismatched.push('start');
+  }
+  if (expected.frequency != null && Number.isFinite(Number(expected.frequency))) {
+    if (Number(committed.frequency) !== Number(expected.frequency)) mismatched.push('frequency');
+  }
+  if (filled(expected.category) && !sameStr(committed.category, expected.category)) mismatched.push('category');
+  return { ok: mismatched.length === 0, mismatched };
+}
+
+function buildCreateAckLines(write, { accountName } = {}) {
+  const title = String((write && write.title) || '').trim() || 'transaction';
+  const amount = formatCommitAmount(write && write.amount);
+  const date = formatCommitDate(write && write.start);
+  const freq = Number(write && write.frequency);
+  const freqLabel = frequencyDisplayLabel(freq);
+  const dateLabel = freq === 2 ? 'Date' : 'Start date';
+  const lines = [
+    `Added ${title} to your forecast:`,
+    '',
+    `- Amount: ${amount}`,
+    `- ${dateLabel}: ${date}`,
+    `- Frequency: ${freqLabel}`,
+  ];
+  if (write && write.category && String(write.category).trim()) {
+    lines.push(`- Category: ${String(write.category).trim()}`);
+  }
+  if (accountName && String(accountName).trim()) {
+    lines.push(`- Account: ${String(accountName).trim()}`);
+  }
+  return lines.join('\n');
+}
+
+function buildDuplicateCreateAck(recentWrite, { accountName } = {}) {
+  const lines = ['That expense was already created, so I didn\'t add a duplicate.'];
+  if (recentWrite && (recentWrite.title || recentWrite.amount != null || recentWrite.start)) {
+    lines.push('');
+    if (recentWrite.title) lines.push(`- Title: ${String(recentWrite.title).trim()}`);
+    if (recentWrite.amount != null) lines.push(`- Amount: ${formatCommitAmount(recentWrite.amount)}`);
+    if (recentWrite.start) {
+      const freq = Number(recentWrite.frequency);
+      const dateLabel = freq === 2 ? 'Date' : 'Start date';
+      lines.push(`- ${dateLabel}: ${formatCommitDate(recentWrite.start)}`);
+    }
+    if (recentWrite.frequency != null) {
+      lines.push(`- Frequency: ${frequencyDisplayLabel(recentWrite.frequency)}`);
+    }
+    if (recentWrite.category) lines.push(`- Category: ${String(recentWrite.category).trim()}`);
+    if (accountName && String(accountName).trim()) {
+      lines.push(`- Account: ${String(accountName).trim()}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// After a successful createTransaction (or in-turn duplicate replay), skip the
+// free-form Azure narration round. Cashflow create does not detect DB duplicates;
+// duplicate here is agent lastCommitSignature protection only.
+function resolvePostCreateAck({ createMeta, sawCreateDuplicate, recentWrites, accountName } = {}) {
+  const meta = Array.isArray(createMeta) && createMeta.length > 0
+    ? createMeta[createMeta.length - 1]
+    : null;
+  if (meta && meta.write) {
+    const match = commitMatchesExpected(meta.write, meta.expected);
+    if (!match.ok) {
+      console.warn(`[write-audit] COMMIT MISMATCH fields=${match.mismatched.join(',')}`);
+      return {
+        content: 'The transaction was saved, but I couldn\'t confirm it matches the values we just agreed on. Please check your calendar.',
+        mode: 'deterministic_commit',
+      };
+    }
+    return {
+      content: buildCreateAckLines(meta.write, { accountName }),
+      mode: 'deterministic_commit',
+    };
+  }
+  if (sawCreateDuplicate) {
+    const writes = Array.isArray(recentWrites) ? recentWrites : [];
+    let last = null;
+    for (let i = writes.length - 1; i >= 0; i--) {
+      if (writes[i] && writes[i].action === 'create') { last = writes[i]; break; }
+    }
+    if (!last && writes.length > 0) last = writes[writes.length - 1];
+    return {
+      content: buildDuplicateCreateAck(last, { accountName }),
+      mode: 'duplicate_commit',
+    };
+  }
+  return null;
 }
 
 // Next occurrence of `weekdayIdx` (0=Sunday) ON OR AFTER `fromMoment`.
@@ -2179,6 +2295,11 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   // Client-side UI actions requested this turn (e.g. open the transaction
   // search panel). Returned alongside the prose for the frontend to execute.
   const uiActions = [];
+  // Phase 2.8: successful createTransaction (or in-turn duplicate) skips the
+  // free-form Azure narration round. createMeta holds committed create records
+  // plus the expected draft/effectiveArgs snapshot for proposal-vs-commit check.
+  const createMeta = [];
+  let sawCreateDuplicate = false;
 
   // Execute one batch of tool calls, applying dialogue-state handling + the
   // code-enforced write gate. Returns matching assistant/tool protocol messages.
@@ -2494,7 +2615,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         continue;
       }
 
-      const toolFn = functionMap[name];
+      const toolFn = (ctx.functionMap && typeof ctx.functionMap[name] === 'function')
+        ? ctx.functionMap[name]
+        : functionMap[name];
       if (!toolFn) {
         toolResults.push({ id: toolCall.id, name, content: JSON.stringify({ error: `Unknown tool: ${name}` }) });
         continue;
@@ -2628,8 +2751,11 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         console.log(`[write-audit] tool=${name} user=${ctx.userId} account=${ctx.accountId} draft=${JSON.stringify(state.draftTransaction)} modelArgs=${JSON.stringify(args)} effectiveArgs=${JSON.stringify(effectiveArgs)}`);
 
         // Idempotency: refuse a duplicate write within the same turn/session.
+        // This is agent in-turn protection via lastCommitSignature, not a
+        // Cashflow backend duplicate/existing-record check.
         const sig = draftSignature(effectiveArgs);
         if (sig && state.lastCommitSignature && sig === state.lastCommitSignature) {
+          if (name === 'createTransaction') sawCreateDuplicate = true;
           toolResults.push({ id: toolCall.id, name, content: JSON.stringify({
             duplicate: true,
             message: 'That transaction was just created; not creating it again.'
@@ -2646,9 +2772,12 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
           const wroteStart = String(result?.start ?? effectiveArgs.start ?? '').slice(0, 10);
           const wroteFreq = result?.frequency ?? effectiveArgs.frequency ?? null;
           const wroteCategory = result?.category ?? effectiveArgs.category ?? null;
+          const wroteType = result?.type ?? effectiveArgs.type ?? null;
+          const freqLabel = frequencyLabel(wroteFreq);
           const grounded = {
             ...(result ?? {}),
-            note: `WRITE COMMITTED. Your reply MUST restate EXACTLY these values and no others: "${wroteTitle}", $${Math.abs(Number(wroteAmount)) || wroteAmount}, ${frequencyLabel(wroteFreq)}${wroteStart ? `, starting ${wroteStart}` : ''}${wroteCategory ? `, category ${wroteCategory}` : ''} (transaction_id ${result?.transaction_id ?? 'n/a'}${result?.group_id != null ? `, recurring_id ${result.group_id}` : ''}). Do NOT mention any other amount, title, or date as the created transaction.`
+            frequency_label: freqLabel,
+            note: `WRITE COMMITTED. Your reply MUST restate EXACTLY these values and no others: "${wroteTitle}", $${Math.abs(Number(wroteAmount)) || wroteAmount}, ${freqLabel}${wroteStart ? `, starting ${wroteStart}` : ''}${wroteCategory ? `, category ${wroteCategory}` : ''} (transaction_id ${result?.transaction_id ?? 'n/a'}${result?.group_id != null ? `, recurring_id ${result.group_id}` : ''}). Do NOT mention any other amount, title, or date as the created transaction.`
           };
           let toolContent = JSON.stringify(grounded);
           if (toolContent.length > 13000) toolContent = toolContent.substring(0, 13000) + '..."_truncated":true}';
@@ -2666,17 +2795,33 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
             group_id: result?.group_id ?? null,
             title: wroteTitle,
             amount: wroteAmount,
+            type: wroteType,
             category: wroteCategory,
             frequency: wroteFreq,
             start: result?.start ?? effectiveArgs.start ?? null,
           };
           committedWrites.push(writeRecord);
+          if (writeRecord.action === 'create') {
+            createMeta.push({
+              write: writeRecord,
+              expected: {
+                title: effectiveArgs.title,
+                type: effectiveArgs.type,
+                amount: effectiveArgs.amount,
+                start: effectiveArgs.start,
+                frequency: effectiveArgs.frequency,
+                category: effectiveArgs.category,
+              },
+            });
+          }
           // Session memory so later turns can update/delete this by real id.
           recordRecentWrite(state, writeRecord);
-          await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId, {
-            reason: 'write_commit',
-            requestId: ctx.requestId,
-          });
+          if (ctx.skipCacheInvalidate !== true) {
+            await invalidateSelectedAccountToolCache(ctx.userId, ctx.accountId, {
+              reason: 'write_commit',
+              requestId: ctx.requestId,
+            });
+          }
           toolResults.push({ id: toolCall.id, name, content: toolContent });
         } catch (err) {
           blockedWrites.push({ tool: name, reason: 'execution_failed' });
@@ -2876,11 +3021,33 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   const toolsForTurn = Array.isArray(ctx.toolsForTurn) && ctx.toolsForTurn.length > 0
     ? ctx.toolsForTurn
     : functionSchemas;
+  const callAzure = typeof ctx.queryAzureOpenAI === 'function' ? ctx.queryAzureOpenAI : queryAzureOpenAI;
+
+  const finish = (content, extra = {}) => ({
+    content,
+    raw: extra.raw !== undefined ? extra.raw : null,
+    simOps: proposedSimOps,
+    uiActions,
+    writes: committedWrites,
+    blocked: blockedWrites,
+    writeResponseMode: extra.writeResponseMode || 'none',
+  });
 
   for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
     const { assistantToolMessage, toolMessages, toolResults } = await runBatch(batch);
     lastToolResults = toolResults;
     messages = enforceSize([...messages, assistantToolMessage, ...toolMessages], assistantToolMessage, toolMessages);
+
+    const postCreateAck = resolvePostCreateAck({
+      createMeta,
+      sawCreateDuplicate,
+      recentWrites: state.recentWrites,
+      accountName: ctx.accountName,
+    });
+    if (postCreateAck) {
+      console.log(`Tool loop: ${postCreateAck.mode}, skipping post-create Azure narration`);
+      return finish(postCreateAck.content, { writeResponseMode: postCreateAck.mode });
+    }
 
     const isLastRound = round === MAX_TOOL_ROUNDS;
     const convo = isLastRound ? [...messages, finalNudge] : messages;
@@ -2889,12 +3056,12 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     try {
       console.log(`Tool loop round ${round}/${MAX_TOOL_ROUNDS}: calling model with`, convo.length, 'messages (tool_choice:', isLastRound ? 'none' : 'auto', ')');
       const tAzure = Date.now();
-      response = await queryAzureOpenAI(convo, { tools: toolsForTurn, tool_choice: isLastRound ? 'none' : 'auto', requestId: ctx.requestId });
+      response = await callAzure(convo, { tools: toolsForTurn, tool_choice: isLastRound ? 'none' : 'auto', requestId: ctx.requestId });
       if (ctx.telemetry) ctx.telemetry.recordAzureCall(Date.now() - tAzure, response?.usage);
     } catch (error) {
       console.log('Tool loop model call failed:', error.message);
       console.log('Error details:', error.response?.data || error);
-      return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, uiActions, writes: committedWrites, blocked: blockedWrites };
+      return finish(buildToolFallbackResponse(lastToolResults), { writeResponseMode: 'model_error' });
     }
 
     const msg = response?.choices?.[0]?.message;
@@ -2904,10 +3071,10 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       continue;
     }
     console.log('Tool loop: final response received, content length:', msg?.content?.length || 0);
-    return { content: msg?.content || '', raw: response, simOps: proposedSimOps, uiActions, writes: committedWrites, blocked: blockedWrites };
+    return finish(msg?.content || '', { raw: response });
   }
 
-  return { content: buildToolFallbackResponse(lastToolResults), raw: null, simOps: proposedSimOps, uiActions, writes: committedWrites, blocked: blockedWrites };
+  return finish(buildToolFallbackResponse(lastToolResults), { writeResponseMode: 'model_error' });
 }
 
 // ----------------------------
@@ -3562,6 +3729,9 @@ exports.chat = async (req, res) => {
       pendingGoalConfirmationAtStart,
       goalDraftCompleteAtStart,
       userAffirmative,
+      accountName: hasAccount && selectedAccount
+        ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name || null)
+        : null,
       proposalInTranscript: proposalArmsWrite,
       goalProposalInTranscript: goalProposalArmsWrite,
       transcriptProposal,
@@ -3687,6 +3857,7 @@ exports.chat = async (req, res) => {
       write_attempted: writes.length > 0 || blocked.length > 0,
       write_committed: writes.length > 0,
       write_blocked: blocked.length > 0,
+      write_response_mode: result?.writeResponseMode || 'none',
     });
 
     const uiActions = mergeOpenSearchUiActions(
@@ -5639,6 +5810,14 @@ exports.__testables = {
   extractDateFromText,
   extractTitleFromText,
   frequencyLabel,
+  frequencyDisplayLabel,
+  formatCommitAmount,
+  formatCommitDate,
+  commitMatchesExpected,
+  buildCreateAckLines,
+  buildDuplicateCreateAck,
+  resolvePostCreateAck,
+  executeToolCalls,
   nextWeekdayOnOrAfter,
   buildDateReferenceBlock,
   buildUiContextBlock,

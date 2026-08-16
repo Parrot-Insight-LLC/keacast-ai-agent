@@ -18,6 +18,7 @@ const {
 } = require('../services/transactions.service');
 const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getKeaAccountContext, getBalances, createTransaction, deleteTransaction, deleteGroupTransactions, getTransactionById, updateTransaction, getGoals, getGoal, previewGoalCadence, createGoal, updateGoal, deleteGoal, rememberFact, recallFacts } = require('./keacast_tool_layer');
 const moment = require('moment');
+const { frequencyLabel } = require('../utils/frequencyLabel');
 
 // Smart data loading strategy to prevent memory issues
 const SMART_LIMITS = {
@@ -543,6 +544,7 @@ const functionMap = {
       category: body.category,
       start: body.start,
       frequency: body.frequency,
+      frequency_label: frequencyLabel(body.frequency),
       message: (result && result.message) || 'Transaction has been successfully created.',
     };
   },
