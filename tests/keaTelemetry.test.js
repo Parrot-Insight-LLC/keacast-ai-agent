@@ -221,6 +221,12 @@ async function run() {
     grounding_prefetch_ms: 42,
     capability_confidence_bucket: 'high',
     continuation_used: true,
+    effective_capability: 'financial_lookup',
+    pending_write_routing_reason: 'topic_switch',
+    grounding_evidence_status: 'ok',
+    historical_prefetch_page_count: 3,
+    historical_prefetch_row_count: 120,
+    historical_match_count: 40,
   });
   const pG = tG.toPayload();
   check('conversation_intent recorded', pG.conversation_intent === 'financial_lookup');
@@ -232,10 +238,21 @@ async function run() {
   check('grounding_prefetch_ms', pG.grounding_prefetch_ms === 42);
   check('capability_confidence_bucket', pG.capability_confidence_bucket === 'high');
   check('continuation_used true', pG.continuation_used === true);
+  check('effective_capability recorded', pG.effective_capability === 'financial_lookup');
+  check('pending_write_routing_reason topic_switch', pG.pending_write_routing_reason === 'topic_switch');
+  check('grounding_evidence_status ok', pG.grounding_evidence_status === 'ok');
+  check('historical_prefetch_page_count', pG.historical_prefetch_page_count === 3);
+  check('historical_prefetch_row_count', pG.historical_prefetch_row_count === 120);
+  check('historical_match_count', pG.historical_match_count === 40);
   check('grounding payload has no evidence', pG.evidence === undefined && pG.facts === undefined);
   check('grounding payload has no merchant', pG.merchant === undefined && pG.lastSubjectValue === undefined);
   check('grounding payload has no amounts', pG.amount === undefined && pG.expenseTotal === undefined);
   check('grounding payload has no message', pG.message === undefined && pG.prompt === undefined);
+
+  const tDefault = createKeaTelemetry({ requestId: 'req-grounding-default' });
+  const pDefault = tDefault.toPayload();
+  check('pending_write_routing_reason defaults none', pDefault.pending_write_routing_reason === 'none');
+  check('effective_capability defaults null', pDefault.effective_capability === null);
 
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;

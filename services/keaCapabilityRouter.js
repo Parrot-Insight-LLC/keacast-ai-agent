@@ -183,7 +183,7 @@ function isGoalWriteUtterance(text) {
 
 function isSimUtterance(text) {
   const m = String(text || '').toLowerCase();
-  return /\b(what if|hypothetically|simulate|simulation|if i (had|added|removed|cancelled|didn't))\b/.test(m);
+  return /\b(what if|hypothetically|simulate|if i (had|added|removed|cancelled|didn't))\b/.test(m);
 }
 
 function isNavUtterance(text) {
@@ -194,11 +194,15 @@ function isNavUtterance(text) {
 
 function isProductHelp(text) {
   const m = String(text || '').toLowerCase();
-  if (/\b(spend|spent|balance|afford|negative|how much)\b/.test(m)) return false;
-  return /\bwhat is (reconciliation|a forecast|keacast|matching|a satellite|rollover)\b/.test(m)
-    || /\bhow (does|do i|can i) (reconciliation|keacast|matching|forecast)/.test(m)
+  if (/\b(spend|spent|afford|negative)\b/.test(m)) return false;
+  if (/\bhow much\b/.test(m) && !/\bsimulation mode\b/.test(m)) return false;
+  if (/\b(what is|how does|how do i|explain)\b.{0,48}\bsimulation( mode)?\b/.test(m)) return true;
+  if (/\b(spend|spent|balance|afford|negative|how much)\b/.test(m)
+    && !/\bsimulation( mode)?\b/.test(m)) return false;
+  return /\bwhat is (reconciliation|a forecast|keacast|matching|a satellite|rollover|simulation mode)\b/.test(m)
+    || /\bhow (does|do i|can i) (reconciliation|keacast|matching|forecast|simulation)/.test(m)
     || /\b(what is reconciliation|how does keacast|how do i (use|link|match))\b/.test(m)
-    || /\bexplain (reconciliation|forecasting|matching)\b/.test(m);
+    || /\bexplain (reconciliation|forecasting|matching|simulation mode)\b/.test(m);
 }
 
 function isCasual(text) {
@@ -214,7 +218,7 @@ function isAffordability(text) {
 
 function isForecast(text) {
   const m = String(text || '').toLowerCase();
-  return /\b(go negative|be negative|run out|overdraft|upcoming|projected (balance|low)|will i (be|go) (broke|negative)|next month'?s? (balance|cashflow))\b/.test(m);
+  return /\b(go negative|be negative|run out|overdraft|upcoming|projected (balance|low)|will i (be|go) (broke|negative)|next month'?s? (balance|cashflow)|what will my (available )?balance)\b/.test(m);
 }
 
 function isLookup(text) {
@@ -226,6 +230,51 @@ function asksForFinancialAmount(text) {
   const m = String(text || '').toLowerCase();
   return /\$\s*\d/.test(m)
     || /\b(how much|spend|spent|balance|afford|negative|income|expense|total)\b/.test(m);
+}
+
+function isClearTopicSwitch(text) {
+  return isLookup(text)
+    || isForecast(text)
+    || isAffordability(text)
+    || isProductHelp(text)
+    || isCasual(text)
+    || isNavUtterance(text)
+    || isSimUtterance(text);
+}
+
+function draftSlotHaystack(draft) {
+  if (!draft || typeof draft !== 'object') return '';
+  return ['title', 'category', 'amount', 'start', 'type', 'frequency', 'merchant_name']
+    .map((k) => (draft[k] != null ? String(draft[k]).toLowerCase() : ''))
+    .filter(Boolean)
+    .join(' ');
+}
+
+function isWriteAmendmentOrSlotFill(text, pendingDraft) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (isClearTopicSwitch(raw)) return false;
+  if (isWriteUtterance(raw) || isGoalWriteUtterance(raw)) return true;
+  const m = raw.toLowerCase();
+  if (/\b(make it|change it|change that|change the amount|change the date|make that|use \w+ instead|actually use|instead)\b/.test(m)) {
+    return true;
+  }
+  if (/\b(make|change|switch)\b.{0,24}\b(weekly|monthly|bi-?weekly|daily|annually|once)\b/.test(m)) {
+    return true;
+  }
+  if (/^(make it |change (it|that|the amount) (to )?)?\$?\s*[\d,]+(\.\d{2})?\s*$/i.test(m)) {
+    return true;
+  }
+  if (/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow)\b/.test(m)
+    && (/\b(change|make|to|on)\b/.test(m) || m.split(/\s+/).length <= 4)) {
+    return true;
+  }
+  const hay = draftSlotHaystack(pendingDraft);
+  if (hay && /\b(use|change|actually|instead|make)\b/.test(m)) {
+    const tokens = m.split(/[^a-z0-9.$]+/).filter((t) => t.length > 2);
+    if (tokens.some((t) => hay.includes(t))) return true;
+  }
+  return false;
 }
 
 function pendingWriteType(input) {
@@ -264,15 +313,29 @@ function routeCapability(input = {}) {
     }
   }
 
-  // 2. Pending write + affirmative → confirmation
+  // 2. Pending write + affirmative → confirmation, unless a topic switch
+  //    suspended confirmation (needsReconfirm). Generic "yes" must not
+  //    commit an old proposal; the draft slots stay for a later re-propose.
   if (pendingType && input.userAffirmative) {
-    return { ...base, capability: 'confirmation', confidence: 'high' };
+    const ds = input.dialogueState || {};
+    const txSuspended = ds.needsReconfirm === true;
+    const goalSuspended = ds.goalNeedsReconfirm === true;
+    const confirmationSuspended =
+      (pendingType === 'goal' && goalSuspended)
+      || (pendingType === 'transaction' && txSuspended)
+      || (pendingType === 'both' && (txSuspended || goalSuspended));
+    if (!confirmationSuspended) {
+      return { ...base, capability: 'confirmation', confidence: 'high' };
+    }
   }
 
-  // 3. Pending write + non-affirmative amendment / slot-fill
+  // 3. Pending write + amendment / slot-fill only — unrelated topics fall through.
   if (pendingType && !input.userAffirmative) {
-    const capability = pendingType === 'goal' ? 'goal_write' : 'transaction_write';
-    return { ...base, capability, confidence: 'high' };
+    const draft = pendingType === 'goal' ? input.pendingGoalDraft : input.pendingDraft;
+    if (isWriteAmendmentOrSlotFill(message, draft || input.pendingDraft)) {
+      const capability = pendingType === 'goal' ? 'goal_write' : 'transaction_write';
+      return { ...base, capability, confidence: 'high' };
+    }
   }
 
   // 4. Short financial continuation (same authorized account only)
@@ -327,20 +390,20 @@ function routeCapability(input = {}) {
   if (input.simulationMode && isSimUtterance(message)) {
     return { ...base, capability: 'simulation', confidence: 'high', accountChanged };
   }
+  if (isProductHelp(message)) {
+    return { ...base, capability: 'product_help', confidence: 'high', accountChanged };
+  }
+  if (isSimUtterance(message)) {
+    return { ...base, capability: 'simulation', confidence: 'medium', accountChanged };
+  }
   if (isGoalWriteUtterance(message)) {
     return { ...base, capability: 'goal_write', confidence: 'high', accountChanged };
   }
   if (isWriteUtterance(message)) {
     return { ...base, capability: 'transaction_write', confidence: 'high', accountChanged };
   }
-  if (isSimUtterance(message)) {
-    return { ...base, capability: 'simulation', confidence: 'medium', accountChanged };
-  }
   if (isNavUtterance(message)) {
     return { ...base, capability: 'navigation_ui', confidence: 'high', accountChanged };
-  }
-  if (isProductHelp(message)) {
-    return { ...base, capability: 'product_help', confidence: 'high', accountChanged };
   }
   if (isCasual(message)) {
     return { ...base, capability: 'casual_conversation', confidence: 'high', accountChanged };
@@ -419,4 +482,9 @@ module.exports = {
   applyContinuationPersistence,
   asksForFinancialAmount,
   clipSubject,
+  isWriteAmendmentOrSlotFill,
+  isProductHelp,
+  isSimUtterance,
+  isLookup,
+  isForecast,
 };

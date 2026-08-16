@@ -23,6 +23,15 @@ function hydrate(tx) {
   };
 }
 
+function halfOpenRange(startDate, endDate) {
+  const start = startDate;
+  const endMoment = moment(endDate, 'YYYY-MM-DD', true).isValid()
+    ? moment(endDate, 'YYYY-MM-DD')
+    : moment(endDate);
+  const endExclusive = endMoment.clone().add(1, 'day').format('YYYY-MM-DD');
+  return { start, endExclusive };
+}
+
 async function getTransactionsByUserAndAccount(userId, accountId, opts={}) {
   const now = moment().subtract(1,'days');
   const start = opts.startDate || now.clone().subtract(1,'years').format('YYYY-MM-DD');
@@ -30,6 +39,7 @@ async function getTransactionsByUserAndAccount(userId, accountId, opts={}) {
   const page = opts.page || 1;
   const limit = opts.limit || 100; // Reduced from unlimited to prevent memory issues
   const offset = (page - 1) * limit;
+  const range = halfOpenRange(start, end);
 
   // join to categories for logos (user-scoped) with pagination
   // Note: LIMIT and OFFSET cannot be parameters in MySQL prepared statements
@@ -40,11 +50,12 @@ async function getTransactionsByUserAndAccount(userId, accountId, opts={}) {
       ON t.category COLLATE utf8mb4_unicode_ci = c.name COLLATE utf8mb4_unicode_ci
      AND c.user_id = ?
     WHERE t.accountid = ?
-      AND t.start BETWEEN ? AND ?
+      AND t.start >= ?
+      AND t.start < ?
     ORDER BY t.start DESC
     LIMIT ${limit} OFFSET ${offset}
   `;
-  const rows = await query(sql, [userId, accountId, start, end]);
+  const rows = await query(sql, [userId, accountId, range.start, range.endExclusive]);
   return rows.map(hydrate);
 }
 
@@ -52,15 +63,17 @@ async function getTransactionsByUserAndAccountCount(userId, accountId, opts={}) 
   const now = moment().subtract(1,'days');
   const start = opts.startDate || now.clone().subtract(1,'years').format('YYYY-MM-DD');
   const end = opts.endDate || now.clone().add(2,'years').format('YYYY-MM-DD');
+  const range = halfOpenRange(start, end);
 
   // Get total count for pagination
   const sql = `
     SELECT COUNT(*) as total
     FROM transactions t
     WHERE t.accountid = ?
-      AND t.start BETWEEN ? AND ?
+      AND t.start >= ?
+      AND t.start < ?
   `;
-  const result = await query(sql, [accountId, start, end]);
+  const result = await query(sql, [accountId, range.start, range.endExclusive]);
   return result[0]?.total || 0;
 }
 
@@ -191,6 +204,7 @@ async function getTransactionSummary(userId, accountId, opts={}) {
 }
 
 module.exports = {
+  halfOpenRange,
   getTransactionsByUserAndAccount,
   getTransactionsByUserAndAccountCount,
   getTransactionsByUserAndAccountPaginated,

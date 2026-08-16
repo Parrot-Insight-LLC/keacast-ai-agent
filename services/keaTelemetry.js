@@ -82,6 +82,12 @@ function createKeaTelemetry({ requestId } = {}) {
     grounding_prefetch_ms: 0,
     capability_confidence_bucket: null,
     continuation_used: false,
+    effective_capability: null,
+    pending_write_routing_reason: 'none',
+    grounding_evidence_status: null,
+    historical_prefetch_page_count: null,
+    historical_prefetch_row_count: null,
+    historical_match_count: null,
   };
 
   function markStart(name) {
@@ -150,6 +156,24 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (flags.continuation_used === true || flags.continuation_used === false) {
       grounding.continuation_used = flags.continuation_used;
+    }
+    if (flags.effective_capability === null || typeof flags.effective_capability === 'string') {
+      grounding.effective_capability = flags.effective_capability;
+    }
+    if (typeof flags.pending_write_routing_reason === 'string') {
+      grounding.pending_write_routing_reason = flags.pending_write_routing_reason;
+    }
+    if (flags.grounding_evidence_status === null || typeof flags.grounding_evidence_status === 'string') {
+      grounding.grounding_evidence_status = flags.grounding_evidence_status;
+    }
+    if (flags.historical_prefetch_page_count != null) {
+      grounding.historical_prefetch_page_count = Number(flags.historical_prefetch_page_count) || 0;
+    }
+    if (flags.historical_prefetch_row_count != null) {
+      grounding.historical_prefetch_row_count = Number(flags.historical_prefetch_row_count) || 0;
+    }
+    if (flags.historical_match_count != null) {
+      grounding.historical_match_count = Number(flags.historical_match_count) || 0;
     }
   }
 
@@ -280,6 +304,12 @@ function createKeaTelemetry({ requestId } = {}) {
       grounding_prefetch_ms: grounding.grounding_prefetch_ms,
       capability_confidence_bucket: grounding.capability_confidence_bucket,
       continuation_used: !!grounding.continuation_used,
+      effective_capability: grounding.effective_capability,
+      pending_write_routing_reason: grounding.pending_write_routing_reason || 'none',
+      grounding_evidence_status: grounding.grounding_evidence_status,
+      historical_prefetch_page_count: grounding.historical_prefetch_page_count,
+      historical_prefetch_row_count: grounding.historical_prefetch_row_count,
+      historical_match_count: grounding.historical_match_count,
       estimated_block_chars: blocks,
     };
     for (const r of azureRounds) {

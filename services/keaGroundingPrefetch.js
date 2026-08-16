@@ -82,11 +82,13 @@ function negativesInPeriod(snapshot, period) {
 
 function snapshotBalanceFacts(snapshot) {
   const facts = {};
-  const balance = num(snapshot.balance);
-  const available = num(snapshot.available);
+  const reconciled = num(snapshot.reconciledBalance != null ? snapshot.reconciledBalance : snapshot.balance);
+  const current = num(snapshot.currentBalance != null ? snapshot.currentBalance : snapshot.current);
+  const available = num(snapshot.availableBalance != null ? snapshot.availableBalance : snapshot.available);
+  if (reconciled != null) facts.reconciledBalance = reconciled;
+  if (current != null) facts.currentBalance = current;
+  if (available != null) facts.availableBalance = available;
   const credit = num(snapshot.credit_limit);
-  if (balance != null) facts.balance = balance;
-  if (available != null) facts.available = available;
   if (credit != null && credit > 0) facts.credit_limit = credit;
   const sav = snapshot.savings && typeof snapshot.savings === 'object' ? snapshot.savings : null;
   if (sav) {
@@ -110,11 +112,13 @@ function snapshotBalanceFacts(snapshot) {
   return facts;
 }
 
-function snapshotLimitations() {
+function snapshotLimitations(snapshot) {
+  const extra = Array.isArray(snapshot && snapshot.limitations) ? snapshot.limitations : [];
   return [
     'upcoming_window_15d',
     'negatives_preview_5_of_90d',
     'recents_capped_10',
+    ...extra.filter((x) => typeof x === 'string'),
   ];
 }
 
@@ -156,13 +160,13 @@ async function fetchCompletePeriodTransactions({
   const limit = Number(first?.pagination?.limit) || pageLimit;
 
   if (!Number.isFinite(total)) {
-    return { transactions: rows, complete: false, total: rows.length, reason: 'missing_total' };
+    return { transactions: rows, complete: false, total: rows.length, pageCount: 1, rowCount: rows.length, reason: 'missing_total' };
   }
   if (total > maxRows) {
-    return { transactions: [], complete: false, total, reason: 'period_exceeds_prefetch_cap' };
+    return { transactions: [], complete: false, total, pageCount: 1, rowCount: 0, reason: 'period_exceeds_prefetch_cap' };
   }
   if (total === 0) {
-    return { transactions: [], complete: true, total: 0 };
+    return { transactions: [], complete: true, total: 0, pageCount: 1, rowCount: 0 };
   }
 
   let page = 1;
@@ -186,15 +190,30 @@ async function fetchCompletePeriodTransactions({
     transactions: complete ? rows.slice(0, total) : rows,
     complete,
     total,
+    pageCount: page,
+    rowCount: complete ? Math.min(rows.length, total) : rows.length,
     reason: complete ? null : 'incomplete_period_pages',
   };
 }
 
-function aggregateTransactions(transactions, { subjectKind, subjectValue } = {}) {
+function isHistoricalSpendQuery(message) {
+  return /\b(spent|spend|spending|what did i spend)\b/i.test(String(message || ''));
+}
+
+function isExcludedFromHistoricalSpend(t) {
+  const dup = t && t.duplicate;
+  if (dup === 1 || dup === '1' || dup === true) return true;
+  const ft = String((t && t.forecast_type) || '').toUpperCase();
+  if (ft === 'F' || ft === 'RF') return true;
+  return false;
+}
+
+function aggregateTransactions(transactions, { subjectKind, subjectValue, postedExpensesOnly } = {}) {
   let expenseTotal = 0;
   let incomeTotal = 0;
   let transactionCount = 0;
   for (const t of transactions || []) {
+    if (postedExpensesOnly && isExcludedFromHistoricalSpend(t)) continue;
     if (!txnMatchesSubject(t, subjectKind, subjectValue)) continue;
     const amount = num(t.amount);
     if (amount == null) continue;
@@ -229,7 +248,7 @@ function buildSnapshotEvidence(snapshot, { period, slots, kind, currentDate } = 
     return emptyEvidence({ limitations: ['snapshot_unavailable'] });
   }
   const facts = snapshotBalanceFacts(snapshot);
-  const limitations = snapshotLimitations();
+  const limitations = snapshotLimitations(snapshot);
   if (kind === 'affordability') {
     if (slots?.amount != null) facts.requestedAmount = slots.amount;
     if (period) facts.requestedPeriod = period.label;
@@ -274,10 +293,12 @@ async function prefetchGrounding({
   assertFn,
   fetchPage,
   pageLimit,
+  message,
 } = {}) {
   const effective = policy?.effectiveCapability || route?.capability;
   const slots = route?.slots || {};
   const period = slots.period || null;
+  const msg = message || route?.message || '';
 
   if (!policy || policy.grounding === 'NONE' || !policy.groundingRequired) {
     return emptyEvidence({ status: 'ok', source: [], limitations: [] });
@@ -335,18 +356,28 @@ async function prefetchGrounding({
       });
 
       if (!fetched.complete) {
-        return emptyEvidence({
+        const incomplete = emptyEvidence({
           status: fetched.reason === 'period_exceeds_prefetch_cap' ? 'unavailable' : 'partial',
           source: ['user_transactions'],
           period,
           dataAsOf: snapshotDataAsOf(snapshot, currentDate),
           limitations: [fetched.reason || 'incomplete_period_pages'],
         });
+        incomplete.prefetchMeta = {
+          pageCount: fetched.pageCount || 1,
+          rowCount: fetched.rowCount || 0,
+          matchCount: 0,
+        };
+        return incomplete;
       }
 
+      const postedExpensesOnly = isHistoricalSpendQuery(msg)
+        || slots.subjectKind === 'merchant'
+        || slots.subjectKind === 'category';
       const agg = aggregateTransactions(fetched.transactions, {
         subjectKind: slots.subjectKind === 'account' ? null : slots.subjectKind,
         subjectValue: slots.subjectKind === 'account' ? null : slots.subjectValue,
+        postedExpensesOnly,
       });
       return {
         status: 'ok',
@@ -358,7 +389,14 @@ async function prefetchGrounding({
           expenseTotal: agg.expenseTotal,
           incomeTotal: agg.incomeTotal,
         },
-        limitations: ['includes_all_forecast_types_in_window'],
+        limitations: postedExpensesOnly
+          ? ['posted_actuals_only', 'duplicates_excluded']
+          : ['includes_all_forecast_types_in_window'],
+        prefetchMeta: {
+          pageCount: fetched.pageCount || 1,
+          rowCount: fetched.rowCount || fetched.transactions.length,
+          matchCount: agg.transactionCount,
+        },
       };
     } catch (err) {
       const code = err && err.code;
@@ -414,6 +452,7 @@ function buildEvidenceSystemSection(evidence) {
   };
   return [
     'GROUNDED EVIDENCE (authoritative for this answer — do not contradict; do not invent missing dollar values or dates; respect limitations; partial evidence does not justify unsupported certainty):',
+    'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available); savingsPotential = lowest projected balance through the current month (not available money).',
     JSON.stringify(compact),
     compact.status === 'partial'
       ? 'Partial evidence: qualify conclusions. Do not state a strong yes/no affordability result or any unsupported total.'
@@ -432,4 +471,6 @@ module.exports = {
   buildSnapshotEvidence,
   buildEvidenceSystemSection,
   emptyEvidence,
+  isHistoricalSpendQuery,
+  isExcludedFromHistoricalSpend,
 };

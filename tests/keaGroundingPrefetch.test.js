@@ -17,6 +17,8 @@ const SNAPSHOT = {
   schemaVersion: 1,
   accountid: 10,
   balance: 1200,
+  reconciledBalance: 1200,
+  current: 1150,
   available: 1100,
   credit_limit: 0,
   dataAsOf: '2026-08-16T12:00:00.000Z',
@@ -75,7 +77,10 @@ async function run() {
     assertFn: async () => ({ access: 'owner' }),
   });
   check('balance evidence from snapshot', balanceEv.source.includes('kea_snapshot'));
-  check('balance fact present', balanceEv.facts.balance === 1200);
+  check('balance fact present', balanceEv.facts.reconciledBalance === 1200);
+  check('availableBalance mapped', balanceEv.facts.availableBalance === 1100);
+  check('currentBalance mapped', balanceEv.facts.currentBalance === 1150);
+  check('no ambiguous facts.balance key', balanceEv.facts.balance === undefined);
   check('balance did not call transaction read', unusedCalls.length === 0);
   check('upcoming window labeled 15 days', balanceEv.facts.upcomingWindowDays === 15);
   check('balance status ok', balanceEv.status === 'ok');
@@ -144,6 +149,7 @@ async function run() {
     currentDate: '2026-08-16',
     policy: resolveGroundingPolicy(walmartRoute, { message: 'How much did I spend at Walmart last month?' }),
     route: walmartRoute,
+    message: 'How much did I spend at Walmart last month?',
     fetchPage,
     pageLimit: 50,
     assertFn: async (userId, accountId) => {
@@ -281,7 +287,11 @@ async function run() {
 
   const okBlock = buildEvidenceSystemSection(balanceEv);
   check('evidence block labeled GROUNDED EVIDENCE', okBlock.startsWith('GROUNDED EVIDENCE'));
+  check('evidence glossary names availableBalance', /availableBalance = Keacast UI Available/.test(okBlock));
+  check('evidence glossary says savingsPotential is not available', /not available money/.test(okBlock));
   check('evidence JSON has no account hash field', !/"accountKey"/.test(okBlock));
+  check('evidence JSON omits prefetchMeta', !/"prefetchMeta"/.test(okBlock));
+  check('evidence JSON omits facts.balance', !/"balance"\s*:/.test(okBlock.split('\n').find((l) => l.startsWith('{')) || ''));
 
   section('complete-period helper');
 
@@ -299,6 +309,74 @@ async function run() {
   check('used more than one page', pageCalls.length === 3);
   const agg = aggregateTransactions(rows);
   check('aggregate expenseTotal is full period', agg.expenseTotal === 120);
+
+  section('historical spend — posted actuals, duplicates, variants, month-end');
+
+  const mixedRows = [
+    { name: 'Walmart', amount: -10, start: '2026-07-02', forecast_type: 'A' },
+    { name: 'Walmart', amount: -10, start: '2026-07-03', forecast_type: 'F' },
+    { name: 'Walmart', amount: -10, start: '2026-07-04', forecast_type: 'RF' },
+    { name: 'Walmart', amount: -10, start: '2026-07-05', forecast_type: 'A', duplicate: 1 },
+    { name: 'WALMART', amount: -10, start: '2026-07-06' },
+    { name: 'WAL-MART', amount: -10, start: '2026-07-07' },
+    { name: 'Walmart #1234', amount: -10, start: '2026-07-08' },
+    { merchant_name: 'WALMART.COM', amount: -10, start: '2026-07-09' },
+    { title: 'Walmart Supercenter', amount: -10, start: '2026-07-10' },
+    { name: 'Costco', amount: -99, start: '2026-07-11', category: 'Walmart', forecast_type: 'A' },
+    { name: 'Walmart', amount: -10, start: '2026-07-31 18:45:00', forecast_type: 'A' },
+  ];
+  const { fetchPage: mixedFetch } = paginatedFetch(mixedRows, 100);
+  const mixedEv = await prefetchGrounding({
+    trustedUserId: 5,
+    accountId: 10,
+    snapshot: SNAPSHOT,
+    currentDate: '2026-08-16',
+    policy: resolveGroundingPolicy(walmartRoute, { message: 'How much did I spend at Walmart last month?' }),
+    route: walmartRoute,
+    message: 'How much did I spend at Walmart last month?',
+    fetchPage: mixedFetch,
+    assertFn: async () => ({ access: 'owner' }),
+  });
+  check('F/RF Walmart forecasts excluded from spent', mixedEv.facts.expenseTotal === 70);
+  check('posted Walmart actuals included', mixedEv.facts.transactionCount === 7);
+  check('duplicate=1 excluded', mixedEv.facts.transactionCount === 7);
+  check('category is not a merchant fallback', mixedEv.facts.expenseTotal !== 169);
+  check('posted_actuals limitation', (mixedEv.limitations || []).includes('posted_actuals_only'));
+  check('duplicates_excluded limitation', (mixedEv.limitations || []).includes('duplicates_excluded'));
+  check('prefetchMeta page count', mixedEv.prefetchMeta.pageCount === 1);
+  check('prefetchMeta match count is posted matches', mixedEv.prefetchMeta.matchCount === 7);
+
+  const manyWalmart = new Array(60).fill(0).map((_, i) => ({
+    name: 'Walmart',
+    amount: -5,
+    start: '2026-07-12',
+    forecast_type: 'A',
+  }));
+  const { fetchPage: manyFetch, calls: manyCalls } = paginatedFetch(manyWalmart, 100);
+  const manyEv = await prefetchGrounding({
+    trustedUserId: 5,
+    accountId: 10,
+    snapshot: SNAPSHOT,
+    currentDate: '2026-08-16',
+    policy: resolveGroundingPolicy(walmartRoute, { message: 'How much did I spend at Walmart last month?' }),
+    route: walmartRoute,
+    message: 'How much did I spend at Walmart last month?',
+    fetchPage: manyFetch,
+    pageLimit: 100,
+    assertFn: async () => ({ access: 'owner' }),
+  });
+  check('>50 Walmart rows complete deterministic total', manyEv.status === 'ok' && manyEv.facts.expenseTotal === 300);
+  check('>50 Walmart included all matches', manyEv.facts.transactionCount === 60);
+  check('page size 100 used', manyCalls[0] && manyCalls[0].limit === 100);
+
+  const { halfOpenRange } = require('../services/transactions.service');
+  const july = halfOpenRange('2026-07-01', '2026-07-31');
+  check('half-open end is day after period end', july.start === '2026-07-01' && july.endExclusive === '2026-08-01');
+  const monthEndRow = '2026-07-31 18:45:00';
+  const inclusiveEndWouldDrop = monthEndRow <= '2026-07-31';
+  const halfOpenKeeps = monthEndRow >= july.start && monthEndRow < july.endExclusive;
+  check('inclusive YYYY-MM-DD end would drop month-end DATETIME', inclusiveEndWouldDrop === false);
+  check('half-open range keeps month-end DATETIME', halfOpenKeeps === true);
 }
 
 module.exports = { run };

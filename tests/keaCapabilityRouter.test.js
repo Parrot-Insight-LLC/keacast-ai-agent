@@ -6,6 +6,7 @@ const {
   applyContinuationPersistence,
   shouldPersistContinuation,
   parsePeriod,
+  isWriteAmendmentOrSlotFill,
 } = require('../services/keaCapabilityRouter');
 const { __testables: T } = require('../controllers/openaiController');
 
@@ -16,6 +17,8 @@ function route(message, extra = {}) {
     simulationMode: extra.simulationMode === true,
     pendingWrite: extra.pendingWrite === true,
     pendingGoalWrite: extra.pendingGoalWrite === true,
+    pendingDraft: extra.pendingDraft || null,
+    pendingGoalDraft: extra.pendingGoalDraft || null,
     userAffirmative: extra.userAffirmative === true,
     dialogueState: extra.dialogueState || T.emptyDialogueState(),
     accountId: extra.accountId || '10',
@@ -133,7 +136,7 @@ async function run() {
     userAffirmative: false,
     dialogueState: priorAfford,
   });
-  check('pending write beats continuation', pendingBeatsCont.capability === 'transaction_write');
+  check('pending write does not own unrelated continuation', pendingBeatsCont.capability === 'continuation');
 
   section('continuation persistence rules');
 
@@ -158,6 +161,108 @@ async function run() {
   const keep = { lastCapability: 'financial_lookup', lastSubjectValue: 'walmart' };
   applyContinuationPersistence(keep, route('thanks'), { accountId: '10' });
   check('thanks does not overwrite financial continuation', keep.lastCapability === 'financial_lookup');
+
+  section('pending-write amendment vs topic switch');
+
+  const pendingDraft = { title: 'Coffee', type: 'expense', amount: 8, start: '2026-08-20', category: 'Dining' };
+  const p = (message, extra = {}) => route(message, {
+    pendingWrite: true,
+    userAffirmative: extra.userAffirmative === true,
+    pendingDraft,
+    ...extra,
+  });
+
+  check('make it $50 → transaction_write', p('make it $50').capability === 'transaction_write');
+  check('change it to Friday → transaction_write', p('change it to Friday').capability === 'transaction_write');
+  check('actually use Groceries → transaction_write', p('actually use Groceries').capability === 'transaction_write');
+  check('make that monthly → transaction_write', p('make that monthly').capability === 'transaction_write');
+  check('use Dining instead → transaction_write', p('use Dining instead').capability === 'transaction_write');
+  check('change the amount → transaction_write', p('change the amount').capability === 'transaction_write');
+  check('Walmart last month → financial_lookup', p('How much did I spend at Walmart last month?').capability === 'financial_lookup');
+  check('available balance → financial_lookup', p("What's my available balance?").capability === 'financial_lookup');
+  check("What's my balance? → financial_lookup", route("What's my balance?").capability === 'financial_lookup');
+  check('how much available right now → financial_lookup', route('How much money is available right now?').capability === 'financial_lookup');
+  check('reconciliation → product_help', p('What is reconciliation?').capability === 'product_help');
+  check('Hi Kea → casual', p('Hi Kea').capability === 'casual_conversation');
+  check('pending + yes → confirmation', p('yes', { userAffirmative: T.isAffirmativeMessage('yes') }).capability === 'confirmation');
+  const yesAfterSwitch = p('yes', {
+    userAffirmative: T.isAffirmativeMessage('yes'),
+    dialogueState: { ...T.emptyDialogueState(), needsReconfirm: true, draftTransaction: pendingDraft },
+  });
+  check('pending + yes after needsReconfirm is not confirmation', yesAfterSwitch.capability !== 'confirmation');
+
+  check('amendment helper true for make it $50', isWriteAmendmentOrSlotFill('make it $50', pendingDraft) === true);
+  check('amendment helper false for Walmart', isWriteAmendmentOrSlotFill('How much did I spend at Walmart last month?', pendingDraft) === false);
+
+  section('simulation vs product-help');
+  check('What is Simulation Mode? → product_help', route('What is Simulation Mode?').capability === 'product_help');
+  check('How does Simulation Mode work? → product_help', route('How does Simulation Mode work?').capability === 'product_help');
+  check('What if I add a $500 expense next month? → simulation', route('What if I add a $500 expense next month?').capability === 'simulation');
+  check('Simulate a $500 expense next month. → simulation', route('Simulate a $500 expense next month.').capability === 'simulation');
+
+  section('current vs forecast balance');
+  check('available balance lookup', route("What's my available balance?").capability === 'financial_lookup');
+  check('will I go negative next month forecast', route('Will I go negative next month?').capability === 'financial_forecast');
+  check('what will my balance be next month forecast', route('What will my balance be next month?').capability === 'financial_forecast');
+
+  section('topic-switch needsReconfirm lifecycle');
+  const ds = T.emptyDialogueState();
+  ds.draftTransaction = { ...pendingDraft };
+  ds.pendingConfirmation = true;
+  const walmartRoute = p('How much did I spend at Walmart last month?');
+  const topicSwitched = T.applyPendingWriteTopicSwitch(ds, walmartRoute, {
+    pendingArmedAtStart: true,
+    userAffirmative: false,
+  });
+  check('topic switch reason', topicSwitched.reason === 'topic_switch' && topicSwitched.switched === true);
+  check('pendingConfirmation cleared', ds.pendingConfirmation === false);
+  check('needsReconfirm set', ds.needsReconfirm === true);
+  check('draft slots preserved', ds.draftTransaction.amount === 8 && ds.draftTransaction.title === 'Coffee');
+  check(
+    'generic yes not armed after topic switch',
+    T.isWriteAllowed(false, T.isDraftProposable(ds.draftTransaction) && ds.needsReconfirm !== true, true, false) === false
+  );
+  ds.pendingConfirmation = true;
+  ds.needsReconfirm = false;
+  check(
+    're-propose then yes is armed',
+    T.isWriteAllowed(true, T.isDraftProposable(ds.draftTransaction) && ds.needsReconfirm !== true, true, false) === true
+  );
+
+  const gds = T.emptyDialogueState();
+  gds.draftGoal = { title: 'Vacation', target_amount: 1000, end_date: '2026-12-01', frequency: '30' };
+  gds.pendingGoalConfirmation = true;
+  const goalLookup = route('How much did I spend at Walmart last month?', {
+    pendingGoalWrite: true,
+    userAffirmative: false,
+  });
+  const gSwitch = T.applyPendingWriteTopicSwitch(gds, goalLookup, {
+    pendingArmedAtStart: true,
+    userAffirmative: false,
+  });
+  check('goal topic switch', gSwitch.reason === 'topic_switch');
+  check('goal draft preserved', gds.draftGoal.title === 'Vacation');
+  check('goalNeedsReconfirm set', gds.goalNeedsReconfirm === true);
+  check('goal pendingConfirmation cleared', gds.pendingGoalConfirmation === false);
+
+  const gp = (message, extra = {}) => route(message, {
+    pendingGoalWrite: true,
+    userAffirmative: extra.userAffirmative === true,
+    pendingGoalDraft: { title: 'Vacation', target_amount: 1000, end_date: '2026-12-01', frequency: '30' },
+    ...extra,
+  });
+  check('goal make it $50 → goal_write', gp('make it $50').capability === 'goal_write');
+  check('goal Walmart → financial_lookup', gp('How much did I spend at Walmart last month?').capability === 'financial_lookup');
+  check('goal available balance → financial_lookup', gp("What's my available balance?").capability === 'financial_lookup');
+  check('goal Hi Kea → casual', gp('Hi Kea').capability === 'casual_conversation');
+  check('goal + yes → confirmation', gp('yes', { userAffirmative: T.isAffirmativeMessage('yes') }).capability === 'confirmation');
+  check(
+    'goal + yes after needsReconfirm is not confirmation',
+    gp('yes', {
+      userAffirmative: T.isAffirmativeMessage('yes'),
+      dialogueState: { ...T.emptyDialogueState(), goalNeedsReconfirm: true },
+    }).capability !== 'confirmation'
+  );
 }
 
 module.exports = { run };

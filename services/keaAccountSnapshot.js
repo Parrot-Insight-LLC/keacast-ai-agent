@@ -205,6 +205,11 @@ function compactSelectedAccount(account, currentDate) {
     account_type: account.account_type || account.type || null,
     balance: typeof account.balance === 'number' ? account.balance : Number(account.balance),
     available: typeof account.available === 'number' ? account.available : Number(account.available),
+    current: typeof account.current === 'number' ? account.current : (Number.isFinite(Number(account.current)) ? Number(account.current) : undefined),
+    reconciledBalance: typeof account.reconciledBalance === 'number'
+      ? account.reconciledBalance
+      : (typeof account.balance === 'number' ? account.balance : Number(account.balance)),
+    limitations: Array.isArray(account.limitations) ? account.limitations.slice() : undefined,
     credit_limit: typeof account.credit_limit === 'number' ? account.credit_limit : Number(account.credit_limit) || undefined,
     plaid_latest: account.plaid_latest || null,
     savings: compactSavings(account.savings),

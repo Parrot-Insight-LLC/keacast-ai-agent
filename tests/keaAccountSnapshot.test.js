@@ -129,8 +129,11 @@ async function run() {
   const cats = T.pickTopSpendingCategories(compact, 5);
   check('precomputed top categories used', cats.some((line) => line.includes('Dining')));
   const brief = T.buildChatAccountContext(compact, 'Alex', '2026-08-15');
-  check('brief includes balance', brief.includes('balance $1500'));
+  check('brief includes availableBalance', brief.includes('availableBalance $1400'));
+  check('brief includes reconciledBalance', brief.includes('reconciledBalance $1500'));
+  check('brief does not use bare balance as Current', !brief.includes(' — balance $1500'));
   check('brief includes savings potential', brief.includes('$200'));
+  check('brief says savingsPotential is not available money', brief.includes('not available money'));
   check('brief includes upcoming totals', brief.includes('Next 14 days'));
   const goalsBlock = T.buildGoalsBlock(compact.goals, '2026-08-15');
   check('goals block uses compact expectedByNow', goalsBlock.includes('Vacation') && goalsBlock.includes('$400'));

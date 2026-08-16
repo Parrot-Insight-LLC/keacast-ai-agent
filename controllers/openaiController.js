@@ -425,9 +425,14 @@ function buildSummarizationUserContent(account, firstName, fallback, opts = {}) 
   if (account && typeof account === 'object') {
     const name = account.accountname || account.bank_account_name || account.institution_name || 'their account';
     const type = account.account_type || account.type || '';
-    const balance = fmtMoney(typeof account.balance === 'number' ? account.balance : Number(account.balance));
+    const reconNum = Number(account.reconciledBalance != null ? account.reconciledBalance : account.balance);
+    const currentNum = Number(account.current != null ? account.current : account.currentBalance);
     const available = fmtMoney(typeof account.available === 'number' ? account.available : Number(account.available));
-    lines.push(`Account: ${name}${type ? ` (${type})` : ''} — current balance ${balance}, available ${available}.`);
+    const current = fmtMoney(Number.isFinite(currentNum) ? currentNum : NaN);
+    const reconciled = fmtMoney(Number.isFinite(reconNum) ? reconNum : NaN);
+    lines.push(
+      `Account: ${name}${type ? ` (${type})` : ''} — availableBalance ${available} (Keacast UI Available); currentBalance ${current} (Keacast UI Current); reconciledBalance ${reconciled} (latest reconciled snapshot, not Available).`
+    );
 
     if (typeof account.credit_limit === 'number' && account.credit_limit > 0) {
       lines.push(`Credit limit ${fmtMoney(account.credit_limit)}.`);
@@ -450,7 +455,7 @@ function buildSummarizationUserContent(account, firstName, fallback, opts = {}) 
       const pct = typeof sav.savingsPercentage === 'number' ? sav.savingsPercentage : null;
       if (Number.isFinite(pot) && pot > 0) {
         lines.push(
-          `Lowest projected balance through end of ${monthLabel} (${monthEnd}): ${fmtMoney(pot)}${pct !== null ? ` (${pct}% of available)` : ''}.`
+          `savingsPotential (lowest projected balance through end of ${monthLabel} (${monthEnd}), not Available): ${fmtMoney(pot)}${pct !== null ? ` (${pct}% of availableBalance)` : ''}.`
         );
       }
     }
@@ -538,12 +543,21 @@ function buildChatAccountContext(account, firstName, currentDate) {
   const name = account.accountname || account.bank_account_name || account.institution_name || 'their account';
   const type = account.account_type || account.type || '';
   const inst = account.institution_name || '';
-  const balance = fmtMoney(typeof account.balance === 'number' ? account.balance : Number(account.balance));
-  const available = fmtMoney(typeof account.available === 'number' ? account.available : Number(account.available));
+  const reconNum = Number(account.reconciledBalance != null ? account.reconciledBalance : account.balance);
+  const currentNum = Number(account.currentBalance != null ? account.currentBalance : account.current);
+  const availableNum = Number(account.availableBalance != null ? account.availableBalance : account.available);
+  const available = fmtMoney(Number.isFinite(availableNum) ? availableNum : NaN);
+  const current = Number.isFinite(currentNum) ? fmtMoney(currentNum) : null;
+  const reconciled = Number.isFinite(reconNum) ? fmtMoney(reconNum) : null;
+  const accountBits = [
+    `availableBalance ${available} (Keacast UI Available)`,
+    current ? `currentBalance ${current} (Keacast UI Current)` : null,
+    reconciled ? `reconciledBalance ${reconciled} (latest reconciled snapshot, not Available)` : null,
+  ].filter(Boolean);
 
   const lines = [
     `Today: ${today}. User first name: ${firstName}.`,
-    `Account: ${name}${type ? ` (${type})` : ''}${inst ? ` @ ${inst}` : ''} — balance ${balance}, available ${available}.`,
+    `Account: ${name}${type ? ` (${type})` : ''}${inst ? ` @ ${inst}` : ''} — ${accountBits.join('; ')}.`,
   ];
 
   if (typeof account.credit_limit === 'number' && account.credit_limit > 0) {
@@ -557,7 +571,7 @@ function buildChatAccountContext(account, firstName, currentDate) {
   if (sav && typeof sav === 'object') {
     const pot = typeof sav.savingsPotential === 'number' ? sav.savingsPotential : Number(sav.savingsPotential);
     if (Number.isFinite(pot)) {
-      lines.push(`Lowest projected balance through end of ${monthLabel} (${monthEnd}): ${fmtMoney(pot)} — this is the month's safe-to-save amount (savings potential).`);
+      lines.push(`savingsPotential ${fmtMoney(pot)} — lowest projected balance through end of ${monthLabel} (${monthEnd}); not available money.`);
     }
     // Month-level forecast summary → the "forecasted disposable" number the
     // prompt style guide requires but nothing previously computed.
@@ -1056,10 +1070,12 @@ function emptyDialogueState() {
     intent: null,
     draftTransaction: {},
     pendingConfirmation: false,
+    needsReconfirm: false,
     // Goal propose→confirm is separate from the transaction draft so a leftover
     // tx draft cannot unlock createGoal/updateGoal/deleteGoal.
     draftGoal: {},
     pendingGoalConfirmation: false,
+    goalNeedsReconfirm: false,
     goalIntent: null,
     committed: false,
     lastCommitSignature: null,
@@ -1298,6 +1314,33 @@ function isGoalDraftProposable(draft) {
     (k) => draft[k] !== undefined && draft[k] !== null && String(draft[k]).trim() !== ''
   );
   return hasSlots && computeGoalDraftMissingFields(draft).length === 0;
+}
+
+const WRITE_ROUTE_CAPS = new Set(['confirmation', 'transaction_write', 'goal_write']);
+
+function applyPendingWriteTopicSwitch(dialogueState, route, { pendingArmedAtStart, userAffirmative } = {}) {
+  if (!dialogueState || typeof dialogueState !== 'object') {
+    return { reason: 'none', switched: false };
+  }
+  if (pendingArmedAtStart && userAffirmative) {
+    const suspended = dialogueState.needsReconfirm === true || dialogueState.goalNeedsReconfirm === true;
+    if (suspended) return { reason: 'none', switched: false };
+    return { reason: 'confirmation', switched: false };
+  }
+  if (pendingArmedAtStart && WRITE_ROUTE_CAPS.has(route && route.capability)) {
+    if (route.capability === 'confirmation') return { reason: 'confirmation', switched: false };
+    return { reason: 'amendment', switched: false };
+  }
+  if (pendingArmedAtStart && route && route.pendingType && !WRITE_ROUTE_CAPS.has(route.capability)) {
+    dialogueState.pendingConfirmation = false;
+    dialogueState.needsReconfirm = true;
+    if (route.pendingType === 'goal' || route.pendingType === 'both') {
+      dialogueState.pendingGoalConfirmation = false;
+      dialogueState.goalNeedsReconfirm = true;
+    }
+    return { reason: 'topic_switch', switched: true };
+  }
+  return { reason: 'none', switched: false };
 }
 
 // Stable signature for a draft/create payload so a multi-round loop (or a retry)
@@ -2103,6 +2146,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         if (intent && String(intent).trim()) state.intent = String(intent).trim();
         if (proposed) {
           state.pendingConfirmation = true;
+          state.needsReconfirm = false;
           // Isolating: a transaction proposal clears any pending goal confirm.
           state.pendingGoalConfirmation = false;
         }
@@ -2138,6 +2182,7 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         if (intent && String(intent).trim()) state.goalIntent = String(intent).trim();
         if (proposed) {
           state.pendingGoalConfirmation = true;
+          state.goalNeedsReconfirm = false;
           // Isolating: a goal proposal clears any pending transaction confirm.
           state.pendingConfirmation = false;
         }
@@ -2879,11 +2924,17 @@ exports.chat = async (req, res) => {
     if (!dialogueState.draftGoal || typeof dialogueState.draftGoal !== 'object') dialogueState.draftGoal = {};
     if (!Array.isArray(dialogueState.recentToolOutcomes)) dialogueState.recentToolOutcomes = [];
     const pendingConfirmationAtStart = dialogueState.pendingConfirmation === true;
+    const needsReconfirmAtStart = dialogueState.needsReconfirm === true;
+    const goalNeedsReconfirmAtStart = dialogueState.goalNeedsReconfirm === true;
     // A complete draft persisted from a prior turn also arms the write gate,
-    // so confirmations work even when the model proposed in prose.
-    const draftCompleteAtStart = isDraftProposable(dialogueState.draftTransaction);
+    // so confirmations work even when the model proposed in prose. A topic
+    // switch sets needsReconfirm so a leftover complete draft cannot arm a
+    // generic later "yes".
+    const draftCompleteAtStart = isDraftProposable(dialogueState.draftTransaction)
+      && needsReconfirmAtStart !== true;
     const pendingGoalConfirmationAtStart = dialogueState.pendingGoalConfirmation === true;
-    const goalDraftCompleteAtStart = isGoalDraftProposable(dialogueState.draftGoal);
+    const goalDraftCompleteAtStart = isGoalDraftProposable(dialogueState.draftGoal)
+      && goalNeedsReconfirmAtStart !== true;
     const userAffirmative = isAffirmativeMessage(message, dialogueState.draftTransaction);
     // Reset the one-shot "committed" flag at the start of each new turn.
     dialogueState.committed = false;
@@ -3035,6 +3086,10 @@ exports.chat = async (req, res) => {
     // Redis-eviction fallback flags — needed for capability routing before Azure.
     const proposalInTranscript = transcriptShowsPendingProposal(history);
     const goalProposalInTranscript = transcriptShowsPendingGoalProposal(history);
+    // A leftover proposal in the transcript must not arm a generic "yes"
+    // after a topic switch. needsReconfirm already folded into draftComplete*.
+    const proposalArmsWrite = proposalInTranscript === true && needsReconfirmAtStart !== true;
+    const goalProposalArmsWrite = goalProposalInTranscript === true && goalNeedsReconfirmAtStart !== true;
 
     telemetry.markStart('context_build');
     const phase1Route = routeCapability({
@@ -3042,10 +3097,17 @@ exports.chat = async (req, res) => {
       simulationMode,
       pendingWrite: pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript,
       pendingGoalWrite: pendingGoalConfirmationAtStart || goalDraftCompleteAtStart || goalProposalInTranscript,
+      pendingDraft: dialogueState.draftTransaction,
+      pendingGoalDraft: dialogueState.draftGoal,
       userAffirmative,
       dialogueState,
       accountId: accountid,
       currentDate,
+    });
+    const pendingWriteRouting = applyPendingWriteTopicSwitch(dialogueState, phase1Route, {
+      pendingArmedAtStart: pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript
+        || pendingGoalConfirmationAtStart || goalDraftCompleteAtStart || goalProposalInTranscript,
+      userAffirmative,
     });
     const phase1Policy = resolveGroundingPolicy(phase1Route, { message });
     let phase1Evidence = null;
@@ -3059,6 +3121,7 @@ exports.chat = async (req, res) => {
         currentDate,
         policy: phase1Policy,
         route: phase1Route,
+        message,
       });
       groundingPrefetchMs = Date.now() - tPrefetch;
     }
@@ -3074,6 +3137,8 @@ exports.chat = async (req, res) => {
       && phase1Evidence.source.length > 0;
     telemetry.recordGrounding({
       conversation_intent: phase1Route.capability,
+      effective_capability: phase1Policy.effectiveCapability,
+      pending_write_routing_reason: pendingWriteRouting.reason || 'none',
       grounding_required: !!phase1Policy.groundingRequired,
       grounding_performed: phase1Performed,
       grounding_strategy: groundingStrategyFor({
@@ -3089,6 +3154,13 @@ exports.chat = async (req, res) => {
       }),
       grounding_source_count: Array.isArray(phase1Evidence?.source) ? phase1Evidence.source.length : 0,
       grounding_prefetch_ms: groundingPrefetchMs,
+      grounding_evidence_status: phase1Evidence ? phase1Evidence.status : null,
+      historical_prefetch_page_count: phase1Evidence && phase1Evidence.prefetchMeta
+        ? phase1Evidence.prefetchMeta.pageCount : null,
+      historical_prefetch_row_count: phase1Evidence && phase1Evidence.prefetchMeta
+        ? phase1Evidence.prefetchMeta.rowCount : null,
+      historical_match_count: phase1Evidence && phase1Evidence.prefetchMeta
+        ? phase1Evidence.prefetchMeta.matchCount : null,
       capability_confidence_bucket: phase1Route.confidence,
       continuation_used: !!phase1Route.continuationUsed,
     });
@@ -3315,6 +3387,14 @@ exports.chat = async (req, res) => {
       allowedTools: allowedToolsFor(phase1Route.capability, {
         parentCapability: phase1Route.parentCapability,
         pendingType: phase1Route.pendingType,
+        omitGetUserTransactions: !!(
+          phase1Evidence
+          && phase1Evidence.status === 'ok'
+          && Array.isArray(phase1Evidence.source)
+          && phase1Evidence.source.includes('user_transactions')
+          && phase1Evidence.facts
+          && phase1Evidence.facts.expenseTotal != null
+        ),
       }),
     });
 
@@ -3329,8 +3409,8 @@ exports.chat = async (req, res) => {
       pendingGoalConfirmationAtStart,
       goalDraftCompleteAtStart,
       userAffirmative,
-      proposalInTranscript,
-      goalProposalInTranscript,
+      proposalInTranscript: proposalArmsWrite,
+      goalProposalInTranscript: goalProposalArmsWrite,
       transcriptProposal,
       categoryNames,
       simulationMode,
@@ -3430,7 +3510,7 @@ exports.chat = async (req, res) => {
     };
 
     telemetry.setResponseCharacterCount(finalText.length);
-    const writeGateArmedAtStart = pendingConfirmationAtStart || draftCompleteAtStart || proposalInTranscript;
+    const writeGateArmedAtStart = pendingConfirmationAtStart || draftCompleteAtStart || proposalArmsWrite;
     telemetry.recordWriteFlags({
       write_gate_armed_at_start: writeGateArmedAtStart,
       write_proposed: writeGateArmedAtStart,
@@ -5398,6 +5478,7 @@ exports.__testables = {
   computeGoalDraftMissingFields,
   isDraftProposable,
   isGoalDraftProposable,
+  applyPendingWriteTopicSwitch,
   extractCategoryNames,
   snapCategory,
   applyDraftAndCategory,

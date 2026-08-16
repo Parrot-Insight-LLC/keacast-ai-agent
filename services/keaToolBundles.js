@@ -90,7 +90,11 @@ function bundleForCapability(capability, { parentCapability, pendingType } = {})
 }
 
 function allowedToolsFor(capability, opts = {}) {
-  return new Set(bundleForCapability(capability, opts));
+  const names = bundleForCapability(capability, opts);
+  if (opts.omitGetUserTransactions) {
+    return new Set(names.filter((n) => n !== 'getUserTransactions'));
+  }
+  return new Set(names);
 }
 
 module.exports = {

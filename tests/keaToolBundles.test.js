@@ -122,6 +122,13 @@ async function run() {
   check('lookup bundle does not leak getUpcomingTransactions', !names(lookup).includes('getUpcomingTransactions'));
   check('lookup bundle does not leak getUserAccounts', !names(lookup).includes('getUserAccounts'));
   check('lookup bundle does not leak getSelectedKeacastAccounts', !names(lookup).includes('getSelectedKeacastAccounts'));
+
+  const lookupOmit = filterFunctionSchemas(functionSchemas, {
+    allowedTools: allowedToolsFor('financial_lookup', { omitGetUserTransactions: true }),
+  });
+  check('omitGetUserTransactions drops getUserTransactions', !names(lookupOmit).includes('getUserTransactions'));
+  const lookupKeep = allowedToolsFor('financial_lookup');
+  check('lookup without omit still has getUserTransactions', lookupKeep.has('getUserTransactions'));
 }
 
 module.exports = { run };
