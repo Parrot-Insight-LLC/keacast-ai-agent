@@ -5,6 +5,7 @@ const morgan = require('morgan');
 const requestId = require('./middleware/requestId');
 const logging = require('./middleware/logging');
 const securityHeaders = require('./middleware/securityHeaders');
+const { buildCorsOptions } = require('./middleware/corsConfig');
 // Pick ONE: simple (dev) or redis (prod)
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit.redis'); 
 // const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit.simple');
@@ -17,24 +18,14 @@ const app = express();
 
 app.set('trust proxy', 1);
 
-// Middleware
+// CORS must run before rate limiters and routes so browser OPTIONS preflight
+// is answered (204 + ACAO) without JWT and without a 429 that lacks CORS headers.
 app.use(requestId);
+app.use(cors(buildCorsOptions()));
 app.use(logging);
 app.use(securityHeaders);
 app.use(globalLimiter);
 app.use(sensitiveLimiter);
-
-// Enhanced CORS configuration for production
-const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? process.env.ALLOWED_ORIGINS?.split(',') || ['keacast-ai-e9cndfc4ethmgphf.eastus2-01.azurewebsites.net']
-    : true,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Request-Id', 'X-Auth-Token']
-};
-
-app.use(cors(corsOptions));
 
 // Body parsing with limits
 app.use(express.json({ limit: '10mb' }));

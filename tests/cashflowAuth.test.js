@@ -104,6 +104,15 @@ async function run() {
     check('body.token accepted; sessionId does not set identity', state.called && req.cashflowUser?.id === 7);
   }
 
+  {
+    const mw = cashflowAuth({ queryFn: async () => [] });
+    const req = mockReq({ method: 'OPTIONS' });
+    const res = mockRes();
+    const { state, next } = nextFlag();
+    await mw(req, res, next);
+    check('OPTIONS skips JWT verification', state.called && res.statusCode === 200);
+  }
+
   if (prev === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prev;
 }

@@ -50,6 +50,8 @@ async function isCashflowSessionActive(jti, userId, queryFn) {
 function cashflowAuth(options = {}) {
   const injectedQuery = options.queryFn;
   return async function cashflowAuthMiddleware(req, res, next) {
+    if (req.method === 'OPTIONS') return next();
+
     const secret = getCashflowJwtSecret();
     if (!secret) {
       return res.status(503).json({
