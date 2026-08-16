@@ -24,6 +24,9 @@ function emptyEvidence(extra = {}) {
     limitations: extra.limitations || [],
   };
   if (Array.isArray(extra.lookups)) out.lookups = extra.lookups;
+  if (Array.isArray(extra.observations)) out.observations = extra.observations;
+  if (Array.isArray(extra.assumptions)) out.assumptions = extra.assumptions;
+  if (extra.prefetchMeta) out.prefetchMeta = extra.prefetchMeta;
   return out;
 }
 
@@ -274,7 +277,10 @@ function shouldForceDirectAnswer({ route, policy, evidence } = {}) {
   if (!policy || !policy.groundingRequired) return false;
   if (route && route.wantsUiAction) return false;
   const cap = policy.effectiveCapability || (route && route.capability);
-  if (cap !== 'financial_lookup') return false;
+  const directCaps = cap === 'financial_lookup'
+    || cap === 'cashflow_analysis'
+    || cap === 'affordability_or_planning';
+  if (!directCaps) return false;
   if (!evidence || evidence.status !== 'ok') return false;
   if (Array.isArray(evidence.lookups) && evidence.lookups.length) {
     return evidence.lookups.every((lookup) => lookup && lookup.status === 'ok');
@@ -489,6 +495,198 @@ function buildSnapshotEvidence(snapshot, { period, slots, kind, currentDate } = 
   };
 }
 
+function horizonEnd(currentDate, days = 90) {
+  const start = String(currentDate || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return null;
+  const d = new Date(`${start}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function macroFactsFromResult(result, source) {
+  if (!result || typeof result !== 'object') return {};
+  const facts = {};
+  const copyKeys = source === 'cashflow_analysis'
+    ? [
+      'postedIncome', 'postedSpending', 'postedNet',
+      'remainingForecastIncome', 'remainingForecastSpending', 'savingsPotential',
+      'availableBalance', 'currentBalance', 'reconciledBalance',
+      'largestCategories', 'largestMerchants', 'negativeBalanceRisk',
+    ]
+    : [
+      'assumption', 'requested', 'horizonDays', 'availableBalance',
+      'currentBalance', 'reconciledBalance', 'baseline', 'hypothetical', 'delta',
+    ];
+  for (const key of copyKeys) {
+    if (result[key] !== undefined) facts[key] = result[key];
+  }
+  return facts;
+}
+
+function evidenceFromMacroResult(result, { source, period, currentDate, assumptions }) {
+  if (!result || typeof result !== 'object') {
+    return emptyEvidence({
+      limitations: ['macro_error'],
+      period,
+      dataAsOf: currentDate || null,
+    });
+  }
+  const limitations = Array.isArray(result.limitations) ? result.limitations.slice() : [];
+  if (result.status === 'unavailable') {
+    return emptyEvidence({
+      status: 'unavailable',
+      source: [],
+      period: result.period || period || null,
+      dataAsOf: result.dataAsOf || currentDate || null,
+      limitations: limitations.length ? limitations : ['macro_error'],
+      observations: Array.isArray(result.observations) ? result.observations : [],
+      assumptions: assumptions || [],
+    });
+  }
+  return {
+    status: result.status === 'partial' ? 'partial' : 'ok',
+    source: [source],
+    period: result.period || period || null,
+    dataAsOf: result.dataAsOf || currentDate || null,
+    facts: macroFactsFromResult(result, source),
+    observations: Array.isArray(result.observations) ? result.observations : [],
+    assumptions: assumptions || [],
+    limitations,
+  };
+}
+
+async function defaultFetchCashflowAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const { getKeaCashflowAnalysis } = require('../tools/keacast_tool_layer');
+  return getKeaCashflowAnalysis({ accountId, token, body, timeoutMs, requestId });
+}
+
+async function defaultFetchAffordabilityAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const { getKeaAffordabilityAnalysis } = require('../tools/keacast_tool_layer');
+  return getKeaAffordabilityAnalysis({ accountId, token, body, timeoutMs, requestId });
+}
+
+async function prefetchCashflowMacro({
+  accountId,
+  token,
+  requestId,
+  currentDate,
+  period,
+  fetchCashflowAnalysis,
+}) {
+  if (accountId == null || accountId === '') {
+    return emptyEvidence({ limitations: ['access_unverified'], period, dataAsOf: currentDate || null });
+  }
+  if (!token) {
+    return emptyEvidence({ limitations: ['access_unverified'], period, dataAsOf: currentDate || null });
+  }
+  const fetch = fetchCashflowAnalysis || defaultFetchCashflowAnalysis;
+  try {
+    const result = await fetch({
+      accountId,
+      token,
+      requestId,
+      body: {
+        clientDate: currentDate,
+        period: period || undefined,
+      },
+    });
+    return evidenceFromMacroResult(result, {
+      source: 'cashflow_analysis',
+      period,
+      currentDate,
+      assumptions: [],
+    });
+  } catch (err) {
+    const status = err && err.response && err.response.status;
+    const limitation = status === 401 || status === 403 ? 'access_unverified' : 'macro_error';
+    return emptyEvidence({ limitations: [limitation], period, dataAsOf: currentDate || null });
+  }
+}
+
+async function prefetchAffordabilityMacro({
+  accountId,
+  token,
+  requestId,
+  currentDate,
+  slots,
+  fetchAffordabilityAnalysis,
+}) {
+  const amount = slots && slots.amount;
+  if (slots && slots.purchaseDateError) {
+    return emptyEvidence({
+      limitations: [slots.purchaseDateError],
+      dataAsOf: currentDate || null,
+    });
+  }
+  if (!(Number(amount) > 0)) {
+    return emptyEvidence({
+      limitations: ['amount_invalid'],
+      dataAsOf: currentDate || null,
+    });
+  }
+  const purchaseDate = slots && slots.purchaseDate;
+  if (!purchaseDate) {
+    return emptyEvidence({
+      limitations: ['date_unresolved'],
+      dataAsOf: currentDate || null,
+    });
+  }
+  if (currentDate && purchaseDate < currentDate) {
+    return emptyEvidence({
+      limitations: ['past_date'],
+      dataAsOf: currentDate || null,
+    });
+  }
+  const end = horizonEnd(currentDate, 90);
+  if (end && purchaseDate > end) {
+    return emptyEvidence({
+      limitations: ['date_beyond_horizon'],
+      dataAsOf: currentDate || null,
+    });
+  }
+  if (accountId == null || accountId === '') {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+  if (!token) {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+
+  const assumptions = [];
+  if (slots.purchaseDateAssumption === 'next_month_first_day') {
+    assumptions.push({
+      code: 'next_month_first_day',
+      text: slots.purchaseDateAssumptionText
+        || `Assuming the purchase is on ${purchaseDate}...`,
+    });
+  }
+  assumptions.push({ code: 'one_time_expense' });
+
+  const fetch = fetchAffordabilityAnalysis || defaultFetchAffordabilityAnalysis;
+  try {
+    const result = await fetch({
+      accountId,
+      token,
+      requestId,
+      body: {
+        clientDate: currentDate,
+        amount,
+        purchaseDate,
+        title: slots.title || undefined,
+        category: slots.category || undefined,
+      },
+    });
+    return evidenceFromMacroResult(result, {
+      source: 'affordability_analysis',
+      currentDate,
+      assumptions,
+    });
+  } catch (err) {
+    const status = err && err.response && err.response.status;
+    const limitation = status === 401 || status === 403 ? 'access_unverified' : 'macro_error';
+    return emptyEvidence({ limitations: [limitation], dataAsOf: currentDate || null, assumptions });
+  }
+}
+
 /**
  * Authoritative evidence for the current turn.
  * Identity: trustedUserId from cashflowAuth only. Never body/model userId.
@@ -506,6 +704,10 @@ async function prefetchGrounding({
   fetchPage,
   pageLimit,
   message,
+  token,
+  requestId,
+  fetchCashflowAnalysis,
+  fetchAffordabilityAnalysis,
 } = {}) {
   const effective = policy?.effectiveCapability || route?.capability;
   const slots = route?.slots || {};
@@ -516,10 +718,38 @@ async function prefetchGrounding({
     return emptyEvidence({ status: 'ok', source: [], limitations: [] });
   }
 
-  if (policy.prefetchKind === 'snapshot' || effective === 'financial_forecast' || effective === 'affordability_or_planning') {
-    const kind = effective === 'affordability_or_planning'
-      ? 'affordability'
-      : (effective === 'financial_forecast' ? 'forecast' : 'lookup');
+  if (effective === 'mixed_macro') {
+    return emptyEvidence({
+      status: 'unavailable',
+      limitations: ['mixed_macro_unsupported'],
+      dataAsOf: snapshotDataAsOf(snapshot, currentDate),
+    });
+  }
+
+  if (policy.prefetchKind === 'cashflow_macro' || effective === 'cashflow_analysis') {
+    return prefetchCashflowMacro({
+      accountId,
+      token,
+      requestId,
+      currentDate,
+      period,
+      fetchCashflowAnalysis,
+    });
+  }
+
+  if (policy.prefetchKind === 'affordability_macro' || effective === 'affordability_or_planning') {
+    return prefetchAffordabilityMacro({
+      accountId,
+      token,
+      requestId,
+      currentDate,
+      slots,
+      fetchAffordabilityAnalysis,
+    });
+  }
+
+  if (policy.prefetchKind === 'snapshot' || effective === 'financial_forecast') {
+    const kind = effective === 'financial_forecast' ? 'forecast' : 'lookup';
     return buildSnapshotEvidence(snapshot, { period, slots, kind, currentDate });
   }
 
@@ -612,6 +842,12 @@ function buildEvidenceSystemSection(evidence) {
   if (Array.isArray(evidence.lookups) && evidence.lookups.length) {
     compact.lookups = evidence.lookups;
   }
+  if (Array.isArray(evidence.observations) && evidence.observations.length) {
+    compact.observations = evidence.observations;
+  }
+  if (Array.isArray(evidence.assumptions) && evidence.assumptions.length) {
+    compact.assumptions = evidence.assumptions;
+  }
   const lookupInstructions = compact.lookups
     ? [
       'Answer every requested lookup represented in lookups[].',
@@ -621,9 +857,18 @@ function buildEvidenceSystemSection(evidence) {
     ].join(' ')
     : '';
   const hasSpendFacts = compact.facts
-    && (compact.facts.spentTotal != null || compact.facts.expenseTotal != null);
+    && (compact.facts.spentTotal != null || compact.facts.expenseTotal != null
+      || compact.facts.postedSpending != null);
   const spendingGlossary = (compact.lookups || hasSpendFacts)
-    ? 'Spending glossary: spentTotal / expenseTotal represents a positive posted-spending magnitude. Prefer spentTotal for user-facing spending statements. When saying "you spent", "your expenses totaled", or "you had X in expenses", present the value as positive currency. Do not add a minus sign. Individual ledger transaction amounts may remain signed elsewhere.'
+    ? 'Spending glossary: spentTotal / expenseTotal / postedSpending represents a positive posted-spending magnitude. Prefer spentTotal for user-facing spending statements. When saying "you spent", "your expenses totaled", or "you had X in expenses", present the value as positive currency. Do not add a minus sign. Individual ledger transaction amounts may remain signed elsewhere.'
+    : '';
+  const isMacro = compact.source.includes('cashflow_analysis')
+    || compact.source.includes('affordability_analysis');
+  const macroInstruction = isMacro
+    ? 'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Explain their practical meaning. Do not invent an affordability threshold, score, or safe/tight/risky label.'
+    : '';
+  const affordabilityInstruction = compact.source.includes('affordability_analysis')
+    ? 'Do not say the user can afford the purchase merely because newNegativeIntroduced is false. If the baseline forecast was already negative, explain that, whether the date moves earlier, and how much the low worsens. If neither baseline nor hypothetical goes negative, you may say the purchase does not create a negative balance in the current 90-day Keacast forecast and report the remaining lowest projected balance — not a universal financial recommendation. If a next_month_first_day assumption is present, say it out loud (for example: "Assuming the purchase is on September 1...").'
     : '';
   const partialInstruction = compact.status === 'partial'
     ? (compact.lookups
@@ -636,6 +881,8 @@ function buildEvidenceSystemSection(evidence) {
     spendingGlossary,
     JSON.stringify(compact),
     lookupInstructions,
+    macroInstruction,
+    affordabilityInstruction,
     partialInstruction,
   ].filter(Boolean).join('\n');
 }

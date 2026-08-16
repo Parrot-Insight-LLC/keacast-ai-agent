@@ -56,7 +56,7 @@ async function run() {
   );
 
   const neg = route('Will I go negative next month?');
-  check('future-negative → financial_forecast', neg.capability === 'financial_forecast');
+  check('future-negative → cashflow_analysis', neg.capability === 'cashflow_analysis');
   check('future-negative period next_month', neg.slots.period && neg.slots.period.label === 'next_month');
 
   const afford = route('Can I afford $800 next month?');
@@ -102,6 +102,7 @@ async function run() {
     lastSubjectKind: 'amount',
     lastSubjectValue: '800',
     lastPeriod: parsePeriod('next month', '2026-08-16'),
+    lastPurchaseDate: '2026-08-21',
     lastAccountId: '10',
   };
   const contAmount = route('What about $1,200?', { dialogueState: priorAfford, accountId: '10' });
@@ -110,6 +111,7 @@ async function run() {
   check('continuation_used', contAmount.continuationUsed === true);
   check('amount replaced with 1200', contAmount.slots.amount === 1200);
   check('period retained next_month', contAmount.slots.period && contAmount.slots.period.label === 'next_month');
+  check('purchase date inherited', contAmount.slots.purchaseDate === '2026-08-21');
 
   const priorLookup = {
     lastCapability: 'financial_lookup',
@@ -202,7 +204,7 @@ async function run() {
 
   section('current vs forecast balance');
   check('available balance lookup', route("What's my available balance?").capability === 'financial_lookup');
-  check('will I go negative next month forecast', route('Will I go negative next month?').capability === 'financial_forecast');
+  check('will I go negative next month analysis', route('Will I go negative next month?').capability === 'cashflow_analysis');
   check('what will my balance be next month forecast', route('What will my balance be next month?').capability === 'financial_forecast');
 
   section('topic-switch needsReconfirm lifecycle');

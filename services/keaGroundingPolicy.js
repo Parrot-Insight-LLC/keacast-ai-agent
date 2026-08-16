@@ -16,13 +16,35 @@ const MATRIX = Object.freeze({
   simulation: GROUNDING_OPTIONAL,
   financial_lookup: GROUNDING_REQUIRED,
   financial_forecast: GROUNDING_REQUIRED,
+  cashflow_analysis: GROUNDING_REQUIRED,
   affordability_or_planning: GROUNDING_REQUIRED,
+  mixed_macro: GROUNDING_REQUIRED,
   continuation: 'inherited',
   unknown: GROUNDING_OPTIONAL,
 });
 
 const FAIL_SOFT_TEXT =
   "I couldn't verify the current Keacast data needed for that answer. Please try again in a moment, or check this account on the calendar.";
+
+const FAIL_SOFT_BY_LIMITATION = Object.freeze({
+  amount_invalid: 'I need a positive purchase amount to assess that. Name a dollar amount and a specific date, such as next Friday.',
+  date_unresolved: 'I need a specific purchase date — a calendar date, tomorrow, next Friday, or September 15. I cannot use payday or a vague time like "sometime this month."',
+  past_date: 'That purchase date is in the past. Affordability looks at upcoming dates in your 90-day Keacast forecast.',
+  date_beyond_horizon: 'That date is more than 90 days out, which is beyond the Keacast forecast I use for this question.',
+  purchase_not_in_forecast_window: 'That purchase date is outside the current Keacast forecast window, so I cannot compare a reliable baseline and hypothetical.',
+  forecast_unavailable: "I couldn't load the Keacast forecast needed for that answer. Please try again in a moment.",
+  access_unverified: FAIL_SOFT_TEXT,
+  mixed_macro_unsupported: 'I can answer one of those at a time. Which should I do first — how you are doing this month, or whether you can afford that purchase?',
+  macro_error: FAIL_SOFT_TEXT,
+});
+
+function failSoftTextFor(evidence) {
+  const limitations = Array.isArray(evidence && evidence.limitations) ? evidence.limitations : [];
+  for (const code of limitations) {
+    if (FAIL_SOFT_BY_LIMITATION[code]) return FAIL_SOFT_BY_LIMITATION[code];
+  }
+  return FAIL_SOFT_TEXT;
+}
 
 function resolveGroundingLevel(route, message) {
   if (!route || !route.capability) return GROUNDING_OPTIONAL;
@@ -63,8 +85,10 @@ function prefetchKindFor(capability, route) {
     if (/\b(balance|available|credit limit)\b/i.test(String(route?.message || ''))) return 'snapshot';
     return 'prefetch_read';
   }
+  if (capability === 'cashflow_analysis') return 'cashflow_macro';
+  if (capability === 'affordability_or_planning') return 'affordability_macro';
+  if (capability === 'mixed_macro') return 'none';
   if (capability === 'financial_forecast') return 'snapshot';
-  if (capability === 'affordability_or_planning') return 'snapshot';
   if (FINANCIAL_CAPABILITIES.has(capability)) return 'snapshot';
   return 'none';
 }
@@ -88,6 +112,8 @@ function groundingStrategyFor({ policy, evidence, failSoft }) {
   if (failSoft) return 'failed';
   if (!policy || policy.grounding === GROUNDING_NONE) return 'none';
   if (!evidence || !Array.isArray(evidence.source) || evidence.source.length === 0) return 'none';
+  if (evidence.source.includes('cashflow_analysis')) return 'cashflow_macro';
+  if (evidence.source.includes('affordability_analysis')) return 'affordability_macro';
   if (evidence.source.includes('user_transactions')) return 'prefetch_read';
   if (evidence.source.includes('kea_snapshot')) return 'snapshot';
   return 'none';
@@ -99,6 +125,7 @@ module.exports = {
   GROUNDING_REQUIRED,
   MATRIX,
   FAIL_SOFT_TEXT,
+  failSoftTextFor,
   resolveGroundingPolicy,
   resolveGroundingLevel,
   isFailSoft,

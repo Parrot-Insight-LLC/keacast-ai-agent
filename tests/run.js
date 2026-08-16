@@ -20,6 +20,7 @@ const suites = [
   './keaGroundingPolicy.test.js',
   './keaToolBundles.test.js',
   './keaGroundingPrefetch.test.js',
+  './keaFinancialMacros.test.js',
   './keaPhase12.test.js',
 ];
 

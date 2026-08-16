@@ -28,6 +28,7 @@ const {
   responseModeFor,
   groundingStrategyFor,
   FAIL_SOFT_TEXT,
+  failSoftTextFor,
 } = require('../services/keaGroundingPolicy');
 const { prefetchGrounding, buildEvidenceSystemSection, shouldForceDirectAnswer } = require('../services/keaGroundingPrefetch');
 const { allowedToolsFor } = require('../services/keaToolBundles');
@@ -1097,6 +1098,9 @@ function emptyDialogueState() {
     lastSubjectKind: null,
     lastSubjectValue: null,
     lastPeriod: null,
+    lastPurchaseDate: null,
+    lastPurchaseDateAssumption: null,
+    lastPurchaseDateAssumptionText: null,
     lastAccountId: null,
     updatedAt: null,
   };
@@ -3132,6 +3136,8 @@ exports.chat = async (req, res) => {
         policy: phase1Policy,
         route: phase1Route,
         message,
+        token,
+        requestId: req.id,
       });
       groundingPrefetchMs = Date.now() - tPrefetch;
     }
@@ -3145,6 +3151,20 @@ exports.chat = async (req, res) => {
       && (phase1Evidence.status === 'ok' || phase1Evidence.status === 'partial')
       && Array.isArray(phase1Evidence.source)
       && phase1Evidence.source.length > 0;
+    const effectiveCap = phase1Policy.effectiveCapability;
+    let financialMacro = 'none';
+    if (effectiveCap === 'cashflow_analysis') financialMacro = 'analyze_cashflow';
+    if (effectiveCap === 'affordability_or_planning') financialMacro = 'assess_affordability';
+    const macroAttempted = financialMacro !== 'none' || effectiveCap === 'mixed_macro';
+    let macroInputKind = 'none';
+    if (financialMacro === 'assess_affordability') {
+      const hasAmount = phase1Route.slots && phase1Route.slots.amount != null;
+      const hasDate = !!(phase1Route.slots && phase1Route.slots.purchaseDate);
+      if (hasAmount && hasDate) macroInputKind = 'amount_and_date';
+      else if (hasAmount) macroInputKind = 'amount_only';
+    } else if (financialMacro === 'analyze_cashflow') {
+      macroInputKind = 'period_only';
+    }
     telemetry.recordGrounding({
       conversation_intent: phase1Route.capability,
       effective_capability: phase1Policy.effectiveCapability,
@@ -3177,6 +3197,15 @@ exports.chat = async (req, res) => {
         ? phase1Evidence.prefetchMeta.periodReadCount : null,
       capability_confidence_bucket: phase1Route.confidence,
       continuation_used: !!phase1Route.continuationUsed,
+      financial_macro: financialMacro,
+      macro_performed: macroAttempted,
+      macro_status: macroAttempted
+        ? (phase1Evidence && phase1Evidence.status ? phase1Evidence.status : 'unavailable')
+        : 'skipped',
+      macro_ms: macroAttempted ? groundingPrefetchMs : 0,
+      macro_input_kind: macroInputKind,
+      macro_horizon_days: macroAttempted ? 90 : null,
+      macro_source_count: Array.isArray(phase1Evidence?.source) ? phase1Evidence.source.length : 0,
     });
 
     // ── Build a compact, token-minimal context block ─────────────────────
@@ -3451,7 +3480,7 @@ exports.chat = async (req, res) => {
     let result;
     let error;
     if (phase1FailSoft) {
-      result = { content: FAIL_SOFT_TEXT };
+      result = { content: failSoftTextFor(phase1Evidence) || FAIL_SOFT_TEXT };
     } else {
       try {
       console.log('Attempting to get response with tools...');

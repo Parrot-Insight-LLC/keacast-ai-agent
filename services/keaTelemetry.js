@@ -91,6 +91,13 @@ function createKeaTelemetry({ requestId } = {}) {
     historical_lookup_count: null,
     historical_period_read_count: null,
     ui_action_count: null,
+    financial_macro: 'none',
+    macro_performed: false,
+    macro_status: 'skipped',
+    macro_ms: 0,
+    macro_input_kind: 'none',
+    macro_horizon_days: null,
+    macro_source_count: 0,
   };
 
   function markStart(name) {
@@ -186,6 +193,27 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (flags.ui_action_count != null) {
       grounding.ui_action_count = Number(flags.ui_action_count) || 0;
+    }
+    if (flags.financial_macro === null || typeof flags.financial_macro === 'string') {
+      grounding.financial_macro = flags.financial_macro || 'none';
+    }
+    if (flags.macro_performed === true || flags.macro_performed === false) {
+      grounding.macro_performed = flags.macro_performed;
+    }
+    if (flags.macro_status === null || typeof flags.macro_status === 'string') {
+      grounding.macro_status = flags.macro_status || 'skipped';
+    }
+    if (flags.macro_ms != null) {
+      grounding.macro_ms = Number(flags.macro_ms) || 0;
+    }
+    if (flags.macro_input_kind === null || typeof flags.macro_input_kind === 'string') {
+      grounding.macro_input_kind = flags.macro_input_kind || 'none';
+    }
+    if (flags.macro_horizon_days != null) {
+      grounding.macro_horizon_days = Number(flags.macro_horizon_days) || 0;
+    }
+    if (flags.macro_source_count != null) {
+      grounding.macro_source_count = Number(flags.macro_source_count) || 0;
     }
   }
 
@@ -325,6 +353,13 @@ function createKeaTelemetry({ requestId } = {}) {
       historical_lookup_count: grounding.historical_lookup_count,
       historical_period_read_count: grounding.historical_period_read_count,
       ui_action_count: grounding.ui_action_count,
+      financial_macro: grounding.financial_macro || 'none',
+      macro_performed: !!grounding.macro_performed,
+      macro_status: grounding.macro_status || 'skipped',
+      macro_ms: grounding.macro_ms || 0,
+      macro_input_kind: grounding.macro_input_kind || 'none',
+      macro_horizon_days: grounding.macro_horizon_days,
+      macro_source_count: grounding.macro_source_count || 0,
       estimated_block_chars: blocks,
     };
     for (const r of azureRounds) {

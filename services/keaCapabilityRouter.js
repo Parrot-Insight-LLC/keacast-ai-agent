@@ -9,7 +9,9 @@ const CAPABILITIES = Object.freeze([
   'casual_conversation',
   'financial_lookup',
   'financial_forecast',
+  'cashflow_analysis',
   'affordability_or_planning',
+  'mixed_macro',
   'transaction_write',
   'goal_write',
   'simulation',
@@ -20,8 +22,14 @@ const CAPABILITIES = Object.freeze([
 const FINANCIAL_CAPABILITIES = new Set([
   'financial_lookup',
   'financial_forecast',
+  'cashflow_analysis',
   'affordability_or_planning',
 ]);
+
+const WEEKDAYS = {
+  sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
+  thursday: 4, friday: 5, saturday: 6,
+};
 
 const SUBJECT_MAX = 64;
 const MAX_LOOKUP_CLAUSES = 6;
@@ -48,6 +56,82 @@ function parseAmount(text) {
   if (!m) return null;
   const n = Number((m[1] || m[2] || '').replace(/,/g, ''));
   return Number.isFinite(n) ? n : null;
+}
+
+function purchaseDateResult(date, assumption, assumptionText) {
+  return {
+    date,
+    assumption: assumption || null,
+    assumptionText: assumptionText || null,
+    error: null,
+  };
+}
+
+function parsePurchaseDate(message, currentDate) {
+  if (!message) return null;
+  const today = moment(currentDate, 'YYYY-MM-DD', true).isValid()
+    ? moment(currentDate, 'YYYY-MM-DD')
+    : moment();
+  const todayStr = today.format('YYYY-MM-DD');
+  const m = String(message).toLowerCase();
+
+  if (/\bpayday\b/.test(m) || /\bsometime\b/.test(m)) {
+    return { date: null, assumption: null, assumptionText: null, error: 'date_unresolved' };
+  }
+
+  const iso = String(message).match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (iso) {
+    if (iso[1] < todayStr) {
+      return { date: iso[1], assumption: null, assumptionText: null, error: 'past_date' };
+    }
+    return purchaseDateResult(iso[1]);
+  }
+
+  if (/\btomorrow\b/.test(m)) {
+    return purchaseDateResult(today.clone().add(1, 'day').format('YYYY-MM-DD'));
+  }
+
+  const md = m.match(
+    /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\b/
+  );
+  if (md) {
+    const month = MONTH_NAMES[md[1]];
+    const day = Number(md[2]);
+    let candidate = moment({ year: today.year(), month, day });
+    if (!candidate.isValid() || candidate.date() !== day) {
+      return { date: null, assumption: null, assumptionText: null, error: 'date_unresolved' };
+    }
+    if (!candidate.isAfter(today, 'day')) {
+      candidate = moment({ year: today.year() + 1, month, day });
+    }
+    return purchaseDateResult(candidate.format('YYYY-MM-DD'));
+  }
+
+  const wd = m.match(/\b(?:next\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (wd) {
+    const want = WEEKDAYS[wd[1]];
+    const next = today.clone();
+    do {
+      next.add(1, 'day');
+    } while (next.day() !== want);
+    return purchaseDateResult(next.format('YYYY-MM-DD'));
+  }
+
+  if (/\bnext month\b/.test(m)) {
+    const first = today.clone().add(1, 'month').startOf('month');
+    const date = first.format('YYYY-MM-DD');
+    return purchaseDateResult(
+      date,
+      'next_month_first_day',
+      `Assuming the purchase is on ${first.format('MMMM D')}...`
+    );
+  }
+
+  if (/\bthis month\b/.test(m)) {
+    return { date: null, assumption: null, assumptionText: null, error: 'date_unresolved' };
+  }
+
+  return null;
 }
 
 function parsePeriod(text, currentDate) {
@@ -163,6 +247,7 @@ function extractSlots(message, currentDate, knownCategories) {
   const period = parsePeriod(message, currentDate);
   const category = parseCategory(message);
   const atTok = parseAtToken(message);
+  const purchase = parsePurchaseDate(message, currentDate);
   let subjectKind = null;
   let subjectValue = null;
   let displaySubject = null;
@@ -182,7 +267,17 @@ function extractSlots(message, currentDate, knownCategories) {
     subjectKind = 'amount';
     subjectValue = String(amount);
   }
-  return { amount, period, subjectKind, subjectValue, displaySubject };
+  return {
+    amount,
+    period,
+    subjectKind,
+    subjectValue,
+    displaySubject,
+    purchaseDate: purchase && purchase.date ? purchase.date : null,
+    purchaseDateAssumption: purchase && purchase.assumption ? purchase.assumption : null,
+    purchaseDateAssumptionText: purchase && purchase.assumptionText ? purchase.assumptionText : null,
+    purchaseDateError: purchase && purchase.error ? purchase.error : null,
+  };
 }
 
 function isShortFollowUp(text) {
@@ -244,6 +339,29 @@ function isCasual(text) {
 function isAffordability(text) {
   const m = String(text || '').toLowerCase();
   return /\b(can i afford|afford|do i have enough|is \$?[\d,]+ (ok|safe|fine|too much))\b/.test(m);
+}
+
+function isNegativeRiskQuestion(text) {
+  const m = String(text || '').toLowerCase();
+  return /\b(go negative|be negative|run out of money|overdraft|will i (be|go) (broke|negative)|driving .{0,60}negative)\b/.test(m);
+}
+
+function isCashflowAnalysis(text) {
+  const m = String(text || '').toLowerCase();
+  if (isNegativeRiskQuestion(text)) return true;
+  if (/\bhow am i doing\b/.test(m)) return true;
+  if (/\bhow was\b/.test(m)) return true;
+  if (/\bwhere is my money going\b/.test(m)) return true;
+  if (/\b(biggest|top) spending categor/.test(m)) return true;
+  if (/\b(biggest|top) merchants?\b/.test(m)) return true;
+  if (/\bmerchants? am i spending\b/.test(m)) return true;
+  if (/\bincome\b.+\bexpenses\b/.test(m)) return true;
+  if (/\bcash ?flow\b/.test(m)) return true;
+  return false;
+}
+
+function isMixedMacro(text) {
+  return isAffordability(text) && isCashflowAnalysis(text);
 }
 
 function isForecast(text) {
@@ -549,6 +667,7 @@ function routeCapabilityUnwrapped(input = {}) {
     && accountsMatch(last.lastAccountId, currentAccountId);
 
   if (continuationEligible) {
+    const parsedPurchase = parsePurchaseDate(message, currentDate);
     const merged = {
       amount: slots.amount != null ? slots.amount : (lastCap === 'affordability_or_planning' && last.lastSubjectKind === 'amount'
         ? Number(last.lastSubjectValue)
@@ -556,6 +675,10 @@ function routeCapabilityUnwrapped(input = {}) {
       period: slots.period || last.lastPeriod || null,
       subjectKind: slots.subjectKind || last.lastSubjectKind || null,
       subjectValue: slots.subjectValue || last.lastSubjectValue || null,
+      purchaseDate: last.lastPurchaseDate || null,
+      purchaseDateAssumption: last.lastPurchaseDateAssumption || null,
+      purchaseDateAssumptionText: last.lastPurchaseDateAssumptionText || null,
+      purchaseDateError: null,
     };
     if (slots.period) merged.period = slots.period;
     if (slots.subjectKind) {
@@ -569,6 +692,15 @@ function routeCapabilityUnwrapped(input = {}) {
       merged.subjectKind = 'amount';
       merged.subjectValue = String(slots.amount);
       merged.amount = slots.amount;
+    }
+    if (parsedPurchase && parsedPurchase.error) {
+      merged.purchaseDateError = parsedPurchase.error;
+      if (parsedPurchase.date) merged.purchaseDate = parsedPurchase.date;
+    } else if (parsedPurchase && parsedPurchase.date) {
+      merged.purchaseDate = parsedPurchase.date;
+      merged.purchaseDateAssumption = parsedPurchase.assumption;
+      merged.purchaseDateAssumptionText = parsedPurchase.assumptionText;
+      merged.purchaseDateError = null;
     }
     return {
       ...base,
@@ -628,8 +760,21 @@ function routeCapabilityUnwrapped(input = {}) {
   if (isCasual(message)) {
     return { ...base, capability: 'casual_conversation', confidence: 'high', accountChanged };
   }
+  if (isMixedMacro(message)) {
+    return { ...base, capability: 'mixed_macro', confidence: 'high', accountChanged, slots };
+  }
   if (isAffordability(message)) {
     return { ...base, capability: 'affordability_or_planning', confidence: 'high', accountChanged, slots };
+  }
+  if (isCashflowAnalysis(message)) {
+    const period = slots.period || parsePeriod('this month', currentDate);
+    return {
+      ...base,
+      capability: 'cashflow_analysis',
+      confidence: 'high',
+      accountChanged,
+      slots: { ...slots, period },
+    };
   }
   if (isForecast(message)) {
     return { ...base, capability: 'financial_forecast', confidence: 'high', accountChanged, slots };
@@ -665,6 +810,7 @@ function routeCapability(input = {}) {
 const PERSIST_CAPABILITIES = new Set([
   'financial_lookup',
   'financial_forecast',
+  'cashflow_analysis',
   'affordability_or_planning',
   'continuation',
 ]);
@@ -698,6 +844,15 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       }
     : null;
   dialogueState.lastAccountId = accountId == null || accountId === '' ? null : String(accountId);
+  if (cap === 'affordability_or_planning') {
+    dialogueState.lastPurchaseDate = slots.purchaseDate ? String(slots.purchaseDate).slice(0, 10) : null;
+    dialogueState.lastPurchaseDateAssumption = slots.purchaseDateAssumption
+      ? String(slots.purchaseDateAssumption).slice(0, 64)
+      : null;
+    dialogueState.lastPurchaseDateAssumptionText = slots.purchaseDateAssumptionText
+      ? String(slots.purchaseDateAssumptionText).slice(0, 160)
+      : null;
+  }
   return dialogueState;
 }
 
@@ -733,6 +888,7 @@ module.exports = {
   extractLookupRequests,
   parsePeriod,
   parseAmount,
+  parsePurchaseDate,
   shouldPersistContinuation,
   applyContinuationPersistence,
   applyContinuationPersistenceFromEvidence,
@@ -743,6 +899,8 @@ module.exports = {
   isSimUtterance,
   isLookup,
   isForecast,
+  isCashflowAnalysis,
+  isAffordability,
   detectWantsUiAction,
   buildOpenSearchAction,
   mergeOpenSearchUiActions,

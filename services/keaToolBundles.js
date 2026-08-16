@@ -14,6 +14,7 @@ const FINANCIAL_LOOKUP = Object.freeze([
   'getFocusedEntityDetails',
 ]);
 const FINANCIAL_FORECAST = Object.freeze(['getRecurringForecasts']);
+const CASHFLOW_ANALYSIS = Object.freeze([]);
 const AFFORDABILITY = Object.freeze([]);
 const TRANSACTION_WRITE = Object.freeze([
   'updateDraftTransaction',
@@ -55,7 +56,9 @@ const BUNDLES = Object.freeze({
   navigation_ui: NAVIGATION_UI,
   financial_lookup: FINANCIAL_LOOKUP,
   financial_forecast: FINANCIAL_FORECAST,
+  cashflow_analysis: CASHFLOW_ANALYSIS,
   affordability_or_planning: AFFORDABILITY,
+  mixed_macro: Object.freeze([]),
   transaction_write: TRANSACTION_WRITE,
   goal_write: GOAL_WRITE,
   simulation: SIMULATION,

@@ -99,6 +99,20 @@ async function getKeaAccountContext({ accountId, token, body, timeoutMs, request
   return response.data;
 }
 
+async function getKeaCashflowAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const url = `${BASE_URL}/account/kea-analysis/${accountId}`;
+  const config = buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId });
+  const response = await axios.post(url, body || {}, config);
+  return response.data;
+}
+
+async function getKeaAffordabilityAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const url = `${BASE_URL}/account/kea-affordability/${accountId}`;
+  const config = buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId });
+  const response = await axios.post(url, body || {}, config);
+  return response.data;
+}
+
 async function getBalances({ accountId, userId, token, body }) {
   const url = `${BASE_URL}/balances/getall/${accountId}/${moment().format('YYYY-MM-DD')}`;
   const response = await axios.get(url, AUTH_HEADER(token));
@@ -240,6 +254,8 @@ module.exports = {
   getSelectedKeacastAccounts,
   getSelectedAccount,
   getKeaAccountContext,
+  getKeaCashflowAnalysis,
+  getKeaAffordabilityAnalysis,
   getBalances,
   createTransaction,
   deleteTransaction,

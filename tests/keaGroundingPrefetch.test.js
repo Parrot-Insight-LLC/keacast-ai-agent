@@ -90,6 +90,7 @@ async function run() {
     currentDate: '2026-08-16',
     accountId: '10',
   });
+  let cashflowCalls = 0;
   const negEv = await prefetchGrounding({
     trustedUserId: 5,
     accountId: 10,
@@ -97,32 +98,84 @@ async function run() {
     currentDate: '2026-08-16',
     policy: resolveGroundingPolicy(negRoute, { message: 'Will I go negative next month?' }),
     route: negRoute,
+    token: 'jwt',
     fetchPage: unusedFetch,
+    fetchCashflowAnalysis: async ({ accountId, body }) => {
+      cashflowCalls += 1;
+      check('analysis account is selected 10', String(accountId) === '10');
+      check('analysis body has no userId', body.userId === undefined);
+      return {
+        status: 'ok',
+        period: body.period,
+        postedIncome: 0,
+        postedSpending: 0,
+        postedNet: 0,
+        negativeBalanceRisk: {
+          hasNegativeInHorizon: true,
+          firstNegativeDate: '2026-09-12',
+          firstNegativeAmount: -40,
+          horizonDays: 90,
+        },
+        observations: [{ code: 'forecast_goes_negative' }],
+        limitations: [],
+        dataAsOf: '2026-08-16T12:00:00.000Z',
+      };
+    },
   });
-  check('forecast uses snapshot', negEv.source.includes('kea_snapshot') && !negEv.source.includes('user_transactions'));
-  check('forecast did not call getUserTransactions', unusedCalls.length === 0);
-  check('negative in next month detected', negEv.facts.hasNegativeInRequestedPeriod === true);
-  check('limitations mention 15-day window', (negEv.limitations || []).includes('upcoming_window_15d'));
+  check('negative-risk uses cashflow_analysis macro', negEv.source.includes('cashflow_analysis') && !negEv.source.includes('user_transactions'));
+  check('negative-risk did not call getUserTransactions', unusedCalls.length === 0);
+  check('negative-risk prefetched once', cashflowCalls === 1);
+  check('negative-risk uses full-horizon flag', negEv.facts.negativeBalanceRisk.hasNegativeInHorizon === true);
+  check('negative-risk status ok', negEv.status === 'ok');
 
   const affordRoute = routeCapability({
-    message: 'Can I afford $800 next month?',
+    message: 'Can I afford $800 next Friday?',
     currentDate: '2026-08-16',
     accountId: '10',
   });
+  let affordCalls = 0;
   const affordEv = await prefetchGrounding({
     trustedUserId: 5,
     accountId: 10,
     snapshot: SNAPSHOT,
     currentDate: '2026-08-16',
-    policy: resolveGroundingPolicy(affordRoute, { message: 'Can I afford $800 next month?' }),
+    policy: resolveGroundingPolicy(affordRoute, { message: 'Can I afford $800 next Friday?' }),
     route: affordRoute,
+    token: 'jwt',
     fetchPage: unusedFetch,
+    fetchAffordabilityAnalysis: async ({ accountId, body }) => {
+      affordCalls += 1;
+      check('afford account is selected 10', String(accountId) === '10');
+      check('afford body has no userId', body.userId === undefined);
+      check('afford amount 800', body.amount === 800);
+      check('afford purchase date next Friday', body.purchaseDate === '2026-08-21');
+      return {
+        status: 'ok',
+        assumption: 'one_time_expense',
+        requested: { amount: 800, purchaseDate: '2026-08-21' },
+        horizonDays: 90,
+        baseline: { lowestAfterDate: 1100, firstNegativeDate: null },
+        hypothetical: { lowestAfterDate: 300, firstNegativeDate: null },
+        delta: {
+          baselineAlreadyNegative: false,
+          newNegativeIntroduced: false,
+          negativeStartsEarlier: false,
+          negativeWorsenedBy: 0,
+          lowestBalanceBefore: 1100,
+          lowestBalanceAfter: 300,
+        },
+        observations: [{ code: 'no_new_negative' }],
+        limitations: ['available_unadjusted_no_provider_cache'],
+        dataAsOf: '2026-08-16T12:00:00.000Z',
+      };
+    },
   });
-  check('affordability is partial (no assessAffordability)', affordEv.status === 'partial');
-  check('affordability includes requestedAmount', affordEv.facts.requestedAmount === 800);
-  check('affordability limitation not_calculated', (affordEv.limitations || []).includes('affordability_not_calculated'));
-  check('affordability has savingsPotential not a new formula', affordEv.facts.savingsPotential === 900);
+  check('affordability status ok', affordEv.status === 'ok');
+  check('affordability prefetched once', affordCalls === 1);
+  check('affordability source', affordEv.source.includes('affordability_analysis'));
   check('affordability facts have no affordabilityScore', affordEv.facts.affordabilityScore === undefined);
+  check('affordability keeps provider-cache limitation', (affordEv.limitations || []).includes('available_unadjusted_no_provider_cache'));
+  check('affordability did not call transaction read', unusedCalls.length === 0);
 
   section('historical lookup prefetch — complete period');
 

@@ -57,8 +57,10 @@ async function run() {
 
   check('lookup prefetch_read for merchant period', policyFor('How much did I spend at Walmart last month?').policy.prefetchKind === 'prefetch_read');
   check('balance uses snapshot', policyFor("What's my balance?").policy.prefetchKind === 'snapshot');
-  check('forecast uses snapshot', policyFor('Will I go negative next month?').policy.prefetchKind === 'snapshot');
-  check('affordability uses snapshot', policyFor('Can I afford $800 next month?').policy.prefetchKind === 'snapshot');
+  check('negative-risk uses cashflow_macro', policyFor('Will I go negative next month?').policy.prefetchKind === 'cashflow_macro');
+  check('affordability uses affordability_macro', policyFor('Can I afford $800 next month?').policy.prefetchKind === 'affordability_macro');
+  check('how am I doing uses cashflow_macro', policyFor('How am I doing this month?').policy.prefetchKind === 'cashflow_macro');
+  check('future balance wording still snapshot forecast', policyFor('What will my balance be next month?').policy.prefetchKind === 'snapshot');
 
   section('fail-soft policy');
 

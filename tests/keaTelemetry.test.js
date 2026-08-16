@@ -254,6 +254,7 @@ async function run() {
   check('grounding payload has no merchant', pG.merchant === undefined && pG.lastSubjectValue === undefined);
   check('grounding payload has no amounts', pG.amount === undefined && pG.expenseTotal === undefined
     && pG.spentTotal === undefined);
+  check('default financial_macro none on unused recorder', pG.financial_macro === 'none');
   check('grounding payload has no search account filter flag', pG.search_account_filter_applied === undefined);
   check('grounding payload has no message', pG.message === undefined && pG.prompt === undefined);
 

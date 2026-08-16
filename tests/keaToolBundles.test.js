@@ -27,6 +27,8 @@ async function run() {
     && !bundleForCapability('financial_forecast').includes('getUpcomingTransactions')
   );
   check('affordability has no model tools', bundleForCapability('affordability_or_planning').length === 0);
+  check('cashflow_analysis has no model tools', bundleForCapability('cashflow_analysis').length === 0);
+  check('mixed_macro has no model tools', bundleForCapability('mixed_macro').length === 0);
   check(
     'affordability omits getGoals',
     !bundleForCapability('affordability_or_planning').includes('getGoals')
