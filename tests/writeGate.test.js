@@ -68,6 +68,19 @@ async function run() {
   const stripped = injectTrustedIdentity({ token: 'forged', userId: 1, amount: 50, type: 'expense' }, ctx);
   check('stripped args still have amount/type for the write path', stripped.amount === 50 && stripped.type === 'expense');
   check('write-allow condition ignores identity fields', T.isWriteAllowed(true, false, true) === true);
+
+  section('Phase 2.4 invitation is not a transcript proposal');
+  const inviteDs = T.emptyDialogueState();
+  inviteDs.lastCapability = 'affordability_or_planning';
+  const inviteHistory = [{ role: 'assistant', content: 'Want me to add that $800 expense to your forecast?' }];
+  check(
+    'macro invitation does not show pending proposal',
+    T.transcriptShowsPendingProposal(inviteHistory, inviteDs) === false
+  );
+  check(
+    'yes after macro invitation is not write-allowed',
+    T.isWriteAllowed(false, false, T.isAffirmativeMessage('yes'), T.transcriptShowsPendingProposal(inviteHistory, inviteDs)) === false
+  );
 }
 
 module.exports = { run };

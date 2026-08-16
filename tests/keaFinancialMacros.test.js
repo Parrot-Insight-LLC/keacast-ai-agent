@@ -24,6 +24,11 @@ function route(message, extra = {}) {
     message,
     currentDate: extra.currentDate || '2026-08-16',
     simulationMode: extra.simulationMode === true,
+    pendingWrite: extra.pendingWrite === true,
+    pendingGoalWrite: extra.pendingGoalWrite === true,
+    pendingDraft: extra.pendingDraft || extra.dialogueState?.draftTransaction || null,
+    pendingGoalDraft: extra.pendingGoalDraft || extra.dialogueState?.draftGoal || null,
+    userAffirmative: extra.userAffirmative === true,
     dialogueState: extra.dialogueState || T.emptyDialogueState(),
     accountId: extra.accountId || '10',
   });
@@ -599,6 +604,185 @@ async function run() {
       evidence: affordOkEv,
     }) === true
   );
+
+  section('Phase 2.4 macro write-state isolation');
+
+  const affordMacroDs = T.emptyDialogueState();
+  affordMacroDs.lastCapability = 'affordability_or_planning';
+  const cashflowMacroDs = T.emptyDialogueState();
+  cashflowMacroDs.lastCapability = 'cashflow_analysis';
+  const invitationExact = [{
+    role: 'assistant',
+    content: 'Based on your current Keacast forecast, adding the $800 expense would not create a negative projected balance.\n\nIf you want, I can help add that expense to your forecast.',
+  }];
+  const invitationWant = [{ role: 'assistant', content: 'Want me to add that $800 expense to your forecast?' }];
+  const invitationWould = [{ role: 'assistant', content: 'Would you like me to add that $800 expense to your forecast?' }];
+  const invitationDoYou = [{ role: 'assistant', content: 'Do you want me to add the $800 expense to your forecast?' }];
+  const closerLook = [{
+    role: 'assistant',
+    content: 'Household: $2,800\nRetail: $1,400\n\nWant me to look more closely at either category?',
+  }];
+  const realProposalText = [{
+    role: 'assistant',
+    content: 'I can add an $800 expense titled "Widget" on 2026-08-21. Would you like me to create it? Confirm if that looks right.',
+  }];
+
+  check('exact invitation is not a transcript proposal', T.transcriptShowsPendingProposal(invitationExact, affordMacroDs) === false);
+  check('Want me to add $800 is not a transcript proposal after affordability macro', T.transcriptShowsPendingProposal(invitationWant, affordMacroDs) === false);
+  check('Would you like me to add $800 is not a transcript proposal after affordability macro', T.transcriptShowsPendingProposal(invitationWould, affordMacroDs) === false);
+  check('Do you want me to add $800 is not a transcript proposal after affordability macro', T.transcriptShowsPendingProposal(invitationDoYou, affordMacroDs) === false);
+  check('closer-look follow-up is not a transcript proposal', T.transcriptShowsPendingProposal(closerLook, cashflowMacroDs) === false);
+  check('ungated regex still sees Want me to as proposal-like', T.transcriptShowsPendingProposal(invitationWant) === true);
+  check('extractProposalFromMessage is not used when macro origin blocks transcript', T.transcriptShowsPendingProposal(invitationWant, affordMacroDs) === false
+    && T.extractProposalFromMessage(invitationWant[0].content, [], '2026-08-16') != null);
+
+  const yesAfterInvite = route('yes', {
+    pendingWrite: T.transcriptShowsPendingProposal(invitationWant, affordMacroDs),
+    userAffirmative: T.isAffirmativeMessage('yes'),
+    dialogueState: affordMacroDs,
+  });
+  check('yes after invitation is not confirmation', yesAfterInvite.capability !== 'confirmation');
+  check('yes after invitation does not arm write', T.isWriteAllowed(
+    false,
+    false,
+    T.isAffirmativeMessage('yes'),
+    T.transcriptShowsPendingProposal(invitationWant, affordMacroDs)
+  ) === false);
+  check('invitation does not set pendingConfirmation', affordMacroDs.pendingConfirmation === false);
+
+  const addAfterInvite = route('Add it to my forecast.', {
+    pendingWrite: T.transcriptShowsPendingProposal(invitationExact, affordMacroDs),
+    dialogueState: affordMacroDs,
+  });
+  check('explicit add after invitation is transaction_write', addAfterInvite.capability === 'transaction_write');
+
+  const realDs = T.emptyDialogueState();
+  realDs.lastCapability = 'affordability_or_planning';
+  realDs.pendingConfirmation = true;
+  realDs.draftTransaction = { title: 'Widget', type: 'expense', amount: 800, start: '2026-08-21' };
+  check('real pending draft still allows transcript fallback', T.transcriptShowsPendingProposal(realProposalText, realDs) === true);
+  check('real pending + yes is confirmation', route('yes', {
+    pendingWrite: true,
+    userAffirmative: T.isAffirmativeMessage('yes'),
+    dialogueState: realDs,
+  }).capability === 'confirmation');
+  check('real pending + yes write gate open', T.isWriteAllowed(true, T.isDraftProposable(realDs.draftTransaction), true, true) === true);
+
+  const falseSwitchDs = T.emptyDialogueState();
+  falseSwitchDs.lastCapability = 'affordability_or_planning';
+  const pendingWriteFromMacro = falseSwitchDs.pendingConfirmation === true
+    || (T.isDraftProposable(falseSwitchDs.draftTransaction) && falseSwitchDs.needsReconfirm !== true)
+    || T.transcriptShowsPendingProposal(invitationWant, falseSwitchDs);
+  const analysisAfterInviteRoute = route('Will I go negative next month?', {
+    pendingWrite: pendingWriteFromMacro,
+    dialogueState: falseSwitchDs,
+  });
+  const falseSwitch = T.applyPendingWriteTopicSwitch(falseSwitchDs, analysisAfterInviteRoute, {
+    pendingArmedAtStart: pendingWriteFromMacro,
+    userAffirmative: false,
+  });
+  check('false macro proposal does not topic-switch', falseSwitch.reason === 'none');
+  check('false macro proposal does not set needsReconfirm', falseSwitchDs.needsReconfirm === false);
+  check('next-month after invitation is cashflow_analysis', analysisAfterInviteRoute.capability === 'cashflow_analysis');
+
+  const realSwitchDs = T.emptyDialogueState();
+  realSwitchDs.lastCapability = 'affordability_or_planning';
+  realSwitchDs.pendingConfirmation = true;
+  realSwitchDs.draftTransaction = { title: 'Widget', type: 'expense', amount: 800, start: '2026-08-21' };
+  const realPendingWrite = realSwitchDs.pendingConfirmation === true
+    || (T.isDraftProposable(realSwitchDs.draftTransaction) && realSwitchDs.needsReconfirm !== true)
+    || T.transcriptShowsPendingProposal(realProposalText, realSwitchDs);
+  const realSwitchRoute = route('Will I go negative next month?', {
+    pendingWrite: realPendingWrite,
+    dialogueState: realSwitchDs,
+  });
+  const realSwitch = T.applyPendingWriteTopicSwitch(realSwitchDs, realSwitchRoute, {
+    pendingArmedAtStart: realPendingWrite,
+    userAffirmative: false,
+  });
+  check('real proposal still topic-switches on analysis', realSwitch.reason === 'topic_switch');
+  check('real proposal topic-switch sets needsReconfirm', realSwitchDs.needsReconfirm === true);
+  check('real proposal topic-switch preserves draft', realSwitchDs.draftTransaction.amount === 800);
+  check(
+    'bare yes after real topic-switch cannot commit',
+    T.isWriteAllowed(
+      false,
+      T.isDraftProposable(realSwitchDs.draftTransaction) && realSwitchDs.needsReconfirm !== true,
+      true,
+      T.transcriptShowsPendingProposal(realProposalText, realSwitchDs) && realSwitchDs.needsReconfirm !== true
+    ) === false
+  );
+
+  section('Phase 2.4 historical Azure-facing balances');
+
+  const julyWithNowBalances = {
+    status: 'ok',
+    source: ['cashflow_analysis'],
+    period: { start: '2026-07-01', end: '2026-07-31', label: 'named_month' },
+    dataAsOf: '2026-08-16T12:00:00.000Z',
+    clientDate: '2026-08-16',
+    accountScope: 'selected_account',
+    facts: {
+      postedIncome: 4000,
+      postedSpending: 3500,
+      postedNet: 500,
+      availableBalance: 2200,
+      currentBalance: 2100,
+      reconciledBalance: 2000,
+      remainingForecastIncome: 1,
+      remainingForecastSpending: 2,
+      savingsPotential: 3,
+      negativeBalanceRisk: { hasNegativeInScope: false, horizonDays: 90 },
+      largestCategories: [{ category: 'Household', spentTotal: 900 }],
+      largestMerchants: [{ name: 'Store', spentTotal: 400 }],
+    },
+    observations: [{ code: 'posted_net_positive', postedNet: 500 }],
+    limitations: [],
+  };
+  const julyFacing = azureFacingEvidence(julyWithNowBalances);
+  check('July Azure facts keep postedIncome', julyFacing.facts.postedIncome === 4000);
+  check('July Azure facts keep postedSpending', julyFacing.facts.postedSpending === 3500);
+  check('July Azure facts keep postedNet', julyFacing.facts.postedNet === 500);
+  check('July Azure facts keep largestCategories', Array.isArray(julyFacing.facts.largestCategories));
+  check('July Azure facts keep largestMerchants', Array.isArray(julyFacing.facts.largestMerchants));
+  check('July Azure facts omit availableBalance', julyFacing.facts.availableBalance === undefined);
+  check('July Azure facts omit currentBalance', julyFacing.facts.currentBalance === undefined);
+  check('July Azure facts omit reconciledBalance', julyFacing.facts.reconciledBalance === undefined);
+  check('July Azure facts omit remainingForecastIncome', julyFacing.facts.remainingForecastIncome === undefined);
+  check('July Azure facts omit savingsPotential', julyFacing.facts.savingsPotential === undefined);
+  check('July Azure facts omit negativeBalanceRisk', julyFacing.facts.negativeBalanceRisk === undefined);
+  const julyHistPrompt = T.buildMacroAnalysisPrompt({
+    currentDate: '2026-08-16',
+    firstName: 'Alex',
+    account: selectedAccount,
+    evidence: julyWithNowBalances,
+  }).systemContent;
+  check('July prompt JSON omits availableBalance field', !/"availableBalance"/.test(julyHistPrompt));
+  check('July prompt JSON omits currentBalance field', !/"currentBalance"/.test(julyHistPrompt));
+  check('July prompt forbids as-of-now current balances', /Do not mention availableBalance, currentBalance, reconciledBalance, or current balances as of now/.test(julyHistPrompt));
+
+  const augustWithBalances = {
+    status: 'ok',
+    source: ['cashflow_analysis'],
+    period: { start: '2026-08-01', end: '2026-08-31', label: 'this_month' },
+    dataAsOf: '2026-08-16T12:00:00.000Z',
+    clientDate: '2026-08-16',
+    accountScope: 'selected_account',
+    facts: {
+      postedIncome: 1000,
+      postedSpending: 800,
+      postedNet: 200,
+      availableBalance: 2200,
+      currentBalance: 2100,
+      reconciledBalance: 2000,
+    },
+    observations: [{ code: 'posted_net_positive', postedNet: 200 }],
+    limitations: [],
+  };
+  const augustFacing = azureFacingEvidence(augustWithBalances);
+  check('August Azure facts retain availableBalance', augustFacing.facts.availableBalance === 2200);
+  check('August Azure facts retain currentBalance', augustFacing.facts.currentBalance === 2100);
+  check('August Azure facts retain reconciledBalance', augustFacing.facts.reconciledBalance === 2000);
 }
 
 module.exports = { run };

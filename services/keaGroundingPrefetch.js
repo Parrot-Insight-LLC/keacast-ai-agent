@@ -553,6 +553,7 @@ function evidenceFromMacroResult(result, { source, period, currentDate, assumpti
     observations: Array.isArray(result.observations) ? result.observations : [],
     assumptions: assumptions || [],
     limitations,
+    clientDate: currentDate || null,
   };
 }
 
@@ -819,6 +820,19 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function completedHistoricalClientDate(evidence) {
+  const fromEvidence = String(evidence && evidence.clientDate || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fromEvidence)) return fromEvidence;
+  const fromDataAsOf = String(evidence && evidence.dataAsOf || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(fromDataAsOf) ? fromDataAsOf : '';
+}
+
+function isCompletedHistoricalPeriod(period, clientDate) {
+  const end = String(period && period.end || '').slice(0, 10);
+  const today = String(clientDate || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(end) && /^\d{4}-\d{2}-\d{2}$/.test(today) && end < today;
+}
+
 function azureFacingEvidence(evidence) {
   const compact = {
     status: evidence.status,
@@ -859,6 +873,15 @@ function azureFacingEvidence(evidence) {
         return copy;
       });
     }
+    if (isCompletedHistoricalPeriod(compact.period, completedHistoricalClientDate(evidence)) && compact.facts) {
+      delete compact.facts.availableBalance;
+      delete compact.facts.currentBalance;
+      delete compact.facts.reconciledBalance;
+      delete compact.facts.remainingForecastIncome;
+      delete compact.facts.remainingForecastSpending;
+      delete compact.facts.savingsPotential;
+      delete compact.facts.negativeBalanceRisk;
+    }
   }
   return compact;
 }
@@ -882,6 +905,8 @@ function buildEvidenceSystemSection(evidence) {
     return '';
   }
   const compact = azureFacingEvidence(evidence);
+  const completedHistorical = compact.source.includes('cashflow_analysis')
+    && isCompletedHistoricalPeriod(compact.period, completedHistoricalClientDate(evidence));
   const lookupInstructions = compact.lookups
     ? [
       'Answer every requested lookup represented in lookups[].',
@@ -913,14 +938,21 @@ function buildEvidenceSystemSection(evidence) {
     ].join(' ')
     : '';
   const cashflowNarrationInstruction = compact.source.includes('cashflow_analysis')
-    ? [
-      'You may describe posted income, posted spending, posted net, remaining forecast income/spending, savingsPotential, categories, merchants, and scoped negative risk.',
-      'If postedSpending exceeds postedIncome, you may state that fact. Do not conclude the user is doing well or poorly, managing well, or has healthy/unhealthy/comfortable/safe cash flow.',
-      'Do not invent disposable funds, safe-to-spend, overdraft safety, affordability, or "enough money to cover everything" from analyzeCashflow.',
-      'analyzeCashflow is not assessAffordability. Do not conclude the user can afford a purchase from this evidence.',
-      'Do not prescribe cutting, optimizing, reducing, or keeping an eye on the largest categories. State the factual category/merchant ranking instead.',
-      'For a next-month negative-balance question, the primary answer is negativeBalanceRisk.hasNegativeInScope. If false, prefer: "No. Your current Keacast forecast does not show a negative balance during {scope month/year}." If mentioning the lowest balance, both amount and date must come from negativeBalanceRisk.lowestProjectedAmount and negativeBalanceRisk.lowestProjectedDate together.',
-    ].join(' ')
+    ? (completedHistorical
+      ? [
+        'This is a completed historical period. Describe only posted income, posted spending, posted net, categories, and merchants for that period.',
+        'Do not mention availableBalance, currentBalance, reconciledBalance, or current balances as of now.',
+        'If postedSpending exceeds postedIncome, you may state that fact. Do not conclude the user is doing well or poorly, managing well, or has healthy/unhealthy/comfortable/safe cash flow.',
+        'Do not prescribe cutting, optimizing, reducing, or keeping an eye on the largest categories. State the factual category/merchant ranking instead.',
+      ]
+      : [
+        'You may describe posted income, posted spending, posted net, remaining forecast income/spending, savingsPotential, categories, merchants, and scoped negative risk.',
+        'If postedSpending exceeds postedIncome, you may state that fact. Do not conclude the user is doing well or poorly, managing well, or has healthy/unhealthy/comfortable/safe cash flow.',
+        'Do not invent disposable funds, safe-to-spend, overdraft safety, affordability, or "enough money to cover everything" from analyzeCashflow.',
+        'analyzeCashflow is not assessAffordability. Do not conclude the user can afford a purchase from this evidence.',
+        'Do not prescribe cutting, optimizing, reducing, or keeping an eye on the largest categories. State the factual category/merchant ranking instead.',
+        'For a next-month negative-balance question, the primary answer is negativeBalanceRisk.hasNegativeInScope. If false, prefer: "No. Your current Keacast forecast does not show a negative balance during {scope month/year}." If mentioning the lowest balance, both amount and date must come from negativeBalanceRisk.lowestProjectedAmount and negativeBalanceRisk.lowestProjectedDate together.',
+      ]).join(' ')
     : '';
   const affordabilityInstruction = compact.source.includes('affordability_analysis')
     ? [
@@ -939,7 +971,9 @@ function buildEvidenceSystemSection(evidence) {
     : '';
   return [
     'GROUNDED EVIDENCE (authoritative for this answer — do not contradict; do not invent missing dollar values or dates; respect limitations; partial evidence does not justify unsupported certainty):',
-    'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available, not a projected balance, not lowestProjectedAmount, not projectedOnDate); savingsPotential = lowest projected balance through the current month (not available money).',
+    completedHistorical
+      ? 'Field glossary: postedIncome / postedSpending / postedNet are posted actuals for the requested historical period on the selected account. Do not mention availableBalance, currentBalance, reconciledBalance, or current balances as of now.'
+      : 'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available, not a projected balance, not lowestProjectedAmount, not projectedOnDate); savingsPotential = lowest projected balance through the current month (not available money).',
     spendingGlossary,
     JSON.stringify(compact),
     lookupInstructions,

@@ -1549,7 +1549,25 @@ function lastAssistantTurnText(history) {
   return null;
 }
 
-function transcriptShowsPendingProposal(history) {
+function priorTurnWasAnalyticalMacro(dialogueState) {
+  const cap = dialogueState && dialogueState.lastCapability;
+  return cap === 'cashflow_analysis' || cap === 'affordability_or_planning';
+}
+
+function hasRealTransactionProposalState(dialogueState) {
+  if (!dialogueState || typeof dialogueState !== 'object') return false;
+  if (dialogueState.pendingConfirmation === true) return true;
+  return isDraftProposable(dialogueState.draftTransaction)
+    && dialogueState.needsReconfirm !== true;
+}
+
+function transcriptShowsPendingProposal(history, dialogueState) {
+  // Successful analytical macros often contain dollar amounts plus invitation /
+  // closer-look phrasing. That must not arm the Redis-eviction transcript
+  // fallback. Structured write state still wins.
+  if (priorTurnWasAnalyticalMacro(dialogueState) && !hasRealTransactionProposalState(dialogueState)) {
+    return false;
+  }
   const lastAssistant = lastAssistantTurnText(history);
   if (!lastAssistant) return false;
   const t = lastAssistant.toLowerCase();
@@ -3140,7 +3158,7 @@ exports.chat = async (req, res) => {
       : 'No account context (missing account or tool-layer unavailable)';
 
     // Redis-eviction fallback flags — needed for capability routing before Azure.
-    const proposalInTranscript = transcriptShowsPendingProposal(history);
+    const proposalInTranscript = transcriptShowsPendingProposal(history, dialogueState);
     const goalProposalInTranscript = transcriptShowsPendingGoalProposal(history);
     // A leftover proposal in the transcript must not arm a generic "yes"
     // after a topic switch. needsReconfirm already folded into draftComplete*.
