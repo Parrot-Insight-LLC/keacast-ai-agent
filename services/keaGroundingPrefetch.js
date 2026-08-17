@@ -296,6 +296,7 @@ function shouldForceDirectAnswer({ route, policy, evidence } = {}) {
     || cap === 'cashflow_analysis'
     || cap === 'cashflow_comparison'
     || cap === 'cashflow_trend'
+    || cap === 'cashflow_recurring'
     || cap === 'affordability_or_planning';
   if (!directCaps) return false;
   if (!evidence || evidence.status !== 'ok') return false;
@@ -523,7 +524,12 @@ function horizonEnd(currentDate, days = 90) {
 function macroFactsFromResult(result, source) {
   if (!result || typeof result !== 'object') return {};
   const facts = {};
-  const copyKeys = source === 'cashflow_trend'
+  const copyKeys = source === 'cashflow_recurring'
+    ? [
+      'accountScope', 'recurringDefinition', 'sourceKinds',
+      'expenses', 'income', 'totals',
+    ]
+    : source === 'cashflow_trend'
     ? [
       'accountScope', 'windowKind', 'metricScope', 'categoryFilter',
       'periods', 'trend', 'highest', 'lowest',
@@ -602,6 +608,99 @@ async function defaultFetchPeriodComparison({ accountId, token, body, timeoutMs,
 async function defaultFetchTrendAnalysis({ accountId, token, body, timeoutMs, requestId }) {
   const { getKeaTrendAnalysis } = require('../tools/keacast_tool_layer');
   return getKeaTrendAnalysis({ accountId, token, body, timeoutMs, requestId });
+}
+
+async function defaultFetchRecurringAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const { getKeaRecurringAnalysis } = require('../tools/keacast_tool_layer');
+  return getKeaRecurringAnalysis({ accountId, token, body, timeoutMs, requestId });
+}
+
+function streamMatchesLabel(stream, subjectValue) {
+  const want = merchantMatchKey(subjectValue);
+  if (!want) return false;
+  const keys = [stream && stream.label, stream && stream.category].filter(Boolean).map(merchantMatchKey);
+  return keys.some((k) => k && (k === want || k.includes(want) || want.includes(k)));
+}
+
+function streamCountBucket(count) {
+  const n = Number(count) || 0;
+  if (n <= 0) return '0';
+  if (n <= 3) return '1-3';
+  if (n <= 10) return '4-10';
+  if (n <= 15) return '11-15';
+  return '16+';
+}
+
+async function prefetchCashflowRecurringMacro({
+  accountId,
+  token,
+  requestId,
+  currentDate,
+  slots,
+  fetchRecurringAnalysis,
+}) {
+  if (slots && slots.recurringError) {
+    return emptyEvidence({
+      limitations: [slots.recurringError],
+      dataAsOf: currentDate || null,
+    });
+  }
+  if (accountId == null || accountId === '') {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+  if (!token) {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+  const fetch = fetchRecurringAnalysis || defaultFetchRecurringAnalysis;
+  try {
+    const result = await fetch({
+      accountId,
+      token,
+      requestId,
+      timeoutMs: macroTimeoutMs(),
+      body: {
+        clientDate: currentDate,
+      },
+    });
+    const evidence = evidenceFromMacroResult(result, {
+      source: 'cashflow_recurring',
+      currentDate,
+      assumptions: [],
+    });
+    if (evidence.facts) {
+      evidence.facts.metricScope = (slots && slots.metricScope) || 'all';
+      evidence.facts.monthlyEquivalentIsNormalized = true;
+    }
+    if (result && result.streamCounts) {
+      evidence.prefetchMeta = {
+        ...(evidence.prefetchMeta || {}),
+        streamCount: (Number(result.streamCounts.expense) || 0) + (Number(result.streamCounts.income) || 0),
+        streamCountBucket: streamCountBucket(
+          (Number(result.streamCounts.expense) || 0) + (Number(result.streamCounts.income) || 0)
+        ),
+      };
+    }
+    const want = slots && slots.subjectValue;
+    if (want && evidence.status === 'ok' && evidence.facts) {
+      const expenses = (evidence.facts.expenses || []).filter((s) => streamMatchesLabel(s, want));
+      const income = (evidence.facts.income || []).filter((s) => streamMatchesLabel(s, want));
+      if (!expenses.length && !income.length) {
+        return emptyEvidence({
+          limitations: ['recurring_item_unmatched'],
+          dataAsOf: evidence.dataAsOf || currentDate || null,
+        });
+      }
+      evidence.facts.expenses = expenses;
+      evidence.facts.income = income;
+      evidence.facts.namedFilter = want;
+    }
+    if (slots && slots.recurringCancel) {
+      evidence.limitations = [...(evidence.limitations || []), 'recurring_cancel_unsupported'];
+    }
+    return evidence;
+  } catch (err) {
+    return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null });
+  }
 }
 
 async function prefetchCashflowComparisonMacro({
@@ -865,6 +964,7 @@ async function prefetchGrounding({
   fetchAffordabilityAnalysis,
   fetchPeriodComparison,
   fetchTrendAnalysis,
+  fetchRecurringAnalysis,
 } = {}) {
   const effective = policy?.effectiveCapability || route?.capability;
   const slots = route?.slots || {};
@@ -913,6 +1013,17 @@ async function prefetchGrounding({
       currentDate,
       slots,
       fetchTrendAnalysis,
+    });
+  }
+
+  if (policy.prefetchKind === 'cashflow_recurring_macro' || effective === 'cashflow_recurring') {
+    return prefetchCashflowRecurringMacro({
+      accountId,
+      token,
+      requestId,
+      currentDate,
+      slots,
+      fetchRecurringAnalysis,
     });
   }
 
@@ -1032,7 +1143,8 @@ function azureFacingEvidence(evidence) {
     && (compact.source.includes('cashflow_analysis')
       || compact.source.includes('affordability_analysis')
       || compact.source.includes('cashflow_period_comparison')
-      || compact.source.includes('cashflow_trend'));
+      || compact.source.includes('cashflow_trend')
+      || compact.source.includes('cashflow_recurring'));
   if (isMacro) {
     compact.accountScope = evidence.accountScope || 'selected_account';
   }
@@ -1166,11 +1278,20 @@ function buildEvidenceSystemSection(evidence) {
     : '';
   const isComparison = compact.source.includes('cashflow_period_comparison');
   const isTrend = compact.source.includes('cashflow_trend');
+  const isRecurring = compact.source.includes('cashflow_recurring');
   const isMacro = compact.source.includes('cashflow_analysis')
     || compact.source.includes('affordability_analysis')
     || isComparison
-    || isTrend;
-  const macroInstruction = isTrend
+    || isTrend
+    || isRecurring;
+  const macroInstruction = isRecurring
+    ? [
+      'GROUNDED EVIDENCE is authoritative for this requested recurring analysis.',
+      'accountScope=selected_account: all financial values refer only to the currently selected account unless the evidence explicitly states otherwise. Do not say across your accounts, all accounts, or complete financial picture.',
+      'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Do not calculate monthly equivalents, cadence, or ranking.',
+      'Narrate observation codes and supplied facts only. Do not invent a new financial judgment.',
+    ].join(' ')
+    : isTrend
     ? [
       'GROUNDED EVIDENCE is authoritative for this requested trend.',
       'accountScope=selected_account: all financial values refer only to the currently selected account unless the evidence explicitly states otherwise. Do not say across your accounts, all accounts, or complete financial picture.',
@@ -1248,6 +1369,23 @@ function buildEvidenceSystemSection(evidence) {
       'If observations include all_periods_empty, say there were no posted transactions in those windows.',
     ].join(' ')
     : '';
+  const recurringInstruction = compact.source.includes('cashflow_recurring')
+    ? [
+      'These items are scheduled recurring forecasts in Keacast, not bank-detected or provider-detected recurring charges.',
+      'Say they are scheduled in the user\'s Keacast forecast. Do not say the bank detected them. Do not say these are all recurring charges on the linked account.',
+      'monthlyEquivalent is a cadence-normalized monthly equivalent, not a charge that literally posts every month. Do not recalculate it.',
+      'When the user asks how much recurring expenses cost, use totals.recurringExpenseMonthlyEquivalent and say it is an estimated monthly equivalent of scheduled recurring expenses.',
+      'nextOccurrenceExpenseSum is the sum of one next scheduled amount per expense series. It is not a monthly total.',
+      'Use supplied frequencyLabel values. Do not infer cadence. Do not merge streams. Do not decide that something is recurring.',
+      'If facts.metricScope is income, lead with scheduled recurring income. If expense, lead with scheduled recurring expenses.',
+      'largest_recurring_expense / largest_recurring_income are already ranked by monthlyEquivalent. Do not rank raw amounts across different cadences.',
+      'If observations include no_scheduled_recurring, say you do not see active recurring items currently scheduled in this Keacast account. Do not say the user has no recurring charges at their bank.',
+      'Do not call these subscriptions unless the evidence says so. Do not call scheduled recurring income a confirmed payday.',
+      'Do not say a charge is unnecessary, wasteful, expensive, or should be cancelled. You cannot cancel an external service.',
+      'If limitations include recurring_cancel_unsupported, say you can show the scheduled item but cannot cancel the external service.',
+      'Do not predict future amounts that are not supplied. Do not use groupid, match_id, account ids, or provider stream ids.',
+    ].join(' ')
+    : '';
   const affordabilityInstruction = compact.source.includes('affordability_analysis')
     ? [
       'Preferred conclusion: based on the current Keacast forecast, adding the requested expense would or would not create a negative projected balance within the evaluation horizon.',
@@ -1269,6 +1407,8 @@ function buildEvidenceSystemSection(evidence) {
       ? 'Field glossary: postedIncome / postedSpending / postedNet are posted actuals for the requested historical period on the selected account. Do not mention availableBalance, currentBalance, reconciledBalance, or current balances as of now.'
       : isTrend
         ? 'Field glossary: periods[] are chronological posted-actual windows. income and spending are positive magnitudes. net is signed. trend.direction is the deterministic classification. firstToLast is the last window minus the first. Use supplied labels, not internal field names.'
+      : isRecurring
+        ? 'Field glossary: expenses[] and income[] are scheduled Keacast recurring series. amount is the next scheduled occurrence magnitude. monthlyEquivalent is a cadence-normalized monthly equivalent. totals.recurringExpenseMonthlyEquivalent is the default cost metric. nextOccurrenceExpenseSum is not a monthly total. sourceKinds kea_scheduled_series means scheduled in Keacast, not bank-detected.'
       : isComparison
         ? 'Field glossary: periodA is the older baseline; periodB is the newer comparison. income and spending are positive magnitudes. net is signed. changes.absolute is always periodB minus periodA. windowKind describes whether the windows are full months, matched elapsed days, or explicit bounds.'
         : 'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available, not a projected balance, not lowestProjectedAmount, not projectedOnDate); savingsPotential = lowest projected balance through the current month (not available money).',
@@ -1279,6 +1419,7 @@ function buildEvidenceSystemSection(evidence) {
     cashflowNarrationInstruction,
     comparisonInstruction,
     trendInstruction,
+    recurringInstruction,
     affordabilityInstruction,
     partialInstruction,
   ].filter(Boolean).join('\n');
@@ -1300,4 +1441,5 @@ module.exports = {
   isExcludedFromHistoricalSpend,
   shouldForceDirectAnswer,
   evidenceFromMacroCatch,
+  streamCountBucket,
 };

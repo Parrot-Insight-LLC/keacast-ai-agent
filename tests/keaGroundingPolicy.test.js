@@ -63,6 +63,7 @@ async function run() {
   check('affordability uses affordability_macro', policyFor('Can I afford $800 next month?').policy.prefetchKind === 'affordability_macro');
   check('how am I doing uses cashflow_macro', policyFor('How am I doing this month?').policy.prefetchKind === 'cashflow_macro');
   check('spending lately uses cashflow_trend_macro', policyFor('Am I spending more lately?').policy.prefetchKind === 'cashflow_trend_macro');
+  check('recurring expenses uses cashflow_recurring_macro', policyFor('What recurring expenses do I have?').policy.prefetchKind === 'cashflow_recurring_macro');
   check('future balance wording still snapshot forecast', policyFor('What will my balance be next month?').policy.prefetchKind === 'snapshot');
 
   section('fail-soft policy');

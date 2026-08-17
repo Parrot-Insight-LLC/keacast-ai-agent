@@ -19,6 +19,7 @@ const MATRIX = Object.freeze({
   cashflow_analysis: GROUNDING_REQUIRED,
   cashflow_comparison: GROUNDING_REQUIRED,
   cashflow_trend: GROUNDING_REQUIRED,
+  cashflow_recurring: GROUNDING_REQUIRED,
   affordability_or_planning: GROUNDING_REQUIRED,
   mixed_macro: GROUNDING_REQUIRED,
   invitation_continuation: GROUNDING_NONE,
@@ -48,6 +49,11 @@ const FAIL_SOFT_BY_LIMITATION = Object.freeze({
   trend_period_count_unsupported: 'I can show a 3-month trend right now. Try the last three months, or three named months such as May through July.',
   compound_trend_unsupported: 'I can show a trend for one category at a time. Which category should I look at first?',
   merchant_trend_unsupported: 'I can show a category or overall spending trend, but not a merchant trend yet.',
+  recurring_definition_unsupported: 'I can analyze scheduled recurring expenses and income in your Keacast forecast, but I cannot reliably classify which of those are subscriptions.',
+  recurring_share_unsupported: 'I cannot say what share of spending is recurring. Scheduled Keacast forecasts and posted spending are different measures.',
+  recurring_trend_unsupported: 'I cannot trend recurring spending yet. I can list scheduled recurring items in your Keacast forecast.',
+  recurring_item_unmatched: 'I don\'t see a matching scheduled recurring item in this Keacast account.',
+  recurring_unavailable: FAIL_SOFT_TEXT,
   macro_error: FAIL_SOFT_TEXT,
   macro_timeout: FAIL_SOFT_TEXT,
 });
@@ -102,6 +108,7 @@ function prefetchKindFor(capability, route) {
   if (capability === 'cashflow_analysis') return 'cashflow_macro';
   if (capability === 'cashflow_comparison') return 'cashflow_comparison_macro';
   if (capability === 'cashflow_trend') return 'cashflow_trend_macro';
+  if (capability === 'cashflow_recurring') return 'cashflow_recurring_macro';
   if (capability === 'affordability_or_planning') return 'affordability_macro';
   if (capability === 'mixed_macro') return 'none';
   if (capability === 'financial_forecast') return 'snapshot';
@@ -131,6 +138,7 @@ function groundingStrategyFor({ policy, evidence, failSoft }) {
   if (evidence.source.includes('cashflow_analysis')) return 'cashflow_macro';
   if (evidence.source.includes('cashflow_period_comparison')) return 'cashflow_comparison_macro';
   if (evidence.source.includes('cashflow_trend')) return 'cashflow_trend_macro';
+  if (evidence.source.includes('cashflow_recurring')) return 'cashflow_recurring_macro';
   if (evidence.source.includes('affordability_analysis')) return 'affordability_macro';
   if (evidence.source.includes('user_transactions')) return 'prefetch_read';
   if (evidence.source.includes('kea_snapshot')) return 'snapshot';

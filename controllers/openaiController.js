@@ -1156,6 +1156,7 @@ function emptyDialogueState() {
     lastAccountId: null,
     lastComparison: null,
     lastTrend: null,
+    lastRecurring: null,
     pendingInvitation: null,
     updatedAt: null,
   };
@@ -3473,6 +3474,7 @@ exports.chat = async (req, res) => {
     if (effectiveCap === 'cashflow_analysis') financialMacro = 'analyze_cashflow';
     if (effectiveCap === 'cashflow_comparison') financialMacro = 'compare_periods';
     if (effectiveCap === 'cashflow_trend') financialMacro = 'trend_periods';
+    if (effectiveCap === 'cashflow_recurring') financialMacro = 'recurring_analysis';
     if (effectiveCap === 'affordability_or_planning') financialMacro = 'assess_affordability';
     const macroAttempted = financialMacro !== 'none' || effectiveCap === 'mixed_macro';
     let macroInputKind = 'none';
@@ -3487,6 +3489,8 @@ exports.chat = async (req, res) => {
       macroInputKind = 'period_pair';
     } else if (financialMacro === 'trend_periods') {
       macroInputKind = 'period_series';
+    } else if (financialMacro === 'recurring_analysis') {
+      macroInputKind = 'recurring_series';
     }
     telemetry.recordGrounding({
       conversation_intent: phase1Route.capability,
@@ -3528,7 +3532,7 @@ exports.chat = async (req, res) => {
         : 'skipped',
       macro_ms: macroAttempted ? groundingPrefetchMs : 0,
       macro_input_kind: macroInputKind,
-      macro_horizon_days: (financialMacro === 'compare_periods' || financialMacro === 'trend_periods') ? null : (macroAttempted ? 90 : null),
+      macro_horizon_days: (financialMacro === 'compare_periods' || financialMacro === 'trend_periods' || financialMacro === 'recurring_analysis') ? null : (macroAttempted ? 90 : null),
       macro_source_count: Array.isArray(phase1Evidence?.source) ? phase1Evidence.source.length : 0,
       comparison_performed: financialMacro === 'compare_periods' && phase1Performed && !phase1FailSoft,
       comparison_status: financialMacro === 'compare_periods'
@@ -3556,6 +3560,15 @@ exports.chat = async (req, res) => {
           || (phase1Route.slots && phase1Route.slots.windowKind)
           || null)
         : null,
+      recurring_performed: financialMacro === 'recurring_analysis' && phase1Performed && !phase1FailSoft,
+      recurring_status: financialMacro === 'recurring_analysis'
+        ? (phase1Evidence && phase1Evidence.status ? phase1Evidence.status : 'unavailable')
+        : 'skipped',
+      recurring_ms: financialMacro === 'recurring_analysis' ? groundingPrefetchMs : 0,
+      recurring_source_kind: financialMacro === 'recurring_analysis' ? 'kea_scheduled_series' : null,
+      recurring_stream_count_bucket: financialMacro === 'recurring_analysis'
+        ? ((phase1Evidence && phase1Evidence.prefetchMeta && phase1Evidence.prefetchMeta.streamCountBucket) || null)
+        : null,
     });
 
     // ── Build a compact, token-minimal context block ─────────────────────
@@ -3567,6 +3580,7 @@ exports.chat = async (req, res) => {
       && (effectiveCap === 'cashflow_analysis'
         || effectiveCap === 'cashflow_comparison'
         || effectiveCap === 'cashflow_trend'
+        || effectiveCap === 'cashflow_recurring'
         || effectiveCap === 'affordability_or_planning')
       && phase1Evidence
       && phase1Evidence.status === 'ok'
@@ -3574,6 +3588,7 @@ exports.chat = async (req, res) => {
       && (phase1Evidence.source.includes('cashflow_analysis')
         || phase1Evidence.source.includes('cashflow_period_comparison')
         || phase1Evidence.source.includes('cashflow_trend')
+        || phase1Evidence.source.includes('cashflow_recurring')
         || phase1Evidence.source.includes('affordability_analysis'));
 
     let identityBlock;

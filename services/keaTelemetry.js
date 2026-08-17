@@ -109,6 +109,11 @@ function createKeaTelemetry({ requestId } = {}) {
     trend_ms: 0,
     trend_period_count: null,
     trend_window_kind: null,
+    recurring_performed: false,
+    recurring_status: 'skipped',
+    recurring_ms: 0,
+    recurring_source_kind: null,
+    recurring_stream_count_bucket: null,
   };
 
   let lastStage = null;
@@ -260,6 +265,21 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (flags.trend_window_kind === null || typeof flags.trend_window_kind === 'string') {
       grounding.trend_window_kind = flags.trend_window_kind || null;
+    }
+    if (flags.recurring_performed === true || flags.recurring_performed === false) {
+      grounding.recurring_performed = flags.recurring_performed;
+    }
+    if (flags.recurring_status === null || typeof flags.recurring_status === 'string') {
+      grounding.recurring_status = flags.recurring_status || 'skipped';
+    }
+    if (flags.recurring_ms != null) {
+      grounding.recurring_ms = Number(flags.recurring_ms) || 0;
+    }
+    if (flags.recurring_source_kind === null || typeof flags.recurring_source_kind === 'string') {
+      grounding.recurring_source_kind = flags.recurring_source_kind || null;
+    }
+    if (flags.recurring_stream_count_bucket === null || typeof flags.recurring_stream_count_bucket === 'string') {
+      grounding.recurring_stream_count_bucket = flags.recurring_stream_count_bucket || null;
     }
   }
 
@@ -433,6 +453,11 @@ function createKeaTelemetry({ requestId } = {}) {
       trend_ms: grounding.trend_ms || 0,
       trend_period_count: grounding.trend_period_count,
       trend_window_kind: grounding.trend_window_kind || null,
+      recurring_performed: !!grounding.recurring_performed,
+      recurring_status: grounding.recurring_status || 'skipped',
+      recurring_ms: grounding.recurring_ms || 0,
+      recurring_source_kind: grounding.recurring_source_kind || null,
+      recurring_stream_count_bucket: grounding.recurring_stream_count_bucket || null,
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,

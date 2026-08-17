@@ -68,9 +68,13 @@ async function run() {
     [1, 'daily', 'Daily'],
     [7, 'weekly', 'Weekly'],
     [14, 'bi-weekly', 'Bi-Weekly'],
-    [30, 'monthly', 'Monthly'],
-    [91, 'quarterly', 'Quarterly'],
-    [365, 'annually', 'Annually'],
+  [30, 'monthly', 'Monthly'],
+  [59, 'bi-monthly', 'Bi-Monthly'],
+  [60, 'bi-monthly', 'Bi-Monthly'],
+  [61, 'bi-monthly', 'Bi-Monthly'],
+  [62, 'bi-monthly', 'Bi-Monthly'],
+  [91, 'quarterly', 'Quarterly'],
+  [365, 'annually', 'Annually'],
   ];
   for (const [code, raw, display] of mapping) {
     check(`frequencyLabel(${code})`, frequencyLabel(code) === raw);

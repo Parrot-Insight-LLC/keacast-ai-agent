@@ -15,6 +15,7 @@ const CAPABILITIES = Object.freeze([
   'cashflow_analysis',
   'cashflow_comparison',
   'cashflow_trend',
+  'cashflow_recurring',
   'affordability_or_planning',
   'mixed_macro',
   'transaction_write',
@@ -30,6 +31,7 @@ const FINANCIAL_CAPABILITIES = new Set([
   'cashflow_analysis',
   'cashflow_comparison',
   'cashflow_trend',
+  'cashflow_recurring',
   'affordability_or_planning',
 ]);
 
@@ -506,6 +508,7 @@ function isCashflowComparison(text) {
 function isCashflowTrend(text) {
   const m = String(text || '').toLowerCase();
   if (!m) return false;
+  if (/\brecurring\b/.test(m)) return false;
   if (/\b(trend|trending|trended)\b/.test(m)) return true;
   if (/\b(lately|recently)\b/.test(m)
     && /\b(spend|spent|spending|income|cash ?flow|net)\b/.test(m)) return true;
@@ -742,6 +745,7 @@ function isNegativeRiskQuestion(text) {
 function isCashflowAnalysis(text) {
   const m = String(text || '').toLowerCase();
   if (isNegativeRiskQuestion(text)) return true;
+  if (/\brecurring\b/.test(m)) return false;
   if (/\bhow am i doing\b/.test(m)) return true;
   if (/\bhow was\b/.test(m)) return true;
   if (/\bwhere is my money going\b/.test(m)) return true;
@@ -753,13 +757,88 @@ function isCashflowAnalysis(text) {
   return false;
 }
 
+function isSubscriptionQuestion(text) {
+  const m = String(text || '').toLowerCase();
+  if (!/\bsubscriptions?\b/.test(m)) return false;
+  if (/\b(last month|this month|last week|spent|spend)\b/.test(m)) return false;
+  return /\b(what|which|do i (have|pay)|am i paying|i pay for)\b/.test(m);
+}
+
+function isRecurringShareQuestion(text) {
+  const m = String(text || '').toLowerCase();
+  return (/\bhow much of my (spending|expenses?|spend)\b/.test(m) && /\brecurring\b/.test(m))
+    || (/\b(percent|percentage|share|portion)\b/.test(m)
+      && /\brecurring\b/.test(m)
+      && /\b(spend|spending|expenses?)\b/.test(m));
+}
+
+function isRecurringTrendQuestion(text) {
+  const m = String(text || '').toLowerCase();
+  return /\brecurring\b/.test(m)
+    && /\b(increased|increase|decreased|decrease|changed|change|trend)\b/.test(m);
+}
+
+function isRecurringCancelQuestion(text) {
+  const m = String(text || '').toLowerCase();
+  if (!/\bcancel\b/.test(m) || isWriteUtterance(text)) return false;
+  return /\b(subscription|recurring)\b/.test(m) || /\bcancel(?:\s+my)?\s+[a-z0-9]/.test(m);
+}
+
+function parseNamedRecurringSubject(text) {
+  const raw = String(text || '');
+  const due = raw.match(/\bwhen is\s+(?:my\s+)?(.+?)\s+due\b/i);
+  if (due) return clipSubject(due[1]);
+  const cancel = raw.match(/\bcancel\s+(?:my\s+)?(.+)$/i);
+  if (cancel) return clipSubject(cancel[1].replace(/[.!?]+$/, '').trim());
+  return parseMerchant(text);
+}
+
+function recurringMetricScope(text, fallback) {
+  const m = String(text || '').toLowerCase();
+  const hasIncome = /\b(income|paycheck|paychecks|salary)\b/.test(m);
+  const hasExpense = /\b(expense|expenses|bill|bills|payment|payments)\b/.test(m);
+  if (hasIncome && !hasExpense) return 'income';
+  if (hasExpense && !hasIncome) return 'expense';
+  if (hasIncome && hasExpense) return 'all';
+  return fallback || 'all';
+}
+
+function isCashflowRecurring(text) {
+  const m = String(text || '').toLowerCase();
+  if (!m) return false;
+  if (isSubscriptionQuestion(m) || isRecurringShareQuestion(m) || isRecurringTrendQuestion(m)) return true;
+  if (isRecurringCancelQuestion(text)) return true;
+  if (/\bwhen is\b.+\bdue\b/.test(m)) return true;
+  if (/\brecurring\b/.test(m)) return true;
+  if (/\bregular (payments?|bills?|expenses?|income)\b/.test(m)) return true;
+  if (/\brepeat (bills?|payments?|expenses?)\b/.test(m)) return true;
+  if (/\b(coming up|come up) regularly\b/.test(m)) return true;
+  return false;
+}
+
+function isRecurringFollowUp(text) {
+  const m = String(text || '').trim();
+  if (!m || m.length > 80) return false;
+  return /^(which is (the )?largest|the largest|largest one|how has that changed|has that (increased|changed)|what about income|how about income)\b/i.test(m);
+}
+
 function isMixedMacro(text) {
-  if (isAffordability(text) && (isCashflowAnalysis(text) || isCashflowComparison(text) || isCashflowTrend(text))) {
+  if (isAffordability(text) && (
+    isCashflowAnalysis(text)
+    || isCashflowComparison(text)
+    || isCashflowTrend(text)
+    || isCashflowRecurring(text)
+  )) {
     return true;
   }
   const m = String(text || '').toLowerCase();
   if (!/\band\b/.test(m)) return false;
   if (collectNamedMonths(m, moment()).length >= 3) return false;
+  if (isCashflowRecurring(m) && (
+    isCashflowComparison(m) || isCashflowTrend(m) || isCashflowAnalysis(m)
+  )) {
+    return true;
+  }
   return isCashflowComparison(m) && isCashflowTrend(m);
 }
 
@@ -1533,9 +1612,14 @@ function routeCapabilityUnwrapped(input = {}) {
     moment(currentDate, 'YYYY-MM-DD', true).isValid() ? moment(currentDate, 'YYYY-MM-DD') : moment());
   const breakContinuation = (namedFollowUp.length === 2 && lastCap === 'cashflow_trend')
     || (isCashflowTrend(message) && lastCap !== 'cashflow_trend')
-    || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend');
+    || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend')
+    || (isCashflowRecurring(message) && lastCap !== 'cashflow_recurring');
+  const recurringFollowUp = lastCap === 'cashflow_recurring'
+    && isRecurringFollowUp(message)
+    && !accountChanged
+    && accountsMatch(last.lastAccountId, currentAccountId);
 
-  if (continuationEligible && !breakContinuation) {
+  if ((continuationEligible || recurringFollowUp) && !breakContinuation) {
     const parsedPurchase = parsePurchaseDate(message, currentDate);
     const merged = {
       amount: slots.amount != null ? slots.amount : (lastCap === 'affordability_or_planning' && last.lastSubjectKind === 'amount'
@@ -1589,6 +1673,16 @@ function routeCapabilityUnwrapped(input = {}) {
         merged.trendError = 'compound_trend_unsupported';
       } else if (slots.subjectKind === 'merchant') {
         merged.trendError = 'merchant_trend_unsupported';
+      }
+    }
+    if (lastCap === 'cashflow_recurring' && last.lastRecurring) {
+      merged.metricScope = last.lastRecurring.metricScope || 'all';
+      if (/\bincome\b/i.test(message)) merged.metricScope = 'income';
+      if (/\b(expense|bill)/i.test(message) && !/\bincome\b/i.test(message)) {
+        merged.metricScope = 'expense';
+      }
+      if (/\b(changed|increased|decreased|trend)\b/i.test(message)) {
+        merged.recurringError = 'recurring_trend_unsupported';
       }
     }
     return {
@@ -1697,6 +1791,27 @@ function routeCapabilityUnwrapped(input = {}) {
         periodB: comparison.periodB || null,
         windowKind: comparison.windowKind || null,
         comparisonError: comparison.error || null,
+      },
+    };
+  }
+  if (isCashflowRecurring(message)) {
+    let recurringError = null;
+    if (isSubscriptionQuestion(message)) recurringError = 'recurring_definition_unsupported';
+    else if (isRecurringShareQuestion(message)) recurringError = 'recurring_share_unsupported';
+    else if (isRecurringTrendQuestion(message)) recurringError = 'recurring_trend_unsupported';
+    const named = parseNamedRecurringSubject(message);
+    return {
+      ...base,
+      capability: 'cashflow_recurring',
+      confidence: 'high',
+      accountChanged,
+      slots: {
+        ...slots,
+        metricScope: recurringMetricScope(message, 'all'),
+        recurringError,
+        recurringCancel: isRecurringCancelQuestion(message) || undefined,
+        subjectKind: named ? 'merchant' : slots.subjectKind,
+        subjectValue: named || slots.subjectValue,
       },
     };
   }
@@ -1888,6 +2003,7 @@ const PERSIST_CAPABILITIES = new Set([
   'cashflow_analysis',
   'cashflow_comparison',
   'cashflow_trend',
+  'cashflow_recurring',
   'affordability_or_planning',
   'continuation',
 ]);
@@ -1962,6 +2078,11 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       categoryFilter: slots.subjectKind === 'category' ? clipSubject(slots.subjectValue) : null,
     };
   }
+  if (cap === 'cashflow_recurring') {
+    dialogueState.lastRecurring = {
+      metricScope: slots.metricScope ? String(slots.metricScope).slice(0, 16) : 'all',
+    };
+  }
   return dialogueState;
 }
 
@@ -2012,6 +2133,17 @@ function applyContinuationPersistenceFromEvidence(dialogueState, route, evidence
       },
     }, opts);
   }
+  if ((persistRoute.capability === 'cashflow_recurring'
+      || persistRoute.parentCapability === 'cashflow_recurring')
+    && facts) {
+    return applyContinuationPersistence(dialogueState, {
+      ...persistRoute,
+      slots: {
+        ...(persistRoute.slots || {}),
+        metricScope: facts.metricScope || persistRoute.slots.metricScope || 'all',
+      },
+    }, opts);
+  }
   return applyContinuationPersistence(dialogueState, persistRoute, opts);
 }
 
@@ -2040,6 +2172,7 @@ module.exports = {
   isCashflowAnalysis,
   isCashflowComparison,
   isCashflowTrend,
+  isCashflowRecurring,
   isAffordability,
   detectWantsUiAction,
   buildOpenSearchAction,

@@ -60,6 +60,7 @@ const BUNDLES = Object.freeze({
   cashflow_analysis: CASHFLOW_ANALYSIS,
   cashflow_comparison: CASHFLOW_COMPARISON,
   cashflow_trend: Object.freeze([]),
+  cashflow_recurring: Object.freeze([]),
   affordability_or_planning: AFFORDABILITY,
   mixed_macro: Object.freeze([]),
   invitation_continuation: Object.freeze([]),

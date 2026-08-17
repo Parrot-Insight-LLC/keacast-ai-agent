@@ -128,6 +128,13 @@ async function getKeaTrendAnalysis({ accountId, token, body, timeoutMs, requestI
   return response.data;
 }
 
+async function getKeaRecurringAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const url = `${BASE_URL}/account/kea-recurring/${accountId}`;
+  const config = buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId });
+  const response = await axios.post(url, body || {}, config);
+  return response.data;
+}
+
 async function getBalances({ accountId, userId, token, body }) {
   const url = `${BASE_URL}/balances/getall/${accountId}/${moment().format('YYYY-MM-DD')}`;
   const response = await axios.get(url, AUTH_HEADER(token));
@@ -273,6 +280,7 @@ module.exports = {
   getKeaAffordabilityAnalysis,
   getKeaPeriodComparison,
   getKeaTrendAnalysis,
+  getKeaRecurringAnalysis,
   getBalances,
   createTransaction,
   deleteTransaction,
