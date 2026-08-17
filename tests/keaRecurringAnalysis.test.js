@@ -80,6 +80,7 @@ function sampleRecurringResult() {
       { code: 'largest_recurring_expense', label: 'Rent', monthlyEquivalent: 1400, frequencyLabel: 'Monthly' },
       { code: 'largest_recurring_income', label: 'Paycheck', monthlyEquivalent: Number((2000 * 26 / 12).toFixed(2)), frequencyLabel: 'Bi-Weekly' },
       { code: 'monthly_recurring_expense_total' },
+      { code: 'monthly_recurring_income_total' },
       { code: 'next_recurring_expense', label: 'Netflix', nextDate: '2026-09-01', amount: 15.99 },
     ],
     limitations: [],
@@ -146,7 +147,10 @@ async function run() {
 
   const largest = route('Which is the largest?', { dialogueState: ds, accountId: '10' });
   check('largest follow-up is recurring continuation', largest.capability === 'continuation'
-    && largest.parentCapability === 'cashflow_recurring');
+    && largest.parentCapability === 'cashflow_recurring'
+    && largest.continuationUsed === true);
+  check('largest follow-up keeps expense scope', largest.slots.metricScope === 'expense');
+  check('largest follow-up rankingMode', largest.slots.rankingMode === 'largest');
 
   const aboutIncome = route('What about income?', { dialogueState: ds, accountId: '10' });
   check('what about income is continuation', aboutIncome.capability === 'continuation'
@@ -166,6 +170,36 @@ async function run() {
 
   applyContinuationPersistence(ds, expenses, { accountId: '10' });
   check('persists lastRecurring metricScope', ds.lastRecurring && ds.lastRecurring.metricScope === 'expense');
+  check('fresh expense persist rankingMode null', ds.lastRecurring.rankingMode == null);
+
+  const rankDs = T.emptyDialogueState();
+  applyContinuationPersistence(rankDs, expenses, { accountId: '10' });
+  const largestAfterList = route('Which is the largest?', { dialogueState: rankDs, accountId: '10' });
+  applyContinuationPersistence(rankDs, largestAfterList, { accountId: '10' });
+  check('persists rankingMode largest', rankDs.lastRecurring
+    && rankDs.lastRecurring.metricScope === 'expense'
+    && rankDs.lastRecurring.rankingMode === 'largest');
+  const incomeAfterLargest = route('What about income?', { dialogueState: rankDs, accountId: '10' });
+  check('largest then income keeps rankingMode', incomeAfterLargest.continuationUsed === true
+    && incomeAfterLargest.slots.metricScope === 'income'
+    && incomeAfterLargest.slots.rankingMode === 'largest');
+  const changedAfterLargest = route('How has that changed?', { dialogueState: rankDs, accountId: '10' });
+  check('trend follow-up clears rankingMode', changedAfterLargest.slots.rankingMode == null);
+  const freshIncome = route('What recurring income do I have?', { dialogueState: rankDs, accountId: '10' });
+  check('fresh income is not continuation', freshIncome.capability === 'cashflow_recurring'
+    && !freshIncome.continuationUsed);
+  check('fresh income rankingMode null', freshIncome.slots.metricScope === 'income'
+    && freshIncome.slots.rankingMode == null);
+
+  const allRecurring = route('What recurring income and expenses do I have?');
+  check('unscoped recurring metricScope all', allRecurring.capability === 'cashflow_recurring'
+    && allRecurring.slots.metricScope === 'all'
+    && allRecurring.slots.rankingMode == null);
+
+  const explicitLargest = route('Which recurring expense is largest?');
+  check('explicit largest expense rankingMode', explicitLargest.capability === 'cashflow_recurring'
+    && explicitLargest.slots.metricScope === 'expense'
+    && explicitLargest.slots.rankingMode === 'largest');
 
   section('Phase 2B.3 grounding');
 
@@ -199,11 +233,95 @@ async function run() {
 
   const compact = azureFacingEvidence(recEv);
   check('azure compact omits groupid', !JSON.stringify(compact).includes('groupid'));
+  const expenseCodes = (compact.observations || []).map((row) => row && row.code);
+  check('expense compact has expenses', Array.isArray(compact.facts.expenses) && compact.facts.expenses.length === 2);
+  check('expense compact omits income list', compact.facts.income == null);
+  check('expense compact keeps expense total', compact.facts.totals
+    && compact.facts.totals.recurringExpenseMonthlyEquivalent === 1415.99);
+  check('expense compact omits income total', !compact.facts.totals
+    || compact.facts.totals.recurringIncomeMonthlyEquivalent == null);
+  check('expense compact has largest expense', expenseCodes.includes('largest_recurring_expense'));
+  check('expense compact omits largest income', !expenseCodes.includes('largest_recurring_income'));
+  check('expense compact omits income total observation', !expenseCodes.includes('monthly_recurring_income_total'));
+  check('expense compact omits paycheck label', !JSON.stringify(compact).includes('Paycheck'));
+
   const prompt = buildEvidenceSystemSection(recEv);
   check('prompt says scheduled in Keacast', /scheduled in (the user'?s )?Keacast forecast/i.test(prompt));
   check('prompt forbids bank-detected', /Do not say the bank detected/i.test(prompt));
   check('prompt forbids subscriptions inference', /Do not call these subscriptions/i.test(prompt));
   check('prompt forbids payday', /confirmed payday/i.test(prompt));
+  check('prompt expense scope only', /If facts.metricScope is expense, narrate scheduled recurring expenses only/i.test(prompt));
+  check('prompt omits paycheck when expense scoped', !/paycheck/i.test(prompt));
+
+  async function prefetchRecurringRoute(routeObj, message) {
+    return prefetchGrounding({
+      accountId: '10',
+      token: 't',
+      currentDate: '2026-08-16',
+      policy: resolveGroundingPolicy(routeObj, { message }),
+      route: routeObj,
+      fetchRecurringAnalysis: async () => sampleRecurringResult(),
+    });
+  }
+
+  const incomeCompact = azureFacingEvidence(await prefetchRecurringRoute(income, 'What recurring income do I get?'));
+  const incomeCodes = (incomeCompact.observations || []).map((row) => row && row.code);
+  check('income compact has income', Array.isArray(incomeCompact.facts.income) && incomeCompact.facts.income.length === 1);
+  check('income compact omits expenses list', incomeCompact.facts.expenses == null);
+  check('income compact keeps income total', incomeCompact.facts.totals
+    && incomeCompact.facts.totals.recurringIncomeMonthlyEquivalent != null);
+  check('income compact omits expense total', !incomeCompact.facts.totals
+    || incomeCompact.facts.totals.recurringExpenseMonthlyEquivalent == null);
+  check('income compact omits nextOccurrenceExpenseSum', !incomeCompact.facts.totals
+    || incomeCompact.facts.totals.nextOccurrenceExpenseSum == null);
+  check('income compact has largest income', incomeCodes.includes('largest_recurring_income'));
+  check('income compact omits largest expense', !incomeCodes.includes('largest_recurring_expense'));
+  check('income compact omits next expense', !incomeCodes.includes('next_recurring_expense'));
+  check('income compact omits rent label', !JSON.stringify(incomeCompact).includes('Rent'));
+
+  const allCompact = azureFacingEvidence(await prefetchRecurringRoute(allRecurring, 'What recurring income and expenses do I have?'));
+  const allCodes = (allCompact.observations || []).map((row) => row && row.code);
+  check('all compact keeps both lists', Array.isArray(allCompact.facts.expenses)
+    && allCompact.facts.expenses.length === 2
+    && Array.isArray(allCompact.facts.income)
+    && allCompact.facts.income.length === 1);
+  check('all compact keeps both largest observations', allCodes.includes('largest_recurring_expense')
+    && allCodes.includes('largest_recurring_income'));
+
+  const largestCompact = azureFacingEvidence(await prefetchRecurringRoute(largestAfterList, 'Which is the largest?'));
+  const largestCodes = (largestCompact.observations || []).map((row) => row && row.code);
+  check('largest expense compact rankingMode', largestCompact.facts.rankingMode === 'largest');
+  check('largest expense compact one stream', Array.isArray(largestCompact.facts.expenses)
+    && largestCompact.facts.expenses.length === 1
+    && largestCompact.facts.expenses[0].label === 'Rent');
+  check('largest expense compact omits income', largestCompact.facts.income == null);
+  check('largest expense compact omits income total', !largestCompact.facts.totals
+    || largestCompact.facts.totals.recurringIncomeMonthlyEquivalent == null);
+  check('largest expense observation only', largestCodes.includes('largest_recurring_expense')
+    && !largestCodes.includes('largest_recurring_income')
+    && !largestCodes.includes('monthly_recurring_income_total')
+    && !largestCodes.includes('next_recurring_expense'));
+
+  const incomeLargestCompact = azureFacingEvidence(
+    await prefetchRecurringRoute(incomeAfterLargest, 'What about income?')
+  );
+  const incomeLargestCodes = (incomeLargestCompact.observations || []).map((row) => row && row.code);
+  check('largest income compact rankingMode', incomeLargestCompact.facts.rankingMode === 'largest');
+  check('largest income compact one stream', Array.isArray(incomeLargestCompact.facts.income)
+    && incomeLargestCompact.facts.income.length === 1
+    && incomeLargestCompact.facts.income[0].label === 'Paycheck');
+  check('largest income compact omits expenses', incomeLargestCompact.facts.expenses == null);
+  check('largest income observation only', incomeLargestCodes.includes('largest_recurring_income')
+    && !incomeLargestCodes.includes('largest_recurring_expense')
+    && !incomeLargestCodes.includes('monthly_recurring_expense_total'));
+
+  const freshIncomeCompact = azureFacingEvidence(
+    await prefetchRecurringRoute(freshIncome, 'What recurring income do I have?')
+  );
+  check('fresh income compact is list not largest-only', Array.isArray(freshIncomeCompact.facts.income)
+    && freshIncomeCompact.facts.rankingMode !== 'largest'
+    && freshIncomeCompact.facts.expenses == null
+    && (freshIncomeCompact.observations || []).some((row) => row && row.code === 'monthly_recurring_income_total'));
 
   const subPolicy = resolveGroundingPolicy(subs, { message: 'What subscriptions do I have?' });
   const subEv = await prefetchGrounding({

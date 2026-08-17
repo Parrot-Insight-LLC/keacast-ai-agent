@@ -816,10 +816,29 @@ function isCashflowRecurring(text) {
   return false;
 }
 
+function isRecurringLargestIntent(text) {
+  const m = String(text || '').trim().toLowerCase();
+  if (!m) return false;
+  return /\b(which is (the )?largest|what(?:'|’)?s the largest|the largest|largest one)\b/.test(m)
+    || /\bwhich recurring\b.{0,80}\blargest\b/.test(m)
+    || /\blargest recurring\b/.test(m)
+    || /\brecurring .{0,40}\bis largest\b/.test(m);
+}
+
+function isRecurringRankingClearingFollowUp(text) {
+  return /\b(changed|increased|decreased|trend)\b/i.test(String(text || ''));
+}
+
+function recurringRankingMode(text, inherited) {
+  if (isRecurringLargestIntent(text)) return 'largest';
+  if (isRecurringRankingClearingFollowUp(text)) return null;
+  return inherited === 'largest' ? 'largest' : null;
+}
+
 function isRecurringFollowUp(text) {
   const m = String(text || '').trim();
   if (!m || m.length > 80) return false;
-  return /^(which is (the )?largest|the largest|largest one|how has that changed|has that (increased|changed)|what about income|how about income)\b/i.test(m);
+  return /^(which is (the )?largest|what(?:'|’)?s the largest|the largest|largest one|how has that changed|has that (increased|changed)|what about income|how about income)\b/i.test(m);
 }
 
 function isMixedMacro(text) {
@@ -1677,6 +1696,7 @@ function routeCapabilityUnwrapped(input = {}) {
     }
     if (lastCap === 'cashflow_recurring' && last.lastRecurring) {
       merged.metricScope = last.lastRecurring.metricScope || 'all';
+      merged.rankingMode = recurringRankingMode(message, last.lastRecurring.rankingMode);
       if (/\bincome\b/i.test(message)) merged.metricScope = 'income';
       if (/\b(expense|bill)/i.test(message) && !/\bincome\b/i.test(message)) {
         merged.metricScope = 'expense';
@@ -1808,6 +1828,7 @@ function routeCapabilityUnwrapped(input = {}) {
       slots: {
         ...slots,
         metricScope: recurringMetricScope(message, 'all'),
+        rankingMode: recurringRankingMode(message, null),
         recurringError,
         recurringCancel: isRecurringCancelQuestion(message) || undefined,
         subjectKind: named ? 'merchant' : slots.subjectKind,
@@ -2081,6 +2102,7 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
   if (cap === 'cashflow_recurring') {
     dialogueState.lastRecurring = {
       metricScope: slots.metricScope ? String(slots.metricScope).slice(0, 16) : 'all',
+      rankingMode: slots.rankingMode === 'largest' ? 'largest' : null,
     };
   }
   return dialogueState;

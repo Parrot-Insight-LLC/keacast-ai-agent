@@ -669,6 +669,7 @@ async function prefetchCashflowRecurringMacro({
     });
     if (evidence.facts) {
       evidence.facts.metricScope = (slots && slots.metricScope) || 'all';
+      evidence.facts.rankingMode = (slots && slots.rankingMode === 'largest') ? 'largest' : null;
       evidence.facts.monthlyEquivalentIsNormalized = true;
     }
     if (result && result.streamCounts) {
@@ -1209,7 +1210,100 @@ function azureFacingEvidence(evidence) {
       compact.facts.trend = reorderTrendFacts(compact.facts.trend, compact.facts.metricScope);
     }
   }
+  if (Array.isArray(compact.source) && compact.source.includes('cashflow_recurring') && compact.facts) {
+    scopeRecurringAzureEvidence(compact);
+  }
   return compact;
+}
+
+const EXPENSE_RECURRING_OBSERVATIONS = new Set([
+  'largest_recurring_expense',
+  'monthly_recurring_expense_total',
+  'next_recurring_expense',
+]);
+const INCOME_RECURRING_OBSERVATIONS = new Set([
+  'largest_recurring_income',
+  'monthly_recurring_income_total',
+  'next_recurring_income',
+]);
+const SHARED_RECURRING_OBSERVATIONS = new Set([
+  'no_scheduled_recurring',
+  'frequency_unnormalized',
+]);
+
+function matchingRecurringStream(list, observation) {
+  if (!Array.isArray(list) || !list.length) return [];
+  const label = observation && observation.label;
+  if (label) {
+    const hit = list.filter((row) => row && row.label === label);
+    if (hit.length) return hit;
+  }
+  return [list[0]];
+}
+
+function observationAllowedForRecurringScope(code, metricScope, rankingMode) {
+  if (!code) return false;
+  if (SHARED_RECURRING_OBSERVATIONS.has(code)) return true;
+  if (rankingMode === 'largest') {
+    if (metricScope === 'expense') return code === 'largest_recurring_expense';
+    if (metricScope === 'income') return code === 'largest_recurring_income';
+    return code === 'largest_recurring_expense' || code === 'largest_recurring_income';
+  }
+  if (metricScope === 'expense') return EXPENSE_RECURRING_OBSERVATIONS.has(code);
+  if (metricScope === 'income') return INCOME_RECURRING_OBSERVATIONS.has(code);
+  return true;
+}
+
+function scopeRecurringAzureEvidence(compact) {
+  const facts = compact.facts;
+  const metricScope = facts.metricScope || 'all';
+  const rankingMode = facts.rankingMode === 'largest' ? 'largest' : null;
+  if (rankingMode) facts.rankingMode = 'largest';
+  else delete facts.rankingMode;
+
+  const observations = Array.isArray(compact.observations) ? compact.observations : [];
+  const totals = facts.totals && typeof facts.totals === 'object' ? facts.totals : {};
+
+  if (metricScope === 'expense') {
+    delete facts.income;
+    if (rankingMode === 'largest') {
+      const largest = observations.find((row) => row && row.code === 'largest_recurring_expense');
+      facts.expenses = matchingRecurringStream(facts.expenses, largest);
+      delete facts.totals;
+    } else {
+      const nextTotals = {};
+      if (totals.recurringExpenseMonthlyEquivalent != null) {
+        nextTotals.recurringExpenseMonthlyEquivalent = totals.recurringExpenseMonthlyEquivalent;
+      }
+      if (totals.nextOccurrenceExpenseSum != null) {
+        nextTotals.nextOccurrenceExpenseSum = totals.nextOccurrenceExpenseSum;
+      }
+      facts.totals = nextTotals;
+    }
+  } else if (metricScope === 'income') {
+    delete facts.expenses;
+    if (rankingMode === 'largest') {
+      const largest = observations.find((row) => row && row.code === 'largest_recurring_income');
+      facts.income = matchingRecurringStream(facts.income, largest);
+      delete facts.totals;
+    } else {
+      const nextTotals = {};
+      if (totals.recurringIncomeMonthlyEquivalent != null) {
+        nextTotals.recurringIncomeMonthlyEquivalent = totals.recurringIncomeMonthlyEquivalent;
+      }
+      facts.totals = nextTotals;
+    }
+  } else if (rankingMode === 'largest') {
+    const largestExp = observations.find((row) => row && row.code === 'largest_recurring_expense');
+    const largestInc = observations.find((row) => row && row.code === 'largest_recurring_income');
+    facts.expenses = matchingRecurringStream(facts.expenses, largestExp);
+    facts.income = matchingRecurringStream(facts.income, largestInc);
+    delete facts.totals;
+  }
+
+  compact.observations = observations.filter((row) => (
+    observationAllowedForRecurringScope(row && row.code, metricScope, rankingMode)
+  ));
 }
 
 function reorderTrendFacts(trend, metricScope) {
@@ -1377,8 +1471,12 @@ function buildEvidenceSystemSection(evidence) {
       'When the user asks how much recurring expenses cost, use totals.recurringExpenseMonthlyEquivalent and say it is an estimated monthly equivalent of scheduled recurring expenses.',
       'nextOccurrenceExpenseSum is the sum of one next scheduled amount per expense series. It is not a monthly total.',
       'Use supplied frequencyLabel values. Do not infer cadence. Do not merge streams. Do not decide that something is recurring.',
-      'If facts.metricScope is income, lead with scheduled recurring income. If expense, lead with scheduled recurring expenses.',
-      'largest_recurring_expense / largest_recurring_income are already ranked by monthlyEquivalent. Do not rank raw amounts across different cadences.',
+      'Narrate only the stream lists, totals, and observations present in this evidence. Missing income or expense fields are out of scope for this turn.',
+      'If facts.metricScope is expense, narrate scheduled recurring expenses only. Do not mention recurring income unless the user explicitly asked for it.',
+      'If facts.metricScope is income, narrate scheduled recurring income only. Do not mention recurring expenses unless the user explicitly asked for it.',
+      'If facts.metricScope is all, both scheduled recurring expenses and income may be narrated.',
+      'If facts.rankingMode is largest, answer only with the supplied largest_recurring_* observation for the current metricScope. Do not list the rest of the series.',
+      'largest_recurring_expense / largest_recurring_income are already ranked by monthlyEquivalent when present. Do not rank streams yourself. Do not rank raw amounts across different cadences.',
       'If observations include no_scheduled_recurring, say you do not see active recurring items currently scheduled in this Keacast account. Do not say the user has no recurring charges at their bank.',
       'Do not call these subscriptions unless the evidence says so. Do not call scheduled recurring income a confirmed payday.',
       'Do not say a charge is unnecessary, wasteful, expensive, or should be cancelled. You cannot cancel an external service.',
@@ -1408,7 +1506,7 @@ function buildEvidenceSystemSection(evidence) {
       : isTrend
         ? 'Field glossary: periods[] are chronological posted-actual windows. income and spending are positive magnitudes. net is signed. trend.direction is the deterministic classification. firstToLast is the last window minus the first. Use supplied labels, not internal field names.'
       : isRecurring
-        ? 'Field glossary: expenses[] and income[] are scheduled Keacast recurring series. amount is the next scheduled occurrence magnitude. monthlyEquivalent is a cadence-normalized monthly equivalent. totals.recurringExpenseMonthlyEquivalent is the default cost metric. nextOccurrenceExpenseSum is not a monthly total. sourceKinds kea_scheduled_series means scheduled in Keacast, not bank-detected.'
+        ? 'Field glossary: Use only the stream lists, totals, and observations present in this evidence. expenses[] and income[] are scheduled Keacast recurring series when present. amount is the next scheduled occurrence magnitude. monthlyEquivalent is a cadence-normalized monthly equivalent. totals.recurringExpenseMonthlyEquivalent is the default cost metric when present. nextOccurrenceExpenseSum is not a monthly total. sourceKinds kea_scheduled_series means scheduled in Keacast, not bank-detected. Do not mention a missing income or expense side.'
       : isComparison
         ? 'Field glossary: periodA is the older baseline; periodB is the newer comparison. income and spending are positive magnitudes. net is signed. changes.absolute is always periodB minus periodA. windowKind describes whether the windows are full months, matched elapsed days, or explicit bounds.'
         : 'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available, not a projected balance, not lowestProjectedAmount, not projectedOnDate); savingsPotential = lowest projected balance through the current month (not available money).',
