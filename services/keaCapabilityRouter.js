@@ -13,6 +13,7 @@ const CAPABILITIES = Object.freeze([
   'financial_lookup',
   'financial_forecast',
   'cashflow_analysis',
+  'cashflow_comparison',
   'affordability_or_planning',
   'mixed_macro',
   'transaction_write',
@@ -26,6 +27,7 @@ const FINANCIAL_CAPABILITIES = new Set([
   'financial_lookup',
   'financial_forecast',
   'cashflow_analysis',
+  'cashflow_comparison',
   'affordability_or_planning',
 ]);
 
@@ -197,6 +199,183 @@ function parsePeriod(text, currentDate) {
     };
   }
   return null;
+}
+
+function yearForNamedMonth(monthIndex, today) {
+  if (monthIndex > today.month()) return today.year() - 1;
+  return today.year();
+}
+
+function matchedElapsedFrom(today) {
+  const newerStart = today.clone().startOf('month');
+  const prior = today.clone().subtract(1, 'month').startOf('month');
+  const daysInPrior = prior.clone().endOf('month').date();
+  const baselineDay = Math.min(today.date(), daysInPrior);
+  return {
+    windowKind: 'matched_elapsed',
+    periodA: {
+      start: prior.format('YYYY-MM-DD'),
+      end: prior.clone().date(baselineDay).format('YYYY-MM-DD'),
+    },
+    periodB: {
+      start: newerStart.format('YYYY-MM-DD'),
+      end: today.format('YYYY-MM-DD'),
+    },
+    error: null,
+  };
+}
+
+function fullMonthFrom(year, monthIndex) {
+  const start = moment({ year, month: monthIndex, day: 1 });
+  return {
+    start: start.format('YYYY-MM-DD'),
+    end: start.clone().endOf('month').format('YYYY-MM-DD'),
+  };
+}
+
+function orderParsedPeriods(a, b, windowKind) {
+  if (!a || !b) return { windowKind, periodA: a, periodB: b, error: null };
+  if (a.start < b.start || (a.start === b.start && a.end <= b.end)) {
+    return { windowKind, periodA: a, periodB: b, error: null };
+  }
+  return { windowKind, periodA: b, periodB: a, error: null };
+}
+
+function parseExplicitBoundPair(text, today) {
+  const re = /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(?:through|to|-|–)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(\d{4}))?/g;
+  const hits = [];
+  let match;
+  while ((match = re.exec(text))) {
+    hits.push(match);
+  }
+  if (hits.length < 2) return null;
+  const windows = hits.slice(0, 2).map((h) => {
+    const month = MONTH_NAMES[h[1]];
+    const startDay = Number(h[2]);
+    const endDay = Number(h[3]);
+    const year = h[4] ? Number(h[4]) : yearForNamedMonth(month, today);
+    const start = moment({ year, month, day: startDay });
+    const end = moment({ year, month, day: endDay });
+    if (!start.isValid() || !end.isValid() || startDay !== start.date() || endDay !== end.date()) {
+      return { invalid: true };
+    }
+    if (start.format('YYYY-MM-DD') > end.format('YYYY-MM-DD')) return { invalid: true };
+    return {
+      start: start.format('YYYY-MM-DD'),
+      end: end.format('YYYY-MM-DD'),
+    };
+  });
+  if (windows.some((w) => w.invalid)) {
+    return { error: 'invalid_explicit_bounds', windowKind: 'explicit_bounds', periodA: null, periodB: null };
+  }
+  return orderParsedPeriods(windows[0], windows[1], 'explicit_bounds');
+}
+
+function parseNamedMonthPair(text, today) {
+  const re = /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b(?:\s+(\d{4}))?/g;
+  const hits = [];
+  const seen = new Set();
+  let match;
+  while ((match = re.exec(text))) {
+    const key = `${match[1]}-${match[2] || ''}`;
+    if (seen.has(key) && !match[2]) continue;
+    seen.add(key);
+    hits.push({
+      month: MONTH_NAMES[match[1]],
+      year: match[2] ? Number(match[2]) : yearForNamedMonth(MONTH_NAMES[match[1]], today),
+    });
+  }
+  if (hits.length < 2) return null;
+  const a = fullMonthFrom(hits[0].year, hits[0].month);
+  const b = fullMonthFrom(hits[1].year, hits[1].month);
+  return orderParsedPeriods(a, b, 'full_months');
+}
+
+function parseComparisonPeriods(message, currentDate) {
+  const today = moment(currentDate, 'YYYY-MM-DD', true).isValid()
+    ? moment(currentDate, 'YYYY-MM-DD')
+    : moment();
+  const m = String(message || '').toLowerCase();
+  if (!m) return { error: 'comparison_periods_unresolved', periodA: null, periodB: null, windowKind: null };
+
+  if (/\bforecast(ed|s|ing)?\b/.test(m) || /\bprojected\b/.test(m) || /\bnext month\b/.test(m)) {
+    return { error: 'forecast_comparison_unsupported', periodA: null, periodB: null, windowKind: null };
+  }
+
+  const explicit = parseExplicitBoundPair(m, today);
+  if (explicit) return explicit;
+
+  if (/\bthis month so far\b/.test(m) && /\blast month so far\b/.test(m)) {
+    return matchedElapsedFrom(today);
+  }
+
+  if (/\blast month\b/.test(m) && /\b(the )?month before\b/.test(m)) {
+    const last = today.clone().subtract(1, 'month').startOf('month');
+    const before = today.clone().subtract(2, 'month').startOf('month');
+    return {
+      windowKind: 'full_months',
+      periodA: {
+        start: before.format('YYYY-MM-DD'),
+        end: before.clone().endOf('month').format('YYYY-MM-DD'),
+      },
+      periodB: {
+        start: last.format('YYYY-MM-DD'),
+        end: last.clone().endOf('month').format('YYYY-MM-DD'),
+      },
+      error: null,
+    };
+  }
+
+  const named = parseNamedMonthPair(m, today);
+  if (named) return named;
+
+  if (/\b(this month|last month)\b/.test(m)
+    || /\b(more|less) than last month\b/.test(m)
+    || /\bwhere did my spending (increase|decrease|change|go)\b/.test(m)) {
+    return matchedElapsedFrom(today);
+  }
+
+  return { error: 'comparison_periods_unresolved', periodA: null, periodB: null, windowKind: null };
+}
+
+function isIncomeVersusExpenses(text) {
+  const m = String(text || '').toLowerCase();
+  return /\bincome\b.{0,32}\b(versus|vs\.?)\b.{0,32}\bexpenses?\b/.test(m)
+    || /\bexpenses?\b.{0,32}\b(versus|vs\.?)\b.{0,32}\bincome\b/.test(m);
+}
+
+function isCashflowComparison(text) {
+  const m = String(text || '').toLowerCase();
+  if (!m || isIncomeVersusExpenses(m)) return false;
+  if (/\b(compare|compared with|compared to|comparison)\b/.test(m)) return true;
+  const periodish = /\b(this month|last month|this week|last week)\b/.test(m)
+    || /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/.test(m);
+  if ((/\bvs\.?\b|\bversus\b/.test(m)) && periodish) return true;
+  if (/\b(more than last month|less than last month)\b/.test(m)) return true;
+  if (/\b(spend(?:ing|t)?|income)\b.{0,40}\b(more|less|higher|lower) than last month\b/.test(m)) return true;
+  if (/\b(higher|lower) than\b/.test(m) && periodish) return true;
+  if (/\b(higher|lower|more|less)\b.{0,48}\bthan\b/.test(m) && periodish) return true;
+  if (/\bhow does this month compare\b/.test(m)) return true;
+  if (/\b(spending more|spending less|spend more|spend less|spent more|spent less)\b/.test(m)
+    && /\b(last month|this month|than)\b/.test(m)) return true;
+  if (/\bwhere did my spending (increase|decrease|change|go)\b/.test(m)) return true;
+  if (/\b(increased|decreased|changed)\b/.test(m)
+    && periodish
+    && /\b(from|since|vs|versus|compared|than|last month|this month)\b/.test(m)) return true;
+  return false;
+}
+
+function categoryStemsIn(text) {
+  const m = String(text || '').toLowerCase();
+  const stems = new Set();
+  for (const word of CATEGORY_WORDS) {
+    if (!new RegExp(`\\b${word}\\b`).test(m)) continue;
+    let stem = word;
+    if (stem.endsWith('ies')) stem = `${stem.slice(0, -3)}y`;
+    else if (stem.endsWith('s') && stem.length > 4) stem = stem.slice(0, -1);
+    stems.add(stem);
+  }
+  return stems;
 }
 
 function parseCategory(text) {
@@ -414,7 +593,7 @@ function isCashflowAnalysis(text) {
 }
 
 function isMixedMacro(text) {
-  return isAffordability(text) && isCashflowAnalysis(text);
+  return isAffordability(text) && (isCashflowAnalysis(text) || isCashflowComparison(text));
 }
 
 function isForecast(text) {
@@ -606,6 +785,7 @@ function asksForFinancialAmount(text) {
 function isClearTopicSwitch(text) {
   return isLookup(text)
     || isForecast(text)
+    || isCashflowComparison(text)
     || isAffordability(text)
     || isProductHelp(text)
     || isCasual(text)
@@ -1218,6 +1398,14 @@ function routeCapabilityUnwrapped(input = {}) {
       merged.purchaseDateAssumptionText = parsedPurchase.assumptionText;
       merged.purchaseDateError = null;
     }
+    if (lastCap === 'cashflow_comparison' && last.lastComparison) {
+      merged.periodA = last.lastComparison.periodA || null;
+      merged.periodB = last.lastComparison.periodB || null;
+      merged.windowKind = last.lastComparison.windowKind || null;
+      if (categoryStemsIn(message).size >= 2) {
+        merged.comparisonError = 'compound_comparison_unsupported';
+      }
+    }
     return {
       ...base,
       capability: 'continuation',
@@ -1291,6 +1479,22 @@ function routeCapabilityUnwrapped(input = {}) {
   }
   if (isAffordability(message)) {
     return { ...base, capability: 'affordability_or_planning', confidence: 'high', accountChanged, slots };
+  }
+  if (isCashflowComparison(message)) {
+    const comparison = parseComparisonPeriods(message, currentDate);
+    return {
+      ...base,
+      capability: 'cashflow_comparison',
+      confidence: 'high',
+      accountChanged,
+      slots: {
+        ...slots,
+        periodA: comparison.periodA || null,
+        periodB: comparison.periodB || null,
+        windowKind: comparison.windowKind || null,
+        comparisonError: comparison.error || null,
+      },
+    };
   }
   if (isCashflowAnalysis(message)) {
     let period = slots.period;
@@ -1478,6 +1682,7 @@ const PERSIST_CAPABILITIES = new Set([
   'financial_lookup',
   'financial_forecast',
   'cashflow_analysis',
+  'cashflow_comparison',
   'affordability_or_planning',
   'continuation',
 ]);
@@ -1522,6 +1727,21 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       ? String(slots.purchaseDateAssumptionText).slice(0, 160)
       : null;
   }
+  if (cap === 'cashflow_comparison' && slots.periodA && slots.periodB) {
+    dialogueState.lastComparison = {
+      periodA: {
+        start: String(slots.periodA.start || '').slice(0, 10),
+        end: String(slots.periodA.end || '').slice(0, 10),
+        label: slots.periodA.label ? String(slots.periodA.label).slice(0, 64) : undefined,
+      },
+      periodB: {
+        start: String(slots.periodB.start || '').slice(0, 10),
+        end: String(slots.periodB.end || '').slice(0, 10),
+        label: slots.periodB.label ? String(slots.periodB.label).slice(0, 64) : undefined,
+      },
+      windowKind: slots.windowKind ? String(slots.windowKind).slice(0, 32) : null,
+    };
+  }
   return dialogueState;
 }
 
@@ -1545,6 +1765,20 @@ function applyContinuationPersistenceFromEvidence(dialogueState, route, evidence
         },
       }
     : route;
+  const facts = evidence && evidence.facts;
+  if ((persistRoute.capability === 'cashflow_comparison'
+      || persistRoute.parentCapability === 'cashflow_comparison')
+    && facts && facts.periodA && facts.periodB) {
+    return applyContinuationPersistence(dialogueState, {
+      ...persistRoute,
+      slots: {
+        ...(persistRoute.slots || {}),
+        periodA: facts.periodA,
+        periodB: facts.periodB,
+        windowKind: facts.windowKind || evidence.windowKind || persistRoute.slots.windowKind,
+      },
+    }, opts);
+  }
   return applyContinuationPersistence(dialogueState, persistRoute, opts);
 }
 
@@ -1556,6 +1790,7 @@ module.exports = {
   extractSlots,
   extractLookupRequests,
   parsePeriod,
+  parseComparisonPeriods,
   parseAmount,
   parsePurchaseDate,
   shouldPersistContinuation,
@@ -1569,6 +1804,7 @@ module.exports = {
   isLookup,
   isForecast,
   isCashflowAnalysis,
+  isCashflowComparison,
   isAffordability,
   detectWantsUiAction,
   buildOpenSearchAction,

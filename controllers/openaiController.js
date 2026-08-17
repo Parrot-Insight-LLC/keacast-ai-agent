@@ -1147,6 +1147,7 @@ function emptyDialogueState() {
     lastPurchaseDateAssumption: null,
     lastPurchaseDateAssumptionText: null,
     lastAccountId: null,
+    lastComparison: null,
     pendingInvitation: null,
     updatedAt: null,
   };
@@ -3427,6 +3428,7 @@ exports.chat = async (req, res) => {
     const effectiveCap = phase1Policy.effectiveCapability;
     let financialMacro = 'none';
     if (effectiveCap === 'cashflow_analysis') financialMacro = 'analyze_cashflow';
+    if (effectiveCap === 'cashflow_comparison') financialMacro = 'compare_periods';
     if (effectiveCap === 'affordability_or_planning') financialMacro = 'assess_affordability';
     const macroAttempted = financialMacro !== 'none' || effectiveCap === 'mixed_macro';
     let macroInputKind = 'none';
@@ -3437,6 +3439,8 @@ exports.chat = async (req, res) => {
       else if (hasAmount) macroInputKind = 'amount_only';
     } else if (financialMacro === 'analyze_cashflow') {
       macroInputKind = 'period_only';
+    } else if (financialMacro === 'compare_periods') {
+      macroInputKind = 'period_pair';
     }
     telemetry.recordGrounding({
       conversation_intent: phase1Route.capability,
@@ -3478,8 +3482,18 @@ exports.chat = async (req, res) => {
         : 'skipped',
       macro_ms: macroAttempted ? groundingPrefetchMs : 0,
       macro_input_kind: macroInputKind,
-      macro_horizon_days: macroAttempted ? 90 : null,
+      macro_horizon_days: financialMacro === 'compare_periods' ? null : (macroAttempted ? 90 : null),
       macro_source_count: Array.isArray(phase1Evidence?.source) ? phase1Evidence.source.length : 0,
+      comparison_performed: financialMacro === 'compare_periods' && phase1Performed && !phase1FailSoft,
+      comparison_status: financialMacro === 'compare_periods'
+        ? (phase1Evidence && phase1Evidence.status ? phase1Evidence.status : 'unavailable')
+        : 'skipped',
+      comparison_ms: financialMacro === 'compare_periods' ? groundingPrefetchMs : 0,
+      period_relation: financialMacro === 'compare_periods'
+        ? ((phase1Evidence && (phase1Evidence.windowKind || (phase1Evidence.facts && phase1Evidence.facts.windowKind)))
+          || (phase1Route.slots && phase1Route.slots.windowKind)
+          || null)
+        : null,
     });
 
     // ── Build a compact, token-minimal context block ─────────────────────
@@ -3488,11 +3502,14 @@ exports.chat = async (req, res) => {
     // small high-signal brief instead of dumping hundreds of rows of JSON.
     const firstName = coerceFirstName(req.body?.userData, selectedAccount?.user || null);
     const macroOwnsTurn = phase1Performed
-      && (effectiveCap === 'cashflow_analysis' || effectiveCap === 'affordability_or_planning')
+      && (effectiveCap === 'cashflow_analysis'
+        || effectiveCap === 'cashflow_comparison'
+        || effectiveCap === 'affordability_or_planning')
       && phase1Evidence
       && phase1Evidence.status === 'ok'
       && Array.isArray(phase1Evidence.source)
       && (phase1Evidence.source.includes('cashflow_analysis')
+        || phase1Evidence.source.includes('cashflow_period_comparison')
         || phase1Evidence.source.includes('affordability_analysis'));
 
     let identityBlock;

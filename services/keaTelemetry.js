@@ -100,6 +100,10 @@ function createKeaTelemetry({ requestId } = {}) {
     macro_input_kind: 'none',
     macro_horizon_days: null,
     macro_source_count: 0,
+    comparison_performed: false,
+    comparison_status: 'skipped',
+    comparison_ms: 0,
+    period_relation: null,
   };
 
   function markStart(name) {
@@ -219,6 +223,18 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (flags.macro_source_count != null) {
       grounding.macro_source_count = Number(flags.macro_source_count) || 0;
+    }
+    if (flags.comparison_performed === true || flags.comparison_performed === false) {
+      grounding.comparison_performed = flags.comparison_performed;
+    }
+    if (flags.comparison_status === null || typeof flags.comparison_status === 'string') {
+      grounding.comparison_status = flags.comparison_status || 'skipped';
+    }
+    if (flags.comparison_ms != null) {
+      grounding.comparison_ms = Number(flags.comparison_ms) || 0;
+    }
+    if (flags.period_relation === null || typeof flags.period_relation === 'string') {
+      grounding.period_relation = flags.period_relation || null;
     }
   }
 
@@ -367,6 +383,10 @@ function createKeaTelemetry({ requestId } = {}) {
       macro_input_kind: grounding.macro_input_kind || 'none',
       macro_horizon_days: grounding.macro_horizon_days,
       macro_source_count: grounding.macro_source_count || 0,
+      comparison_performed: !!grounding.comparison_performed,
+      comparison_status: grounding.comparison_status || 'skipped',
+      comparison_ms: grounding.comparison_ms || 0,
+      period_relation: grounding.period_relation || null,
       estimated_block_chars: blocks,
     };
     for (const r of azureRounds) {

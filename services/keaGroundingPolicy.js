@@ -17,6 +17,7 @@ const MATRIX = Object.freeze({
   financial_lookup: GROUNDING_REQUIRED,
   financial_forecast: GROUNDING_REQUIRED,
   cashflow_analysis: GROUNDING_REQUIRED,
+  cashflow_comparison: GROUNDING_REQUIRED,
   affordability_or_planning: GROUNDING_REQUIRED,
   mixed_macro: GROUNDING_REQUIRED,
   invitation_continuation: GROUNDING_NONE,
@@ -37,6 +38,10 @@ const FAIL_SOFT_BY_LIMITATION = Object.freeze({
   forecast_unavailable: "I couldn't load the Keacast forecast needed for that answer. Please try again in a moment.",
   access_unverified: FAIL_SOFT_TEXT,
   mixed_macro_unsupported: 'I can answer one of those at a time. Which should I do first — how you are doing this month, or whether you can afford that purchase?',
+  forecast_comparison_unsupported: 'I can compare posted actual transactions between two past periods, but not forecasts. Try comparing two completed months, or this month so far with last month so far.',
+  comparison_periods_unresolved: 'I need two specific periods to compare, such as this month vs last month, or July vs June.',
+  invalid_explicit_bounds: 'Those date ranges are not a valid comparison window. Try dates like August 1 through 10 and July 1 through 10.',
+  compound_comparison_unsupported: 'I can compare one category across those two periods at a time. Which category should I look at first?',
   macro_error: FAIL_SOFT_TEXT,
 });
 
@@ -88,6 +93,7 @@ function prefetchKindFor(capability, route) {
     return 'prefetch_read';
   }
   if (capability === 'cashflow_analysis') return 'cashflow_macro';
+  if (capability === 'cashflow_comparison') return 'cashflow_comparison_macro';
   if (capability === 'affordability_or_planning') return 'affordability_macro';
   if (capability === 'mixed_macro') return 'none';
   if (capability === 'financial_forecast') return 'snapshot';
@@ -115,6 +121,7 @@ function groundingStrategyFor({ policy, evidence, failSoft }) {
   if (!policy || policy.grounding === GROUNDING_NONE) return 'none';
   if (!evidence || !Array.isArray(evidence.source) || evidence.source.length === 0) return 'none';
   if (evidence.source.includes('cashflow_analysis')) return 'cashflow_macro';
+  if (evidence.source.includes('cashflow_period_comparison')) return 'cashflow_comparison_macro';
   if (evidence.source.includes('affordability_analysis')) return 'affordability_macro';
   if (evidence.source.includes('user_transactions')) return 'prefetch_read';
   if (evidence.source.includes('kea_snapshot')) return 'snapshot';
