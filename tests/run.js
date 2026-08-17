@@ -24,6 +24,7 @@ const suites = [
   './keaPeriodComparison.test.js',
   './keaTrendAnalysis.test.js',
   './keaRecurringAnalysis.test.js',
+  './keaUpcomingAnalysis.test.js',
   './keaRequestReliability.test.js',
   './keaInvitationContinuation.test.js',
   './keaWriteCommitAck.test.js',

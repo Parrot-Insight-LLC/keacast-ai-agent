@@ -20,6 +20,7 @@ const MATRIX = Object.freeze({
   cashflow_comparison: GROUNDING_REQUIRED,
   cashflow_trend: GROUNDING_REQUIRED,
   cashflow_recurring: GROUNDING_REQUIRED,
+  cashflow_upcoming: GROUNDING_REQUIRED,
   affordability_or_planning: GROUNDING_REQUIRED,
   mixed_macro: GROUNDING_REQUIRED,
   invitation_continuation: GROUNDING_NONE,
@@ -54,6 +55,10 @@ const FAIL_SOFT_BY_LIMITATION = Object.freeze({
   recurring_trend_unsupported: 'I cannot trend recurring spending yet. I can list scheduled recurring items in your Keacast forecast.',
   recurring_item_unmatched: 'I don\'t see a matching scheduled recurring item in this Keacast account.',
   recurring_unavailable: FAIL_SOFT_TEXT,
+  upcoming_period_unresolved: 'I need a specific upcoming period, such as today, tomorrow, this week, next week, the next 7 days, this month, or next month.',
+  upcoming_historical_period: 'That period is in the past. Upcoming scheduled items are for today or future dates in your Keacast forecast.',
+  upcoming_horizon_unsupported: 'I can look up scheduled items up to 90 days out. Try a shorter window such as the next 7 days or next week.',
+  upcoming_unavailable: FAIL_SOFT_TEXT,
   macro_error: FAIL_SOFT_TEXT,
   macro_timeout: FAIL_SOFT_TEXT,
 });
@@ -109,6 +114,7 @@ function prefetchKindFor(capability, route) {
   if (capability === 'cashflow_comparison') return 'cashflow_comparison_macro';
   if (capability === 'cashflow_trend') return 'cashflow_trend_macro';
   if (capability === 'cashflow_recurring') return 'cashflow_recurring_macro';
+  if (capability === 'cashflow_upcoming') return 'cashflow_upcoming_macro';
   if (capability === 'affordability_or_planning') return 'affordability_macro';
   if (capability === 'mixed_macro') return 'none';
   if (capability === 'financial_forecast') return 'snapshot';
@@ -139,6 +145,7 @@ function groundingStrategyFor({ policy, evidence, failSoft }) {
   if (evidence.source.includes('cashflow_period_comparison')) return 'cashflow_comparison_macro';
   if (evidence.source.includes('cashflow_trend')) return 'cashflow_trend_macro';
   if (evidence.source.includes('cashflow_recurring')) return 'cashflow_recurring_macro';
+  if (evidence.source.includes('cashflow_upcoming')) return 'cashflow_upcoming_macro';
   if (evidence.source.includes('affordability_analysis')) return 'affordability_macro';
   if (evidence.source.includes('user_transactions')) return 'prefetch_read';
   if (evidence.source.includes('kea_snapshot')) return 'snapshot';

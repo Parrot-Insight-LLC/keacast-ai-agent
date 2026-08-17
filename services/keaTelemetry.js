@@ -114,6 +114,12 @@ function createKeaTelemetry({ requestId } = {}) {
     recurring_ms: 0,
     recurring_source_kind: null,
     recurring_stream_count_bucket: null,
+    upcoming_performed: false,
+    upcoming_status: 'skipped',
+    upcoming_ms: 0,
+    upcoming_period_relation: null,
+    upcoming_metric_scope: null,
+    upcoming_item_count_bucket: null,
   };
 
   let lastStage = null;
@@ -280,6 +286,24 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (flags.recurring_stream_count_bucket === null || typeof flags.recurring_stream_count_bucket === 'string') {
       grounding.recurring_stream_count_bucket = flags.recurring_stream_count_bucket || null;
+    }
+    if (flags.upcoming_performed === true || flags.upcoming_performed === false) {
+      grounding.upcoming_performed = flags.upcoming_performed;
+    }
+    if (flags.upcoming_status === null || typeof flags.upcoming_status === 'string') {
+      grounding.upcoming_status = flags.upcoming_status || 'skipped';
+    }
+    if (flags.upcoming_ms != null) {
+      grounding.upcoming_ms = Number(flags.upcoming_ms) || 0;
+    }
+    if (flags.upcoming_period_relation === null || typeof flags.upcoming_period_relation === 'string') {
+      grounding.upcoming_period_relation = flags.upcoming_period_relation || null;
+    }
+    if (flags.upcoming_metric_scope === null || typeof flags.upcoming_metric_scope === 'string') {
+      grounding.upcoming_metric_scope = flags.upcoming_metric_scope || null;
+    }
+    if (flags.upcoming_item_count_bucket === null || typeof flags.upcoming_item_count_bucket === 'string') {
+      grounding.upcoming_item_count_bucket = flags.upcoming_item_count_bucket || null;
     }
   }
 
@@ -458,6 +482,12 @@ function createKeaTelemetry({ requestId } = {}) {
       recurring_ms: grounding.recurring_ms || 0,
       recurring_source_kind: grounding.recurring_source_kind || null,
       recurring_stream_count_bucket: grounding.recurring_stream_count_bucket || null,
+      upcoming_performed: !!grounding.upcoming_performed,
+      upcoming_status: grounding.upcoming_status || 'skipped',
+      upcoming_ms: grounding.upcoming_ms || 0,
+      upcoming_period_relation: grounding.upcoming_period_relation || null,
+      upcoming_metric_scope: grounding.upcoming_metric_scope || null,
+      upcoming_item_count_bucket: grounding.upcoming_item_count_bucket || null,
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,

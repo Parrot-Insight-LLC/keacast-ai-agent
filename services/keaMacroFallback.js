@@ -166,7 +166,37 @@ function buildMacroFallbackText(evidence, { accountName } = {}) {
   if (evidence.source.includes('cashflow_analysis')) {
     return buildCashflowFallback(evidence);
   }
+  if (evidence.source.includes('cashflow_upcoming')) {
+    return buildUpcomingFallback(evidence);
+  }
   return null;
+}
+
+function buildUpcomingFallback(evidence) {
+  const facts = evidence && evidence.facts;
+  const period = (facts && facts.period) || (evidence && evidence.period) || {};
+  const start = period.start;
+  const end = period.end;
+  if (!start || !end) return null;
+  const items = facts && Array.isArray(facts.items) ? facts.items : [];
+  const totals = (facts && facts.totals) || {};
+  if (!items.length) {
+    return `I don't see any scheduled items in your Keacast forecast for ${start}–${end}.`;
+  }
+  const lines = [`Scheduled items in your Keacast forecast for ${start}–${end}:`];
+  for (const item of items.slice(0, 20)) {
+    if (!item || !item.label || !item.date) continue;
+    const amt = fmtMoney(item.amount);
+    lines.push(`- ${item.label} on ${item.date}${amt ? `: ${amt}` : ''}.`);
+  }
+  if (typeof totals.scheduledExpenseTotal === 'number') {
+    const total = fmtMoney(totals.scheduledExpenseTotal);
+    if (total) lines.push(`- Scheduled expense total: ${total}.`);
+  } else if (typeof totals.scheduledIncomeTotal === 'number') {
+    const total = fmtMoney(totals.scheduledIncomeTotal);
+    if (total) lines.push(`- Scheduled income total: ${total}.`);
+  }
+  return lines.length > 1 ? lines.join('\n') : null;
 }
 
 module.exports = {

@@ -340,6 +340,7 @@ async function run() {
     { name: 'comparison', message: 'How does this month compare with last month?', key: 'fetchPeriodComparison' },
     { name: 'analysis', message: 'How am I doing this month?', key: 'fetchCashflowAnalysis' },
     { name: 'affordability', message: 'Can I afford $800 next Friday?', key: 'fetchAffordabilityAnalysis' },
+    { name: 'upcoming', message: 'What bills are due next week?', key: 'fetchUpcomingAnalysis' },
   ];
   for (const row of macros) {
     const r = route(row.message);

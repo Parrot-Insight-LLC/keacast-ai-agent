@@ -2,6 +2,11 @@
 
 const moment = require('moment');
 const { frequencyLabel } = require('../utils/frequencyLabel');
+const {
+  resolveUpcomingPeriod,
+  shiftCalendarWeek,
+  isUpcomingPeriodCurrentOrFuture,
+} = require('./keaUpcomingPeriod');
 
 const CAPABILITIES = Object.freeze([
   'confirmation',
@@ -16,6 +21,7 @@ const CAPABILITIES = Object.freeze([
   'cashflow_comparison',
   'cashflow_trend',
   'cashflow_recurring',
+  'cashflow_upcoming',
   'affordability_or_planning',
   'mixed_macro',
   'transaction_write',
@@ -32,6 +38,7 @@ const FINANCIAL_CAPABILITIES = new Set([
   'cashflow_comparison',
   'cashflow_trend',
   'cashflow_recurring',
+  'cashflow_upcoming',
   'affordability_or_planning',
 ]);
 
@@ -510,6 +517,7 @@ function isCashflowTrend(text) {
   if (!m) return false;
   if (/\brecurring\b/.test(m)) return false;
   if (/\b(trend|trending|trended)\b/.test(m)) return true;
+  if (/\bhow (has|did) (my )?spend(ing)? (changed|change)\b/.test(m)) return true;
   if (/\b(lately|recently)\b/.test(m)
     && /\b(spend|spent|spending|income|cash ?flow|net)\b/.test(m)) return true;
   if (/\b(?:last|past|over the last)\s+(\d+|few|three|four|five|six|twelve)\s+months?\b/.test(m)) return true;
@@ -734,7 +742,7 @@ function isCasual(text) {
 
 function isAffordability(text) {
   const m = String(text || '').toLowerCase();
-  return /\b(can i afford|afford|do i have enough|is \$?[\d,]+ (ok|safe|fine|too much))\b/.test(m);
+  return /\b(can i afford|afford|do i have enough|will i have enough|is \$?[\d,]+ (ok|safe|fine|too much))\b/.test(m);
 }
 
 function isNegativeRiskQuestion(text) {
@@ -839,6 +847,55 @@ function isRecurringFollowUp(text) {
   const m = String(text || '').trim();
   if (!m || m.length > 80) return false;
   return /^(which is (the )?largest|what(?:'|’)?s the largest|the largest|largest one|how has that changed|has that (increased|changed)|what about income|how about income)\b/i.test(m);
+}
+
+function isBalanceImpactQuestion(text) {
+  const m = String(text || '').toLowerCase();
+  return /\bwhat will my (available )?balance\b/.test(m)
+    || /\bafter .{0,40}\b(bills?|expenses?|payments?)\b/.test(m);
+}
+
+function upcomingMetricScope(text, fallback) {
+  const m = String(text || '').toLowerCase();
+  const hasIncome = /\b(income|paycheck|paychecks|salary|getting paid)\b/.test(m);
+  const hasExpense = /\b(bills?|expenses?|payments?|charges?)\b/.test(m);
+  if (hasIncome && !hasExpense) return 'income';
+  if (hasExpense && !hasIncome) return 'expense';
+  if (hasIncome && hasExpense) return 'all';
+  if (/\btransactions?\b/.test(m) || /\bwhat'?s coming\b/.test(m) || /\bwhat is coming\b/.test(m)) return 'all';
+  if (/\bdue\b/.test(m)) return 'expense';
+  return fallback || 'all';
+}
+
+function isUpcomingListIntent(text) {
+  const m = String(text || '').toLowerCase();
+  if (!m) return false;
+  if (/\bwhat'?s coming\b/.test(m) || /\bwhat is coming\b/.test(m)) return true;
+  if (/\bshow (me )?(my )?upcoming\b/.test(m)) return true;
+  const timeish = /\b(due|coming|upcoming|coming up)\b/.test(m);
+  const noun = /\b(bills?|expenses?|payments?|charges?|transactions?|income|paychecks?)\b/.test(m);
+  return timeish && noun;
+}
+
+function isCashflowUpcoming(text) {
+  if (!isUpcomingListIntent(text)) return false;
+  if (isCashflowRecurring(text) || isAffordability(text) || isBalanceImpactQuestion(text)) return false;
+  if (isCashflowTrend(text) || isCashflowComparison(text)) return false;
+  return true;
+}
+
+function isUpcomingFollowUp(text) {
+  const m = String(text || '').trim();
+  if (!m || m.length > 80) return false;
+  return /^(how much total|what(?:'|’)?s the total|the total|what about income|how about income|what about the week after|the week after)\b/i.test(m);
+}
+
+function isWeekAfterFollowUp(text) {
+  return /\b(the )?week after\b/i.test(String(text || ''));
+}
+
+function isCalendarWeekRelation(relation) {
+  return relation === 'this_week' || relation === 'next_week' || relation === 'week_after';
 }
 
 function isMixedMacro(text) {
@@ -1632,13 +1689,18 @@ function routeCapabilityUnwrapped(input = {}) {
   const breakContinuation = (namedFollowUp.length === 2 && lastCap === 'cashflow_trend')
     || (isCashflowTrend(message) && lastCap !== 'cashflow_trend')
     || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend')
-    || (isCashflowRecurring(message) && lastCap !== 'cashflow_recurring');
+    || (isCashflowRecurring(message) && lastCap !== 'cashflow_recurring')
+    || (isCashflowUpcoming(message) && lastCap !== 'cashflow_upcoming');
   const recurringFollowUp = lastCap === 'cashflow_recurring'
     && isRecurringFollowUp(message)
     && !accountChanged
     && accountsMatch(last.lastAccountId, currentAccountId);
+  const upcomingFollowUp = lastCap === 'cashflow_upcoming'
+    && isUpcomingFollowUp(message)
+    && !accountChanged
+    && accountsMatch(last.lastAccountId, currentAccountId);
 
-  if ((continuationEligible || recurringFollowUp) && !breakContinuation) {
+  if ((continuationEligible || recurringFollowUp || upcomingFollowUp) && !breakContinuation) {
     const parsedPurchase = parsePurchaseDate(message, currentDate);
     const merged = {
       amount: slots.amount != null ? slots.amount : (lastCap === 'affordability_or_planning' && last.lastSubjectKind === 'amount'
@@ -1703,6 +1765,21 @@ function routeCapabilityUnwrapped(input = {}) {
       }
       if (/\b(changed|increased|decreased|trend)\b/i.test(message)) {
         merged.recurringError = 'recurring_trend_unsupported';
+      }
+    }
+    if (lastCap === 'cashflow_upcoming' && last.lastUpcoming) {
+      merged.period = last.lastUpcoming.period || merged.period;
+      merged.metricScope = last.lastUpcoming.metricScope || 'all';
+      if (/\bincome\b/i.test(message)) merged.metricScope = 'income';
+      if (/\b(expense|bill)/i.test(message) && !/\bincome\b/i.test(message)) {
+        merged.metricScope = 'expense';
+      }
+      if (isWeekAfterFollowUp(message)) {
+        const rel = merged.period && (merged.period.relation || merged.period.label);
+        if (isCalendarWeekRelation(rel)) {
+          const shifted = shiftCalendarWeek(merged.period);
+          if (shifted) merged.period = shifted;
+        }
       }
     }
     return {
@@ -1833,6 +1910,51 @@ function routeCapabilityUnwrapped(input = {}) {
         recurringCancel: isRecurringCancelQuestion(message) || undefined,
         subjectKind: named ? 'merchant' : slots.subjectKind,
         subjectValue: named || slots.subjectValue,
+      },
+    };
+  }
+  if (isCashflowUpcoming(message)) {
+    const resolved = resolveUpcomingPeriod(message, currentDate);
+    let upcomingError = null;
+    let period = null;
+    if (resolved && resolved.error) {
+      upcomingError = resolved.error;
+      if (resolved.start && resolved.end) {
+        period = {
+          start: resolved.start,
+          end: resolved.end,
+          label: resolved.label,
+          relation: resolved.relation,
+        };
+      }
+    } else if (!resolved || !resolved.start || !resolved.end) {
+      upcomingError = 'upcoming_period_unresolved';
+    } else if (!isUpcomingPeriodCurrentOrFuture(resolved, currentDate)) {
+      upcomingError = 'upcoming_historical_period';
+      period = {
+        start: resolved.start,
+        end: resolved.end,
+        label: resolved.label,
+        relation: resolved.relation,
+      };
+    } else {
+      period = {
+        start: resolved.start,
+        end: resolved.end,
+        label: resolved.label,
+        relation: resolved.relation,
+      };
+    }
+    return {
+      ...base,
+      capability: 'cashflow_upcoming',
+      confidence: 'high',
+      accountChanged,
+      slots: {
+        ...slots,
+        period,
+        metricScope: upcomingMetricScope(message, 'all'),
+        upcomingError,
       },
     };
   }
@@ -2025,6 +2147,7 @@ const PERSIST_CAPABILITIES = new Set([
   'cashflow_comparison',
   'cashflow_trend',
   'cashflow_recurring',
+  'cashflow_upcoming',
   'affordability_or_planning',
   'continuation',
 ]);
@@ -2105,6 +2228,17 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       rankingMode: slots.rankingMode === 'largest' ? 'largest' : null,
     };
   }
+  if (cap === 'cashflow_upcoming' && slots.period && slots.period.start && slots.period.end) {
+    dialogueState.lastUpcoming = {
+      period: {
+        start: String(slots.period.start || '').slice(0, 10),
+        end: String(slots.period.end || '').slice(0, 10),
+        label: slots.period.label ? String(slots.period.label).slice(0, 32) : undefined,
+        relation: String(slots.period.relation || slots.period.label || '').slice(0, 32) || undefined,
+      },
+      metricScope: slots.metricScope ? String(slots.metricScope).slice(0, 16) : 'all',
+    };
+  }
   return dialogueState;
 }
 
@@ -2166,6 +2300,18 @@ function applyContinuationPersistenceFromEvidence(dialogueState, route, evidence
       },
     }, opts);
   }
+  if ((persistRoute.capability === 'cashflow_upcoming'
+      || persistRoute.parentCapability === 'cashflow_upcoming')
+    && facts) {
+    return applyContinuationPersistence(dialogueState, {
+      ...persistRoute,
+      slots: {
+        ...(persistRoute.slots || {}),
+        period: facts.period || persistRoute.slots.period || evidence.period,
+        metricScope: facts.metricScope || persistRoute.slots.metricScope || 'all',
+      },
+    }, opts);
+  }
   return applyContinuationPersistence(dialogueState, persistRoute, opts);
 }
 
@@ -2195,6 +2341,7 @@ module.exports = {
   isCashflowComparison,
   isCashflowTrend,
   isCashflowRecurring,
+  isCashflowUpcoming,
   isAffordability,
   detectWantsUiAction,
   buildOpenSearchAction,
