@@ -709,6 +709,9 @@ async function prefetchCashflowTrendMacro({
       currentDate,
       assumptions: [],
     });
+    if (evidence.facts && slots.metricScope) {
+      evidence.facts.metricScope = slots.metricScope;
+    }
     if (slots.subjectKind === 'category' && slots.subjectValue && evidence.facts) {
       evidence.facts.categoryFilter = slots.subjectValue;
       if (!evidence.facts.metricScope) evidence.facts.metricScope = 'category';
@@ -1089,14 +1092,38 @@ function azureFacingEvidence(evidence) {
           transactionCount: period.transactionCount,
         };
       });
-      if (compact.facts.trend && typeof compact.facts.trend === 'object') {
-        compact.facts.trend = {
-          spending: compact.facts.trend.spending,
-        };
-      }
+    }
+    if (compact.facts.trend && typeof compact.facts.trend === 'object') {
+      compact.facts.trend = reorderTrendFacts(compact.facts.trend, compact.facts.metricScope);
     }
   }
   return compact;
+}
+
+function reorderTrendFacts(trend, metricScope) {
+  if (metricScope === 'category') {
+    return { spending: trend.spending };
+  }
+  if (metricScope === 'net') {
+    return { net: trend.net, spending: trend.spending, income: trend.income };
+  }
+  if (metricScope === 'income') {
+    return { income: trend.income, spending: trend.spending, net: trend.net };
+  }
+  return { spending: trend.spending, income: trend.income, net: trend.net };
+}
+
+function trendFocusedLeadInstruction(metricScope) {
+  if (metricScope === 'income') {
+    return 'facts.metricScope=income. The first substantive sentence MUST state trend.income.direction. This outranks mentioning other metrics. Do not lead with spending or net.';
+  }
+  if (metricScope === 'net') {
+    return 'facts.metricScope=net. The first substantive sentence MUST state trend.net.direction. For a cash flow trend, net is the focused metric. Then net step behavior and any sign crossing, then first-to-last net. Income and spending are supporting context only — do not lead with them.';
+  }
+  if (metricScope === 'category') {
+    return 'facts.metricScope=category. The first substantive sentence MUST state trend.spending.direction for the category. Do not lead with net or income.';
+  }
+  return 'facts.metricScope=spending. The first substantive sentence MUST state trend.spending.direction. This outranks mentioning other metrics. Do not lead with net or income.';
 }
 
 function buildEvidenceSystemSection(evidence) {
@@ -1207,8 +1234,9 @@ function buildEvidenceSystemSection(evidence) {
   const trendInstruction = compact.source.includes('cashflow_trend')
     ? [
       'Use the supplied periods[].label values when naming windows. Never say periodA, periodB, period1, or window3. Copy labels exactly. Do not say early August, first half, or mid-August.',
-      'The first sentence must state the focused metric direction: spending uses trend.spending.direction, income uses trend.income.direction, net uses trend.net.direction, category uses trend.spending.direction.',
+      trendFocusedLeadInstruction(compact.facts && compact.facts.metricScope),
       'TREND DIRECTION is not FIRST-TO-LAST. If direction is mixed, say mixed. Do not say the trend improved when direction is mixed. firstToLast is a separate supplied fact.',
+      'When naming a direction, prefer "trend is decreasing/increasing/mixed" or "trending downward/upward". Do not say "trending decreasing" or "trending increasing".',
       'Use trend.*.direction exactly. Do not recalculate direction from the period values. Do not call a mixed series increasing just because first-to-last is positive.',
       'Use trend.*.firstToLast.absolute and firstToLast.percent. Do not calculate percentages. If percent is null, do not narrate a percentage.',
       'If firstToLast.crossedZero is true, describe the surplus/deficit move using supplied period nets and the absolute change only.',

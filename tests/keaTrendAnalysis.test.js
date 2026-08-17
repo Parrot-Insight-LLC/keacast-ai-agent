@@ -143,6 +143,18 @@ async function run() {
   check('trend prefetch once', trendCalls === 1);
   check('trend evidence source', trendEv.status === 'ok' && trendEv.source[0] === 'cashflow_trend');
   check('trend facts have periods not periodA', Array.isArray(trendEv.facts.periods) && trendEv.facts.periodA === undefined);
+  check('spending prefetch metricScope spending', trendEv.facts.metricScope === 'spending');
+
+  const netStampEv = await prefetchGrounding({
+    trustedUserId: 5,
+    accountId: 10,
+    currentDate: '2026-08-16',
+    policy: resolveGroundingPolicy(cashflowTrend, { message: "What's my cash flow trend?" }),
+    route: cashflowTrend,
+    token: 'jwt',
+    fetchTrendAnalysis: async () => sampleTrendResult({ metricScope: 'spending' }),
+  });
+  check('cash flow prefetch stamps net metricScope', netStampEv.facts.metricScope === 'net');
   check('trend forces one Azure round', shouldForceDirectAnswer({
     route: trendRoute,
     policy: trendPolicy,
@@ -155,11 +167,13 @@ async function run() {
   check('trend prompt forbids extrapolation', /Do not forecast that the trend will continue/.test(trendBlock));
   check('trend prompt forbids mixed-as-increasing', /Do not call a mixed series increasing/.test(trendBlock));
   check('trend prompt uses supplied labels', /Use the supplied periods\[\]\.label/.test(trendBlock));
-  check('trend prompt requires first sentence direction', /The first sentence must state the focused metric direction/.test(trendBlock));
+  check('spending trend prompt leads with spending', /facts\.metricScope=spending[\s\S]*trend\.spending\.direction/.test(trendBlock));
+  check('spending trend prompt does not lead with net', /Do not lead with net or income/.test(trendBlock));
   check('trend prompt mixed is not improved', /Do not say the trend improved when direction is mixed/.test(trendBlock));
   check('trend prompt exact labels not early August', /Do not say early August, first half, or mid-August/.test(trendBlock));
   check('trend prompt category spending-only', /Category trend is spending-only/.test(trendBlock));
   check('trend prompt no restaurant income claim', /Do not claim there was no income related to the category/.test(trendBlock));
+  check('trend prompt prefers natural direction wording', /Do not say "trending decreasing"/.test(trendBlock));
 
   const mixedFacing = azureFacingEvidence({
     status: 'ok',
@@ -181,6 +195,36 @@ async function run() {
   });
   check('mixed net direction preserved in compact', mixedFacing.facts.trend.net.direction === 'mixed');
   check('mixed firstToLast remains separate', mixedFacing.facts.trend.net.firstToLast.absolute === 3778.64);
+  check('net compact puts net trend first', Object.keys(mixedFacing.facts.trend)[0] === 'net');
+  const netBlock = buildEvidenceSystemSection({
+    status: 'ok',
+    source: ['cashflow_trend'],
+    facts: mixedFacing.facts,
+    observations: [{ code: 'net_mixed' }],
+  });
+  check('cash flow trend prompt leads with net', /facts\.metricScope=net[\s\S]*trend\.net\.direction/.test(netBlock));
+  check('cash flow trend prompt net is focused', /For a cash flow trend, net is the focused metric/.test(netBlock));
+  check('cash flow trend prompt spending is supporting', /Income and spending are supporting context only/.test(netBlock));
+  check('mixed remains mixed in net prompt', /Do not say the trend improved when direction is mixed/.test(netBlock));
+  check('net prompt keeps exact period labels', /Do not say early August, first half, or mid-August/.test(netBlock));
+
+  const incomeFacing = azureFacingEvidence({
+    status: 'ok',
+    source: ['cashflow_trend'],
+    facts: {
+      metricScope: 'income',
+      periods: mixedFacing.facts.periods,
+      trend: mixedFacing.facts.trend,
+    },
+  });
+  check('income compact puts income trend first', Object.keys(incomeFacing.facts.trend)[0] === 'income');
+  const incomeBlock = buildEvidenceSystemSection({
+    status: 'ok',
+    source: ['cashflow_trend'],
+    facts: { metricScope: 'income', periods: mixedFacing.facts.periods, trend: mixedFacing.facts.trend },
+  });
+  check('income trend prompt leads with income', /facts\.metricScope=income[\s\S]*trend\.income\.direction/.test(incomeBlock));
+  check('income trend prompt does not lead with spending', /Do not lead with spending or net/.test(incomeBlock));
 
   const catFacing = azureFacingEvidence({
     status: 'ok',
@@ -204,6 +248,28 @@ async function run() {
   check('category compact omits income zeros', catFacing.facts.periods.every((p) => p.income === undefined && p.net === undefined));
   check('category compact keeps spending', catFacing.facts.periods[0].spending === 40);
   check('category compact omits trend.income', catFacing.facts.trend.income === undefined);
+  check('category compact puts spending trend first', Object.keys(catFacing.facts.trend)[0] === 'spending');
+  const catBlock = buildEvidenceSystemSection({
+    status: 'ok',
+    source: ['cashflow_trend'],
+    facts: {
+      metricScope: 'category',
+      categoryFilter: 'restaurants',
+      periods: [
+        { label: 'June 1–16, 2026', start: '2026-06-01', end: '2026-06-16', income: 0, spending: 40, net: -40, transactionCount: 2 },
+        { label: 'July 1–16, 2026', start: '2026-07-01', end: '2026-07-16', income: 0, spending: 30, net: -30, transactionCount: 2 },
+        { label: 'August 1–16, 2026', start: '2026-08-01', end: '2026-08-16', income: 0, spending: 20, net: -20, transactionCount: 2 },
+      ],
+      trend: {
+        income: { direction: 'unchanged' },
+        spending: { direction: 'decreasing' },
+        net: { direction: 'increasing' },
+      },
+    },
+  });
+  check('category trend prompt leads with category spending', /facts\.metricScope=category[\s\S]*trend\.spending\.direction for the category/.test(catBlock));
+  check('category trend prompt does not lead with net', /Do not lead with net or income/.test(catBlock));
+  check('restaurant category still routes category', route('Is restaurant spending trending up?').slots.metricScope === 'category');
 
   const macroPrompt = T.buildMacroAnalysisPrompt({
     currentDate: '2026-08-16',
