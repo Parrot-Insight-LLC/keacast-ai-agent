@@ -1051,7 +1051,10 @@ function buildEvidenceSystemSection(evidence) {
     ? [
       'periodA is the older baseline. periodB is the newer comparison period. Always treat supplied deltas as periodB minus periodA.',
       'Use the supplied changes.absolute and changes.percent values. Do not calculate percentages yourself.',
-      'If percent is null or baselineZero is true, the baseline was zero — do not say 0% or invent a percentage.',
+      'If a metric percent is null, do not narrate a percentage for that metric — do not say 0% or invent one. baselineZero means the prior-period value was zero. crossedZero means net changed sign. Neither is a percentage.',
+      'Do not infer causal relationships. Do not say because, due to, driven by, or primarily because. Do not claim a larger proportional or percentage change caused the net result.',
+      'You may report the supplied income, spending, and net facts. You may not invent which component drove the net change.',
+      'If changes.net.crossedZero is true, describe the move from surplus to deficit or deficit to surplus using the supplied period nets and absolute change only. Do not narrate a net percentage.',
       'Respect windowKind. matched_elapsed and explicit_bounds are not full months. Do not call August 1-16 "August" or "full August". Use the supplied period labels.',
       'These figures are posted actual transactions only. Do not introduce balances, remaining forecast, savingsPotential, or goal projections.',
       'Selected account only. Do not imply all accounts or another institution.',

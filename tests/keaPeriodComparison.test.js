@@ -187,8 +187,36 @@ async function run() {
   check('comparison prompt forbids all accounts', /Do not say across your accounts/.test(cmpBlock));
   check('comparison prompt forbids subjective words', /Do not say healthy/.test(cmpBlock));
   check('comparison prompt null percent not 0%', /do not say 0%/.test(cmpBlock));
+  check('comparison prompt forbids causal because/due to', /Do not say because, due to, driven by, or primarily because/.test(cmpBlock));
+  check('comparison prompt forbids unsupported proportional cause', /Do not claim a larger proportional or percentage change caused the net result/.test(cmpBlock));
+  check('comparison prompt forbids inventing which component drove net', /You may not invent which component drove the net change/.test(cmpBlock));
+  check('comparison prompt suppresses net percent on crossedZero', /If changes\.net\.crossedZero is true[\s\S]*Do not narrate a net percentage/.test(cmpBlock));
   check('comparison uses compact macro identity when assembled', !/Always use the word "disposable"/.test(cmpBlock));
   check('comparison evidence has no transactions array', !/"transactions"\s*:/.test(cmpBlock));
+
+  const crossedEv = {
+    ...cmpEv,
+    facts: {
+      ...cmpEv.facts,
+      periodA: { ...cmpEv.facts.periodA, net: 725.96 },
+      periodB: { ...cmpEv.facts.periodB, net: -2979.63 },
+      changes: {
+        ...cmpEv.facts.changes,
+        net: {
+          absolute: -3705.59,
+          percent: null,
+          baselineZero: false,
+          crossedZero: true,
+          crossing: 'positive_to_negative',
+        },
+      },
+    },
+  };
+  const crossedBlock = buildEvidenceSystemSection(crossedEv);
+  check('crossedZero evidence reaches Azure JSON', /"crossedZero":true/.test(crossedBlock.replace(/\s+/g, '')));
+  check('crossedZero evidence has null net percent', /"percent":null/.test(crossedBlock.replace(/\s+/g, '')));
+  check('crossedZero prompt still forbids inventing a percentage', /do not say 0% or invent one/.test(crossedBlock));
+  check('unsupported proportional claim is not an allowed instruction', !/larger proportional decrease in spending/.test(crossedBlock));
 
   const macroPrompt = T.buildMacroAnalysisPrompt({
     currentDate: '2026-08-16',
