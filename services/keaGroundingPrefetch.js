@@ -280,6 +280,7 @@ function shouldForceDirectAnswer({ route, policy, evidence } = {}) {
   const directCaps = cap === 'financial_lookup'
     || cap === 'cashflow_analysis'
     || cap === 'cashflow_comparison'
+    || cap === 'cashflow_trend'
     || cap === 'affordability_or_planning';
   if (!directCaps) return false;
   if (!evidence || evidence.status !== 'ok') return false;
@@ -507,7 +508,12 @@ function horizonEnd(currentDate, days = 90) {
 function macroFactsFromResult(result, source) {
   if (!result || typeof result !== 'object') return {};
   const facts = {};
-  const copyKeys = source === 'cashflow_period_comparison'
+  const copyKeys = source === 'cashflow_trend'
+    ? [
+      'accountScope', 'windowKind', 'metricScope', 'categoryFilter',
+      'periods', 'trend', 'highest', 'lowest',
+    ]
+    : source === 'cashflow_period_comparison'
     ? [
       'accountScope', 'windowKind', 'periodA', 'periodB', 'changes', 'categoryChanges',
     ]
@@ -578,6 +584,11 @@ async function defaultFetchPeriodComparison({ accountId, token, body, timeoutMs,
   return getKeaPeriodComparison({ accountId, token, body, timeoutMs, requestId });
 }
 
+async function defaultFetchTrendAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const { getKeaTrendAnalysis } = require('../tools/keacast_tool_layer');
+  return getKeaTrendAnalysis({ accountId, token, body, timeoutMs, requestId });
+}
+
 async function prefetchCashflowComparisonMacro({
   accountId,
   token,
@@ -622,6 +633,60 @@ async function prefetchCashflowComparisonMacro({
     });
     return evidenceFromMacroResult(result, {
       source: 'cashflow_period_comparison',
+      currentDate,
+      assumptions: [],
+    });
+  } catch (err) {
+    const status = err && err.response && err.response.status;
+    const limitation = status === 401 || status === 403 ? 'access_unverified' : 'macro_error';
+    return emptyEvidence({ limitations: [limitation], dataAsOf: currentDate || null });
+  }
+}
+
+async function prefetchCashflowTrendMacro({
+  accountId,
+  token,
+  requestId,
+  currentDate,
+  slots,
+  fetchTrendAnalysis,
+}) {
+  if (slots && slots.trendError) {
+    return emptyEvidence({
+      limitations: [slots.trendError],
+      dataAsOf: currentDate || null,
+    });
+  }
+  const periods = slots && Array.isArray(slots.periods) ? slots.periods : null;
+  if (!periods || periods.length !== 3
+    || periods.some((p) => !p || !p.start || !p.end)) {
+    return emptyEvidence({
+      limitations: ['trend_periods_unresolved'],
+      dataAsOf: currentDate || null,
+    });
+  }
+  if (accountId == null || accountId === '') {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+  if (!token) {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+  const fetch = fetchTrendAnalysis || defaultFetchTrendAnalysis;
+  try {
+    const result = await fetch({
+      accountId,
+      token,
+      requestId,
+      body: {
+        clientDate: currentDate,
+        windowKind: slots.windowKind || undefined,
+        periods: periods.map((p) => ({ start: p.start, end: p.end })),
+        metricScope: slots.metricScope || undefined,
+        categoryFilter: slots.subjectKind === 'category' ? slots.subjectValue : undefined,
+      },
+    });
+    return evidenceFromMacroResult(result, {
+      source: 'cashflow_trend',
       currentDate,
       assumptions: [],
     });
@@ -776,6 +841,7 @@ async function prefetchGrounding({
   fetchCashflowAnalysis,
   fetchAffordabilityAnalysis,
   fetchPeriodComparison,
+  fetchTrendAnalysis,
 } = {}) {
   const effective = policy?.effectiveCapability || route?.capability;
   const slots = route?.slots || {};
@@ -813,6 +879,17 @@ async function prefetchGrounding({
       currentDate,
       slots,
       fetchPeriodComparison,
+    });
+  }
+
+  if (policy.prefetchKind === 'cashflow_trend_macro' || effective === 'cashflow_trend') {
+    return prefetchCashflowTrendMacro({
+      accountId,
+      token,
+      requestId,
+      currentDate,
+      slots,
+      fetchTrendAnalysis,
     });
   }
 
@@ -931,11 +1008,14 @@ function azureFacingEvidence(evidence) {
   const isMacro = Array.isArray(compact.source)
     && (compact.source.includes('cashflow_analysis')
       || compact.source.includes('affordability_analysis')
-      || compact.source.includes('cashflow_period_comparison'));
+      || compact.source.includes('cashflow_period_comparison')
+      || compact.source.includes('cashflow_trend'));
   if (isMacro) {
     compact.accountScope = evidence.accountScope || 'selected_account';
   }
-  if (Array.isArray(compact.source) && compact.source.includes('cashflow_period_comparison')) {
+  if (Array.isArray(compact.source)
+    && (compact.source.includes('cashflow_period_comparison')
+      || compact.source.includes('cashflow_trend'))) {
     compact.windowKind = evidence.windowKind || (compact.facts && compact.facts.windowKind) || null;
   }
   const isCashflow = Array.isArray(compact.source) && compact.source.includes('cashflow_analysis');
@@ -1001,15 +1081,25 @@ function buildEvidenceSystemSection(evidence) {
     && (compact.facts.spentTotal != null || compact.facts.expenseTotal != null
       || compact.facts.postedSpending != null
       || (compact.facts.periodA && compact.facts.periodA.spending != null)
-      || (compact.facts.changes && compact.facts.changes.spending));
+      || (compact.facts.changes && compact.facts.changes.spending)
+      || (Array.isArray(compact.facts.periods) && compact.facts.periods.some((p) => p && p.spending != null)));
   const spendingGlossary = (compact.lookups || hasSpendFacts)
     ? 'Spending glossary: spentTotal / expenseTotal / postedSpending represents a positive posted-spending magnitude. Prefer spentTotal for user-facing spending statements. When saying "you spent", "your expenses totaled", or "you had X in expenses", present the value as positive currency. Do not add a minus sign. Individual ledger transaction amounts may remain signed elsewhere.'
     : '';
   const isComparison = compact.source.includes('cashflow_period_comparison');
+  const isTrend = compact.source.includes('cashflow_trend');
   const isMacro = compact.source.includes('cashflow_analysis')
     || compact.source.includes('affordability_analysis')
-    || isComparison;
-  const macroInstruction = isComparison
+    || isComparison
+    || isTrend;
+  const macroInstruction = isTrend
+    ? [
+      'GROUNDED EVIDENCE is authoritative for this requested trend.',
+      'accountScope=selected_account: all financial values refer only to the currently selected account unless the evidence explicitly states otherwise. Do not say across your accounts, all accounts, or complete financial picture.',
+      'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Do not calculate your own percentages, deltas, slopes, or trend direction.',
+      'Narrate observation codes and supplied facts only. Do not invent a new financial judgment.',
+    ].join(' ')
+    : isComparison
     ? [
       'GROUNDED EVIDENCE is authoritative for this requested comparison.',
       'accountScope=selected_account: all financial values refer only to the currently selected account unless the evidence explicitly states otherwise. Do not say across your accounts, all accounts, or complete financial picture.',
@@ -1062,6 +1152,19 @@ function buildEvidenceSystemSection(evidence) {
       'Use descriptive language only. Do not say healthy, unhealthy, good, bad, comfortable, safe, concerning, better financial health, or overspending.',
     ].join(' ')
     : '';
+  const trendInstruction = compact.source.includes('cashflow_trend')
+    ? [
+      'Use the supplied periods[].label values when naming windows. Never say periodA, periodB, period1, or window3.',
+      'Use trend.*.direction exactly. Do not call a mixed series increasing just because first-to-last is positive.',
+      'Use trend.*.firstToLast.absolute and firstToLast.percent. Do not calculate percentages. If percent is null, do not narrate a percentage.',
+      'If firstToLast.crossedZero is true, describe the surplus/deficit move using supplied period nets and the absolute change only.',
+      'Respect windowKind. matched_elapsed windows are not full months. Do not call August 1-16 "August".',
+      'These figures are posted actual transactions only. Do not forecast that the trend will continue. Do not mention balances, remaining forecast, or savingsPotential.',
+      'Do not infer causes. Do not say because, due to, driven by, statistically significant, accelerating, momentum, or volatility.',
+      'Selected account only. Use descriptive language only. Do not say healthy, unhealthy, good, bad, comfortable, safe, concerning, or overspending.',
+      'If observations include all_periods_empty, say there were no posted transactions in those windows.',
+    ].join(' ')
+    : '';
   const affordabilityInstruction = compact.source.includes('affordability_analysis')
     ? [
       'Preferred conclusion: based on the current Keacast forecast, adding the requested expense would or would not create a negative projected balance within the evaluation horizon.',
@@ -1081,6 +1184,8 @@ function buildEvidenceSystemSection(evidence) {
     'GROUNDED EVIDENCE (authoritative for this answer — do not contradict; do not invent missing dollar values or dates; respect limitations; partial evidence does not justify unsupported certainty):',
     completedHistorical
       ? 'Field glossary: postedIncome / postedSpending / postedNet are posted actuals for the requested historical period on the selected account. Do not mention availableBalance, currentBalance, reconciledBalance, or current balances as of now.'
+      : isTrend
+        ? 'Field glossary: periods[] are chronological posted-actual windows. income and spending are positive magnitudes. net is signed. trend.direction is the deterministic classification. firstToLast is the last window minus the first. Use supplied labels, not internal field names.'
       : isComparison
         ? 'Field glossary: periodA is the older baseline; periodB is the newer comparison. income and spending are positive magnitudes. net is signed. changes.absolute is always periodB minus periodA. windowKind describes whether the windows are full months, matched elapsed days, or explicit bounds.'
         : 'Field glossary: availableBalance = Keacast UI Available; currentBalance = Keacast UI Current; reconciledBalance = latest reconciled snapshot (not Available, not a projected balance, not lowestProjectedAmount, not projectedOnDate); savingsPotential = lowest projected balance through the current month (not available money).',
@@ -1090,6 +1195,7 @@ function buildEvidenceSystemSection(evidence) {
     macroInstruction,
     cashflowNarrationInstruction,
     comparisonInstruction,
+    trendInstruction,
     affordabilityInstruction,
     partialInstruction,
   ].filter(Boolean).join('\n');

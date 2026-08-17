@@ -18,6 +18,7 @@ const MATRIX = Object.freeze({
   financial_forecast: GROUNDING_REQUIRED,
   cashflow_analysis: GROUNDING_REQUIRED,
   cashflow_comparison: GROUNDING_REQUIRED,
+  cashflow_trend: GROUNDING_REQUIRED,
   affordability_or_planning: GROUNDING_REQUIRED,
   mixed_macro: GROUNDING_REQUIRED,
   invitation_continuation: GROUNDING_NONE,
@@ -42,6 +43,11 @@ const FAIL_SOFT_BY_LIMITATION = Object.freeze({
   comparison_periods_unresolved: 'I need two specific periods to compare, such as this month vs last month, or July vs June.',
   invalid_explicit_bounds: 'Those date ranges are not a valid comparison window. Try dates like August 1 through 10 and July 1 through 10.',
   compound_comparison_unsupported: 'I can compare one category across those two periods at a time. Which category should I look at first?',
+  forecast_trend_unsupported: 'I can show a posted-actual spending trend for recent months, but not a forecast trend.',
+  trend_periods_unresolved: 'I need a 3-month window to show a trend, such as the last three months, or May through July.',
+  trend_period_count_unsupported: 'I can show a 3-month trend right now. Try the last three months, or three named months such as May through July.',
+  compound_trend_unsupported: 'I can show a trend for one category at a time. Which category should I look at first?',
+  merchant_trend_unsupported: 'I can show a category or overall spending trend, but not a merchant trend yet.',
   macro_error: FAIL_SOFT_TEXT,
 });
 
@@ -94,6 +100,7 @@ function prefetchKindFor(capability, route) {
   }
   if (capability === 'cashflow_analysis') return 'cashflow_macro';
   if (capability === 'cashflow_comparison') return 'cashflow_comparison_macro';
+  if (capability === 'cashflow_trend') return 'cashflow_trend_macro';
   if (capability === 'affordability_or_planning') return 'affordability_macro';
   if (capability === 'mixed_macro') return 'none';
   if (capability === 'financial_forecast') return 'snapshot';
@@ -122,6 +129,7 @@ function groundingStrategyFor({ policy, evidence, failSoft }) {
   if (!evidence || !Array.isArray(evidence.source) || evidence.source.length === 0) return 'none';
   if (evidence.source.includes('cashflow_analysis')) return 'cashflow_macro';
   if (evidence.source.includes('cashflow_period_comparison')) return 'cashflow_comparison_macro';
+  if (evidence.source.includes('cashflow_trend')) return 'cashflow_trend_macro';
   if (evidence.source.includes('affordability_analysis')) return 'affordability_macro';
   if (evidence.source.includes('user_transactions')) return 'prefetch_read';
   if (evidence.source.includes('kea_snapshot')) return 'snapshot';

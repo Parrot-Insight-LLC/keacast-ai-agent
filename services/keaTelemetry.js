@@ -104,6 +104,11 @@ function createKeaTelemetry({ requestId } = {}) {
     comparison_status: 'skipped',
     comparison_ms: 0,
     period_relation: null,
+    trend_performed: false,
+    trend_status: 'skipped',
+    trend_ms: 0,
+    trend_period_count: null,
+    trend_window_kind: null,
   };
 
   function markStart(name) {
@@ -235,6 +240,21 @@ function createKeaTelemetry({ requestId } = {}) {
     }
     if (flags.period_relation === null || typeof flags.period_relation === 'string') {
       grounding.period_relation = flags.period_relation || null;
+    }
+    if (flags.trend_performed === true || flags.trend_performed === false) {
+      grounding.trend_performed = flags.trend_performed;
+    }
+    if (flags.trend_status === null || typeof flags.trend_status === 'string') {
+      grounding.trend_status = flags.trend_status || 'skipped';
+    }
+    if (flags.trend_ms != null) {
+      grounding.trend_ms = Number(flags.trend_ms) || 0;
+    }
+    if (flags.trend_period_count != null) {
+      grounding.trend_period_count = Number(flags.trend_period_count) || 0;
+    }
+    if (flags.trend_window_kind === null || typeof flags.trend_window_kind === 'string') {
+      grounding.trend_window_kind = flags.trend_window_kind || null;
     }
   }
 
@@ -387,6 +407,11 @@ function createKeaTelemetry({ requestId } = {}) {
       comparison_status: grounding.comparison_status || 'skipped',
       comparison_ms: grounding.comparison_ms || 0,
       period_relation: grounding.period_relation || null,
+      trend_performed: !!grounding.trend_performed,
+      trend_status: grounding.trend_status || 'skipped',
+      trend_ms: grounding.trend_ms || 0,
+      trend_period_count: grounding.trend_period_count,
+      trend_window_kind: grounding.trend_window_kind || null,
       estimated_block_chars: blocks,
     };
     for (const r of azureRounds) {

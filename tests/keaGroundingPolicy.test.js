@@ -62,6 +62,7 @@ async function run() {
   check('negative-risk uses cashflow_macro', policyFor('Will I go negative next month?').policy.prefetchKind === 'cashflow_macro');
   check('affordability uses affordability_macro', policyFor('Can I afford $800 next month?').policy.prefetchKind === 'affordability_macro');
   check('how am I doing uses cashflow_macro', policyFor('How am I doing this month?').policy.prefetchKind === 'cashflow_macro');
+  check('spending lately uses cashflow_trend_macro', policyFor('Am I spending more lately?').policy.prefetchKind === 'cashflow_trend_macro');
   check('future balance wording still snapshot forecast', policyFor('What will my balance be next month?').policy.prefetchKind === 'snapshot');
 
   section('fail-soft policy');

@@ -14,6 +14,7 @@ const CAPABILITIES = Object.freeze([
   'financial_forecast',
   'cashflow_analysis',
   'cashflow_comparison',
+  'cashflow_trend',
   'affordability_or_planning',
   'mixed_macro',
   'transaction_write',
@@ -28,6 +29,7 @@ const FINANCIAL_CAPABILITIES = new Set([
   'financial_forecast',
   'cashflow_analysis',
   'cashflow_comparison',
+  'cashflow_trend',
   'affordability_or_planning',
 ]);
 
@@ -272,6 +274,14 @@ function parseExplicitBoundPair(text, today) {
 }
 
 function parseNamedMonthPair(text, today) {
+  const hits = collectNamedMonths(text, today);
+  if (hits.length !== 2) return null;
+  const a = fullMonthFrom(hits[0].year, hits[0].month);
+  const b = fullMonthFrom(hits[1].year, hits[1].month);
+  return orderParsedPeriods(a, b, 'full_months');
+}
+
+function collectNamedMonths(text, today) {
   const re = /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b(?:\s+(\d{4}))?/g;
   const hits = [];
   const seen = new Set();
@@ -285,10 +295,138 @@ function parseNamedMonthPair(text, today) {
       year: match[2] ? Number(match[2]) : yearForNamedMonth(MONTH_NAMES[match[1]], today),
     });
   }
-  if (hits.length < 2) return null;
-  const a = fullMonthFrom(hits[0].year, hits[0].month);
-  const b = fullMonthFrom(hits[1].year, hits[1].month);
-  return orderParsedPeriods(a, b, 'full_months');
+  return hits;
+}
+
+function expandNamedMonthSpan(text, today) {
+  const month = 'january|february|march|april|may|june|july|august|september|october|november|december';
+  const re = new RegExp(
+    `\\b(?:from\\s+)?(${month})(?:\\s+(\\d{4}))?\\s*(?:through|thru|to|[-–])\\s*(${month})(?:\\s+(\\d{4}))?\\b`,
+    'i'
+  );
+  const hit = String(text || '').toLowerCase().match(re);
+  if (!hit) return null;
+  const startMonth = MONTH_NAMES[hit[1]];
+  const startYear = hit[2] ? Number(hit[2]) : yearForNamedMonth(startMonth, today);
+  const endMonth = MONTH_NAMES[hit[3]];
+  const endYear = hit[4] ? Number(hit[4]) : yearForNamedMonth(endMonth, today);
+  let cursor = moment({ year: startYear, month: startMonth, day: 1 });
+  let end = moment({ year: endYear, month: endMonth, day: 1 });
+  if (end.isBefore(cursor)) {
+    const tmp = cursor;
+    cursor = end;
+    end = tmp;
+  }
+  const hits = [];
+  while (!cursor.isAfter(end, 'month')) {
+    hits.push({ month: cursor.month(), year: cursor.year() });
+    cursor = cursor.clone().add(1, 'month');
+    if (hits.length > 12) break;
+  }
+  return hits;
+}
+
+function matchedElapsedSeriesFrom(today, count = 3) {
+  const day = today.date();
+  const periods = [];
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const start = today.clone().subtract(i, 'month').startOf('month');
+    const daysInMonth = start.clone().endOf('month').date();
+    const endDay = Math.min(day, daysInMonth);
+    periods.push({
+      start: start.format('YYYY-MM-DD'),
+      end: start.clone().date(endDay).format('YYYY-MM-DD'),
+    });
+  }
+  return { windowKind: 'matched_elapsed', periods, error: null };
+}
+
+function lastCompletedMonthsFrom(today, count = 3) {
+  const periods = [];
+  for (let i = count; i >= 1; i -= 1) {
+    const start = today.clone().subtract(i, 'month').startOf('month');
+    periods.push(fullMonthFrom(start.year(), start.month()));
+  }
+  return { windowKind: 'full_months', periods, error: null };
+}
+
+function toMatchedElapsedSeries(periods, today) {
+  const day = today.date();
+  return (periods || []).map((period) => {
+    const start = moment(period.start, 'YYYY-MM-DD').startOf('month');
+    const daysInMonth = start.clone().endOf('month').date();
+    const endDay = Math.min(day, daysInMonth);
+    return {
+      start: start.format('YYYY-MM-DD'),
+      end: start.clone().date(endDay).format('YYYY-MM-DD'),
+    };
+  });
+}
+
+function parseRequestedMonthCount(text) {
+  const m = String(text || '').toLowerCase();
+  const hit = m.match(/\b(?:last|past|over the last)\s+(\d+|few|three|four|five|six|twelve)\s+months?\b/);
+  if (!hit) return null;
+  if (hit[1] === 'few' || hit[1] === 'three') return 3;
+  return Number(hit[1]);
+}
+
+function trendMetricScope(text, subjectKind) {
+  if (subjectKind === 'category') return 'category';
+  const m = String(text || '').toLowerCase();
+  if (/\bincome\b/.test(m) && !/\b(spend|spent|spending)\b/.test(m)) return 'income';
+  if (/\bnet\b/.test(m) || (/\bcash ?flow\b/.test(m) && !/\b(spend|spent|spending)\b/.test(m))) return 'net';
+  return 'spending';
+}
+
+function parseTrendPeriods(message, currentDate) {
+  const today = moment(currentDate, 'YYYY-MM-DD', true).isValid()
+    ? moment(currentDate, 'YYYY-MM-DD')
+    : moment();
+  const m = String(message || '').toLowerCase();
+  if (!m) return { error: 'trend_periods_unresolved', periods: null, windowKind: null };
+
+  if (/\bforecast(ed|s|ing)?\b/.test(m) || /\bprojected\b/.test(m) || /\bnext month\b/.test(m)) {
+    return { error: 'forecast_trend_unsupported', periods: null, windowKind: null };
+  }
+  if (/\bthis year\b/.test(m)) {
+    return { error: 'trend_period_count_unsupported', periods: null, windowKind: null };
+  }
+
+  const requestedCount = parseRequestedMonthCount(m);
+  if (requestedCount != null && requestedCount !== 3) {
+    return { error: 'trend_period_count_unsupported', periods: null, windowKind: null };
+  }
+
+  const span = expandNamedMonthSpan(m, today);
+  if (span && span.length !== 3) {
+    return { error: 'trend_period_count_unsupported', periods: null, windowKind: null };
+  }
+  const named = (span && span.length === 3) ? span : collectNamedMonths(m, today);
+  if (named.length > 3) {
+    return { error: 'trend_period_count_unsupported', periods: null, windowKind: null };
+  }
+  if (named.length === 3) {
+    const periods = named
+      .map((hit) => fullMonthFrom(hit.year, hit.month))
+      .sort((a, b) => (a.start < b.start ? -1 : 1));
+    const currentIncomplete = today.date() !== today.clone().endOf('month').date();
+    const includesCurrent = periods.some((p) => p.start.slice(0, 7) === today.format('YYYY-MM'));
+    if (currentIncomplete && includesCurrent) {
+      return {
+        windowKind: 'matched_elapsed',
+        periods: toMatchedElapsedSeries(periods, today),
+        error: null,
+      };
+    }
+    return { windowKind: 'full_months', periods, error: null };
+  }
+
+  if (/\blast\s+3\s+completed months\b/.test(m) || /\blast three completed months\b/.test(m)) {
+    return lastCompletedMonthsFrom(today);
+  }
+
+  return matchedElapsedSeriesFrom(today);
 }
 
 function parseComparisonPeriods(message, currentDate) {
@@ -362,6 +500,29 @@ function isCashflowComparison(text) {
   if (/\b(increased|decreased|changed)\b/.test(m)
     && periodish
     && /\b(from|since|vs|versus|compared|than|last month|this month)\b/.test(m)) return true;
+  return false;
+}
+
+function isCashflowTrend(text) {
+  const m = String(text || '').toLowerCase();
+  if (!m) return false;
+  if (/\b(trend|trending|trended)\b/.test(m)) return true;
+  if (/\b(lately|recently)\b/.test(m)
+    && /\b(spend|spent|spending|income|cash ?flow|net)\b/.test(m)) return true;
+  if (/\b(?:last|past|over the last)\s+(\d+|few|three|four|five|six|twelve)\s+months?\b/.test(m)) return true;
+  if (/\bthis year\b/.test(m)
+    && /\b(trend|changed|change|spend|spent|spending|income|cash ?flow)\b/.test(m)) return true;
+  if (/\bmonth over month\b/.test(m) || /\bmonth-over-month\b/.test(m)) return true;
+  if (/\bthis month\b/.test(m) && /\b(prior|previous) two months\b/.test(m)) return true;
+  if (/\blast\s+3\s+completed months\b/.test(m) || /\blast three completed months\b/.test(m)) return true;
+  if (collectNamedMonths(m, moment()).length >= 3) return true;
+  const namedSpan = expandNamedMonthSpan(m, moment());
+  if (namedSpan && namedSpan.length >= 3) return true;
+  if (/\b(declin|increas)\w*\b/.test(m)
+    && /\b(income|spend|spent|spending|cash ?flow)\b/.test(m)
+    && !isCashflowComparison(m)) {
+    return true;
+  }
   return false;
 }
 
@@ -593,7 +754,13 @@ function isCashflowAnalysis(text) {
 }
 
 function isMixedMacro(text) {
-  return isAffordability(text) && (isCashflowAnalysis(text) || isCashflowComparison(text));
+  if (isAffordability(text) && (isCashflowAnalysis(text) || isCashflowComparison(text) || isCashflowTrend(text))) {
+    return true;
+  }
+  const m = String(text || '').toLowerCase();
+  if (!/\band\b/.test(m)) return false;
+  if (collectNamedMonths(m, moment()).length >= 3) return false;
+  return isCashflowComparison(m) && isCashflowTrend(m);
 }
 
 function isForecast(text) {
@@ -1362,7 +1529,13 @@ function routeCapabilityUnwrapped(input = {}) {
     && !accountChanged
     && accountsMatch(last.lastAccountId, currentAccountId);
 
-  if (continuationEligible) {
+  const namedFollowUp = collectNamedMonths(String(message || '').toLowerCase(),
+    moment(currentDate, 'YYYY-MM-DD', true).isValid() ? moment(currentDate, 'YYYY-MM-DD') : moment());
+  const breakContinuation = (namedFollowUp.length === 2 && lastCap === 'cashflow_trend')
+    || (isCashflowTrend(message) && lastCap !== 'cashflow_trend')
+    || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend');
+
+  if (continuationEligible && !breakContinuation) {
     const parsedPurchase = parsePurchaseDate(message, currentDate);
     const merged = {
       amount: slots.amount != null ? slots.amount : (lastCap === 'affordability_or_planning' && last.lastSubjectKind === 'amount'
@@ -1404,6 +1577,18 @@ function routeCapabilityUnwrapped(input = {}) {
       merged.windowKind = last.lastComparison.windowKind || null;
       if (categoryStemsIn(message).size >= 2) {
         merged.comparisonError = 'compound_comparison_unsupported';
+      }
+    }
+    if (lastCap === 'cashflow_trend' && last.lastTrend) {
+      merged.periods = last.lastTrend.periods || null;
+      merged.windowKind = last.lastTrend.windowKind || null;
+      merged.metricScope = slots.subjectKind === 'category'
+        ? 'category'
+        : (last.lastTrend.metricScope || 'spending');
+      if (categoryStemsIn(message).size >= 2) {
+        merged.trendError = 'compound_trend_unsupported';
+      } else if (slots.subjectKind === 'merchant') {
+        merged.trendError = 'merchant_trend_unsupported';
       }
     }
     return {
@@ -1479,6 +1664,25 @@ function routeCapabilityUnwrapped(input = {}) {
   }
   if (isAffordability(message)) {
     return { ...base, capability: 'affordability_or_planning', confidence: 'high', accountChanged, slots };
+  }
+  if (isCashflowTrend(message)) {
+    const trend = parseTrendPeriods(message, currentDate);
+    const trendError = slots.subjectKind === 'merchant'
+      ? 'merchant_trend_unsupported'
+      : (categoryStemsIn(message).size >= 2 ? 'compound_trend_unsupported' : (trend.error || null));
+    return {
+      ...base,
+      capability: 'cashflow_trend',
+      confidence: 'high',
+      accountChanged,
+      slots: {
+        ...slots,
+        periods: trend.periods || null,
+        windowKind: trend.windowKind || null,
+        metricScope: trendMetricScope(message, slots.subjectKind),
+        trendError,
+      },
+    };
   }
   if (isCashflowComparison(message)) {
     const comparison = parseComparisonPeriods(message, currentDate);
@@ -1683,6 +1887,7 @@ const PERSIST_CAPABILITIES = new Set([
   'financial_forecast',
   'cashflow_analysis',
   'cashflow_comparison',
+  'cashflow_trend',
   'affordability_or_planning',
   'continuation',
 ]);
@@ -1742,6 +1947,18 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       windowKind: slots.windowKind ? String(slots.windowKind).slice(0, 32) : null,
     };
   }
+  if (cap === 'cashflow_trend' && Array.isArray(slots.periods) && slots.periods.length) {
+    dialogueState.lastTrend = {
+      periods: slots.periods.slice(0, 3).map((p) => ({
+        start: String(p.start || '').slice(0, 10),
+        end: String(p.end || '').slice(0, 10),
+        label: p.label ? String(p.label).slice(0, 64) : undefined,
+      })),
+      windowKind: slots.windowKind ? String(slots.windowKind).slice(0, 32) : null,
+      metricScope: slots.metricScope ? String(slots.metricScope).slice(0, 16) : 'spending',
+      categoryFilter: slots.subjectKind === 'category' ? clipSubject(slots.subjectValue) : null,
+    };
+  }
   return dialogueState;
 }
 
@@ -1779,6 +1996,19 @@ function applyContinuationPersistenceFromEvidence(dialogueState, route, evidence
       },
     }, opts);
   }
+  if ((persistRoute.capability === 'cashflow_trend'
+      || persistRoute.parentCapability === 'cashflow_trend')
+    && facts && Array.isArray(facts.periods) && facts.periods.length) {
+    return applyContinuationPersistence(dialogueState, {
+      ...persistRoute,
+      slots: {
+        ...(persistRoute.slots || {}),
+        periods: facts.periods,
+        windowKind: facts.windowKind || evidence.windowKind || persistRoute.slots.windowKind,
+        metricScope: facts.metricScope || persistRoute.slots.metricScope,
+      },
+    }, opts);
+  }
   return applyContinuationPersistence(dialogueState, persistRoute, opts);
 }
 
@@ -1791,6 +2021,7 @@ module.exports = {
   extractLookupRequests,
   parsePeriod,
   parseComparisonPeriods,
+  parseTrendPeriods,
   parseAmount,
   parsePurchaseDate,
   shouldPersistContinuation,
@@ -1805,6 +2036,7 @@ module.exports = {
   isForecast,
   isCashflowAnalysis,
   isCashflowComparison,
+  isCashflowTrend,
   isAffordability,
   detectWantsUiAction,
   buildOpenSearchAction,
