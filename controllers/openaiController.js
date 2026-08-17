@@ -33,6 +33,13 @@ const {
 } = require('../services/keaGroundingPolicy');
 const { prefetchGrounding, buildEvidenceSystemSection, shouldForceDirectAnswer } = require('../services/keaGroundingPrefetch');
 const { allowedToolsFor } = require('../services/keaToolBundles');
+const {
+  azureChatTimeoutMs,
+  createRequestLifecycle,
+  trySendJson,
+  shouldStartNewExpensiveWork,
+} = require('../services/keaRequestBudget');
+const { runChatAzureNarration, NON_MACRO_AZURE_ERROR } = require('../services/keaAzureChat');
 const MEMORY_TTL = 604800; // 1 week
 const MAX_MEMORY = 20; // verbatim conversation window (older turns are folded into a rolling summary)
 const MAX_MESSAGE_LENGTH = 20000; // increased limit for individual message length
@@ -2787,6 +2794,11 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
         // key; a true transport retry outside this loop can still insert two rows.
         const sig = draftSignature(effectiveArgs);
         const isCreate = name === 'createTransaction';
+        // Reliability: once createTransaction is issued, client abort must not
+        // cancel it. Ambiguous cancellation after commit-start is unsafe.
+        if (isCreate && ctx.telemetry) {
+          ctx.telemetry.recordWriteFlags({ write_attempted: true });
+        }
         const isTechnicalRetry = isCreate
           ? (sig && committedSignaturesThisTurn.has(sig))
           : (sig && state.lastCommitSignature && sig === state.lastCommitSignature);
@@ -3077,6 +3089,9 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
   });
 
   for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+    if (round > 1 && ctx.lifecycle && ctx.lifecycle.clientAborted) {
+      return finish(buildToolFallbackResponse(lastToolResults), { writeResponseMode: 'client_aborted' });
+    }
     const { assistantToolMessage, toolMessages, toolResults } = await runBatch(batch);
     lastToolResults = toolResults;
     messages = enforceSize([...messages, assistantToolMessage, ...toolMessages], assistantToolMessage, toolMessages);
@@ -3091,6 +3106,15 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
       return finish(postCreateAck.content, { writeResponseMode: postCreateAck.mode });
     }
 
+    if (ctx.lifecycle && ctx.lifecycle.clientAborted) {
+      return finish(buildToolFallbackResponse(lastToolResults), { writeResponseMode: 'client_aborted' });
+    }
+
+    const azureTimeout = azureChatTimeoutMs();
+    if (ctx.lifecycle && typeof ctx.lifecycle.hasBudgetFor === 'function' && !ctx.lifecycle.hasBudgetFor(azureTimeout)) {
+      return finish(buildToolFallbackResponse(lastToolResults), { writeResponseMode: 'model_error' });
+    }
+
     const isLastRound = round === MAX_TOOL_ROUNDS;
     const convo = isLastRound ? [...messages, finalNudge] : messages;
 
@@ -3098,7 +3122,12 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
     try {
       console.log(`Tool loop round ${round}/${MAX_TOOL_ROUNDS}: calling model with`, convo.length, 'messages (tool_choice:', isLastRound ? 'none' : 'auto', ')');
       const tAzure = Date.now();
-      response = await callAzure(convo, { tools: toolsForTurn, tool_choice: isLastRound ? 'none' : 'auto', requestId: ctx.requestId });
+      response = await callAzure(convo, {
+        tools: toolsForTurn,
+        tool_choice: isLastRound ? 'none' : 'auto',
+        requestId: ctx.requestId,
+        timeout: azureTimeout,
+      });
       if (ctx.telemetry) ctx.telemetry.recordAzureCall(Date.now() - tAzure, response?.usage);
     } catch (error) {
       console.log('Tool loop model call failed:', error.message);
@@ -3124,14 +3153,18 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 // ----------------------------
 exports.chat = async (req, res) => {
   const telemetry = createKeaTelemetry({ requestId: req.id });
+  const lifecycle = createRequestLifecycle({ req, res, telemetry, requestId: req.id });
   try {
     // Redacted request log: never emit `token` or the full message/PII to logs.
     console.log('Chat endpoint called:', JSON.stringify(redactChatBodyForLog(req.body)));
     const { message, systemPrompt } = req.body;
     if (!message) {
       console.log('Chat endpoint: Missing message in request body');
-      return res.status(400).json({ error: 'Message is required', requestId: req.id });
+      trySendJson(req, res, lifecycle, 400, { error: 'Message is required', requestId: req.id });
+      return;
     }
+    lifecycle.setStage('request_received');
+    lifecycle.attachListeners();
 
     const sessionKey = buildSessionKey(req);
     const accountid = req.body.accountid;
@@ -3190,6 +3223,7 @@ exports.chat = async (req, res) => {
 
     // Load prior conversation memory
     telemetry.markStart('memory_load');
+    lifecycle.setStage('context_started');
     let history = [];
     if (hasScopedSession) {
       try {
@@ -3340,11 +3374,12 @@ exports.chat = async (req, res) => {
           'status:', resolved.error.status,
           'message:', resolved.error.message
         );
-        return res.status(502).json({
+        trySendJson(req, res, lifecycle, 502, {
           error: 'Kea account context unavailable',
           code: 'KEA_CONTEXT_UNAVAILABLE',
           requestId: req.id,
         });
+        return;
       }
     } else if (!userId || !token || !accountid) {
       console.log('Chat endpoint: Skipping account preload (missing userId, token, or accountid)');
@@ -3376,6 +3411,7 @@ exports.chat = async (req, res) => {
     const goalProposalArmsWrite = goalProposalInTranscript === true && goalNeedsReconfirmAtStart !== true;
 
     telemetry.markStart('context_build');
+    lifecycle.setStage('context_ready');
     const categoryNames = extractCategoryNames(selectedAccount);
     const phase1Route = routeCapability({
       message,
@@ -3398,10 +3434,12 @@ exports.chat = async (req, res) => {
     applyInvitationLifecycle(dialogueState, phase1Route, { accountId: accountid, categoryNames });
     applyRepeatWriteLifecycle(dialogueState, phase1Route);
     const skipAzureAffirmative = shouldSkipAzureForRoute(phase1Route);
+    lifecycle.setStage('route_resolved');
     const phase1Policy = resolveGroundingPolicy(phase1Route, { message });
     let phase1Evidence = null;
     let groundingPrefetchMs = 0;
     if (phase1Policy.groundingRequired) {
+      lifecycle.setStage('grounding_started');
       const tPrefetch = Date.now();
       phase1Evidence = await prefetchGrounding({
         trustedUserId: req.cashflowUser?.id,
@@ -3415,6 +3453,10 @@ exports.chat = async (req, res) => {
         requestId: req.id,
       });
       groundingPrefetchMs = Date.now() - tPrefetch;
+      lifecycle.setStage('grounding_finished');
+      if (phase1Evidence && phase1Evidence.macroFailureReason && typeof telemetry.setMacroFailureReason === 'function') {
+        telemetry.setMacroFailureReason(phase1Evidence.macroFailureReason);
+      }
     }
     const phase1FailSoft = isFailSoft(phase1Policy, phase1Evidence);
     applyContinuationPersistenceFromEvidence(dialogueState, phase1Route, phase1Evidence, {
@@ -3827,6 +3869,7 @@ exports.chat = async (req, res) => {
       toolsForTurn,
       telemetry,
       requestId: req.id,
+      lifecycle,
     };
     telemetry.markEnd('context_build');
     telemetry.recordBlock('currentContext', completeContext ? completeContext.length : 0);
@@ -3846,43 +3889,55 @@ exports.chat = async (req, res) => {
           ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name)
           : null,
       }) };
+    } else if (!shouldStartNewExpensiveWork(lifecycle)) {
+      telemetry.emit(req.log);
+      return;
     } else {
-      try {
-      console.log('Attempting to get response with tools...');
-      const tAzure = Date.now();
-      const responseWithTools = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: primaryToolChoice, requestId: req.id });
-      telemetry.recordAzureCall(Date.now() - tAzure, responseWithTools?.usage);
-      const choice = responseWithTools?.choices?.[0];
-      const msg = choice?.message;
-      
-      console.log('Response message structure:', {
-        hasContent: !!msg?.content,
-        hasToolCalls: !!msg?.tool_calls,
-        toolCallsLength: msg?.tool_calls?.length || 0,
-        contentLength: msg?.content?.length || 0
+      const azureTurn = await runChatAzureNarration({
+        queryFn: queryAzureOpenAI,
+        messages,
+        tools: toolsForTurn,
+        primaryToolChoice,
+        requestId: req.id,
+        telemetry,
+        lifecycle,
+        macroOwnsTurn,
+        evidence: phase1Evidence,
+        accountName: ctx.accountName,
       });
-      
-      // If the model wants to call tools, execute them — unless this turn
-      // already has complete analytical evidence (tool_choice: none).
-      if (!forceDirectAnswer && msg?.tool_calls && msg.tool_calls.length > 0) {
-        console.log('Model requested tool calls, executing...');
-        result = await executeToolCalls(messages, msg.tool_calls, ctx);
+      if (azureTurn.skipped) {
+        telemetry.emit(req.log);
+        return;
+      }
+      if (azureTurn.fallback || azureTurn.failSoft) {
+        result = { content: azureTurn.content };
+        if (azureTurn.failSoft) {
+          telemetry.recordGrounding({ response_mode: 'fail_soft' });
+        }
+      } else if (azureTurn.ok && azureTurn.data) {
+        const msg = azureTurn.data.choices && azureTurn.data.choices[0] && azureTurn.data.choices[0].message;
+        console.log('Response message structure:', {
+          hasContent: !!msg?.content,
+          hasToolCalls: !!msg?.tool_calls,
+          toolCallsLength: msg?.tool_calls?.length || 0,
+          contentLength: msg?.content?.length || 0
+        });
+        if (!forceDirectAnswer && msg?.tool_calls && msg.tool_calls.length > 0) {
+          if (!shouldStartNewExpensiveWork(lifecycle)) {
+            telemetry.emit(req.log);
+            return;
+          }
+          console.log('Model requested tool calls, executing...');
+          result = await executeToolCalls(messages, msg.tool_calls, ctx);
+        } else {
+          result = { content: msg?.content || '', raw: azureTurn.data };
+        }
       } else {
-        // No tool calls needed, use the response directly
-        result = { content: msg?.content || '', raw: responseWithTools };
-      }
-    } catch (error) {
-      console.log('Tool-based response failed, trying direct response...');
-      try {
-        const tAzure = Date.now();
-        const directResponse = await queryAzureOpenAI(messages, { tools: toolsForTurn, tool_choice: 'none', requestId: req.id });
-        telemetry.recordAzureCall(Date.now() - tAzure, directResponse?.usage);
-        const choice = directResponse?.choices?.[0];
-        result = { content: choice?.message?.content || '', raw: directResponse };
-      } catch (directError) {
-        console.log('All attempts failed, returning error message');
-        result = { content: '## ❌ Error\n\n**I apologize, but I encountered an error while processing your request. Please try again.**', raw: null, error: directError };
-      }
+        result = {
+          content: azureTurn.content || NON_MACRO_AZURE_ERROR,
+          raw: null,
+          error: azureTurn.error,
+        };
       }
     }
 
@@ -3974,6 +4029,7 @@ exports.chat = async (req, res) => {
       error: result?.error,
     };
 
+    lifecycle.setStage('persist_started');
     await persistAnswerThenRefreshSummary({
       saveHistory: async () => {
         telemetry.markStart('history_save');
@@ -3993,8 +4049,11 @@ exports.chat = async (req, res) => {
         telemetry.markEnd('dialogue_state_save');
       },
       sendResponse: () => {
-        res.json(responsePayload);
-        if (typeof telemetry.markResponseSent === 'function') telemetry.markResponseSent();
+        if (trySendJson(req, res, lifecycle, null, responsePayload)) {
+          lifecycle.markResponseStarted();
+          lifecycle.setStage('response_sent');
+          if (typeof telemetry.markResponseSent === 'function') telemetry.markResponseSent();
+        }
       },
       refreshSummary: () => refreshRollingSummary({
         userId,
@@ -4013,29 +4072,32 @@ exports.chat = async (req, res) => {
     console.error('Error stack:', error.stack);
     try { telemetry.emit(req.log); } catch (e) { /* ignore */ }
 
-    if (res.headersSent) {
+    if (!lifecycle.canSendResponse()) {
       return;
     }
     if (error.code === 'ECONNREFUSED') {
-      return res.status(503).json({ error: 'Service temporarily unavailable - Redis connection failed', requestId: req.id });
+      trySendJson(req, res, lifecycle, 503, { error: 'Service temporarily unavailable - Redis connection failed', requestId: req.id });
+      return;
     }
     if (error.response?.status === 401) {
-      return res.status(401).json({ error: 'Azure OpenAI authentication failed', requestId: req.id });
+      trySendJson(req, res, lifecycle, 401, { error: 'Azure OpenAI authentication failed', requestId: req.id });
+      return;
     }
     if (error.response?.status === 400) {
-      return res.status(400).json({ 
-        error: 'Azure OpenAI request failed', 
+      trySendJson(req, res, lifecycle, 400, {
+        error: 'Azure OpenAI request failed',
         details: error.response?.data?.error?.message || 'Invalid request format',
         suggestion: 'Check API configuration and request format',
         requestId: req.id
       });
+      return;
     }
     if (error.response?.status === 429) {
-      return res.status(429).json({ error: 'Rate limit exceeded', requestId: req.id });
+      trySendJson(req, res, lifecycle, 429, { error: 'Rate limit exceeded', requestId: req.id });
+      return;
     }
-    
-    // Generic error for other cases
-    res.status(500).json({ 
+
+    trySendJson(req, res, lifecycle, 500, {
       error: 'Internal server error',
       details: error.message || 'Unknown error occurred',
       requestId: req.id
@@ -5949,6 +6011,8 @@ exports.__testables = {
   capRecentHistory,
   persistAnswerThenRefreshSummary,
   refreshRollingSummary,
+  trySendJson,
+  createRequestLifecycle,
   ACCOUNT_SCOPED_READ_TOOLS: Array.from(ACCOUNT_SCOPED_READ_TOOLS),
   // Mirrors the write-gate condition enforced inside executeToolCalls: armed by
   // an explicit pendingConfirmation flag, a complete draft staged earlier, OR a

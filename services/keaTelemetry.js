@@ -111,6 +111,11 @@ function createKeaTelemetry({ requestId } = {}) {
     trend_window_kind: null,
   };
 
+  let lastStage = null;
+  let clientAborted = false;
+  let azureFailureReason = null;
+  let macroFailureReason = null;
+
   function markStart(name) {
     marks[name] = { t0: Date.now() };
   }
@@ -279,6 +284,22 @@ function createKeaTelemetry({ requestId } = {}) {
     response_sent_ms = Date.now() - startedAt;
   }
 
+  function setLastStage(stage) {
+    if (typeof stage === 'string' && stage) lastStage = stage;
+  }
+
+  function setClientAborted(value) {
+    if (value) clientAborted = true;
+  }
+
+  function setAzureFailureReason(reason) {
+    if (typeof reason === 'string' && reason) azureFailureReason = reason;
+  }
+
+  function setMacroFailureReason(reason) {
+    if (typeof reason === 'string' && reason) macroFailureReason = reason;
+  }
+
   function setRollingSummaryMeta({
     fullTurnMessageCount,
     overflowMessageCount,
@@ -412,6 +433,10 @@ function createKeaTelemetry({ requestId } = {}) {
       trend_ms: grounding.trend_ms || 0,
       trend_period_count: grounding.trend_period_count,
       trend_window_kind: grounding.trend_window_kind || null,
+      last_stage: lastStage,
+      client_aborted: !!clientAborted,
+      azure_failure_reason: azureFailureReason,
+      macro_failure_reason: macroFailureReason,
       estimated_block_chars: blocks,
     };
     for (const r of azureRounds) {
@@ -420,6 +445,31 @@ function createKeaTelemetry({ requestId } = {}) {
     for (const t of tools) {
       const key = `tool_${String(t.name).replace(/[^A-Za-z0-9_]/g, '_')}_ms`;
       payload[key] = (payload[key] || 0) + t.ms;
+    }
+    return payload;
+  }
+
+  function emitAbort(log, extra = {}) {
+    const payload = {
+      event: 'kea_chat_aborted',
+      requestId: extra.requestId || requestId || null,
+      elapsed_ms: extra.elapsed_ms != null ? extra.elapsed_ms : (Date.now() - startedAt),
+      last_stage: extra.last_stage || lastStage,
+      client_aborted: true,
+      response_started: extra.response_started === true,
+      effective_capability: grounding.effective_capability,
+      financial_macro: grounding.financial_macro || 'none',
+    };
+    if (write.write_attempted) payload.write_attempted = true;
+    if (write.write_committed) payload.write_committed = true;
+    try {
+      if (log && typeof log.info === 'function') {
+        log.info(payload, 'kea_chat_aborted');
+      } else {
+        console.log(JSON.stringify(payload));
+      }
+    } catch (e) {
+      console.warn('kea abort telemetry emit failed:', e.message);
     }
     return payload;
   }
@@ -453,9 +503,14 @@ function createKeaTelemetry({ requestId } = {}) {
     setSummaryFailed,
     setRollingSummaryMeta,
     markResponseSent,
+    setLastStage,
+    setClientAborted,
+    setAzureFailureReason,
+    setMacroFailureReason,
     measureSpan,
     toPayload,
     emit,
+    emitAbort,
   };
 }
 

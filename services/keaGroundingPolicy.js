@@ -49,6 +49,7 @@ const FAIL_SOFT_BY_LIMITATION = Object.freeze({
   compound_trend_unsupported: 'I can show a trend for one category at a time. Which category should I look at first?',
   merchant_trend_unsupported: 'I can show a category or overall spending trend, but not a merchant trend yet.',
   macro_error: FAIL_SOFT_TEXT,
+  macro_timeout: FAIL_SOFT_TEXT,
 });
 
 function failSoftTextFor(evidence) {

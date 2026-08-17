@@ -3,6 +3,11 @@
 const { merchantMatchKey } = require('../utils/vendorNormalize');
 const { assertAccountAccess, AccountAccessError } = require('./keaAccountAccess');
 const { getTransactionsByUserAndAccountPaginated } = require('./transactions.service');
+const {
+  macroTimeoutMs,
+  classifyMacroFailure,
+  limitationForMacroFailure,
+} = require('./keaRequestBudget');
 
 const PAGE_LIMIT = 100;
 const MAX_PAGES = 10;
@@ -27,7 +32,17 @@ function emptyEvidence(extra = {}) {
   if (Array.isArray(extra.observations)) out.observations = extra.observations;
   if (Array.isArray(extra.assumptions)) out.assumptions = extra.assumptions;
   if (extra.prefetchMeta) out.prefetchMeta = extra.prefetchMeta;
+  if (extra.macroFailureReason) out.macroFailureReason = extra.macroFailureReason;
   return out;
+}
+
+function evidenceFromMacroCatch(err, extra = {}) {
+  const reason = classifyMacroFailure(err);
+  return emptyEvidence({
+    ...extra,
+    limitations: [limitationForMacroFailure(reason)],
+    macroFailureReason: reason,
+  });
 }
 
 function snapshotDataAsOf(snapshot, currentDate) {
@@ -623,6 +638,7 @@ async function prefetchCashflowComparisonMacro({
       accountId,
       token,
       requestId,
+      timeoutMs: macroTimeoutMs(),
       body: {
         clientDate: currentDate,
         windowKind: slots.windowKind || undefined,
@@ -637,9 +653,7 @@ async function prefetchCashflowComparisonMacro({
       assumptions: [],
     });
   } catch (err) {
-    const status = err && err.response && err.response.status;
-    const limitation = status === 401 || status === 403 ? 'access_unverified' : 'macro_error';
-    return emptyEvidence({ limitations: [limitation], dataAsOf: currentDate || null });
+    return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null });
   }
 }
 
@@ -677,6 +691,7 @@ async function prefetchCashflowTrendMacro({
       accountId,
       token,
       requestId,
+      timeoutMs: macroTimeoutMs(),
       body: {
         clientDate: currentDate,
         windowKind: slots.windowKind || undefined,
@@ -691,9 +706,7 @@ async function prefetchCashflowTrendMacro({
       assumptions: [],
     });
   } catch (err) {
-    const status = err && err.response && err.response.status;
-    const limitation = status === 401 || status === 403 ? 'access_unverified' : 'macro_error';
-    return emptyEvidence({ limitations: [limitation], dataAsOf: currentDate || null });
+    return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null });
   }
 }
 
@@ -717,6 +730,7 @@ async function prefetchCashflowMacro({
       accountId,
       token,
       requestId,
+      timeoutMs: macroTimeoutMs(),
       body: {
         clientDate: currentDate,
         period: period || undefined,
@@ -729,9 +743,7 @@ async function prefetchCashflowMacro({
       assumptions: [],
     });
   } catch (err) {
-    const status = err && err.response && err.response.status;
-    const limitation = status === 401 || status === 403 ? 'access_unverified' : 'macro_error';
-    return emptyEvidence({ limitations: [limitation], period, dataAsOf: currentDate || null });
+    return evidenceFromMacroCatch(err, { period, dataAsOf: currentDate || null });
   }
 }
 
@@ -799,6 +811,7 @@ async function prefetchAffordabilityMacro({
       accountId,
       token,
       requestId,
+      timeoutMs: macroTimeoutMs(),
       body: {
         clientDate: currentDate,
         amount,
@@ -813,9 +826,7 @@ async function prefetchAffordabilityMacro({
       assumptions,
     });
   } catch (err) {
-    const status = err && err.response && err.response.status;
-    const limitation = status === 401 || status === 403 ? 'access_unverified' : 'macro_error';
-    return emptyEvidence({ limitations: [limitation], dataAsOf: currentDate || null, assumptions });
+    return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null, assumptions });
   }
 }
 
@@ -1216,4 +1227,5 @@ module.exports = {
   isHistoricalSpendQuery,
   isExcludedFromHistoricalSpend,
   shouldForceDirectAnswer,
+  evidenceFromMacroCatch,
 };
