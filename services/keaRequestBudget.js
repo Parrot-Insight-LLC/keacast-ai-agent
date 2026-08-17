@@ -81,7 +81,11 @@ function canSendHttpResponse(req, res, lifecycle) {
   if (lifecycle && lifecycle.clientAborted) return false;
   if (!res) return false;
   if (res.writableEnded || res.destroyed) return false;
-  if (req && (req.aborted === true || req.destroyed === true)) return false;
+  if (res.writable === false) return false;
+  // Do not treat req.destroyed as client-gone: after express.json() reads the
+  // POST body, Node 18+ IncomingMessage auto-destroy sets req.destroyed while
+  // the response is still writable.
+  if (req && (req.aborted === true || req.readableAborted === true)) return false;
   return true;
 }
 

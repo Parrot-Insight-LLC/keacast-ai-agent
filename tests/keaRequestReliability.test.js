@@ -497,6 +497,23 @@ async function run() {
     Object.assign(mockReqRes().res, { writableEnded: true })
   ) === false);
 
+  const bodyConsumed = mockReqRes();
+  bodyConsumed.req.destroyed = true;
+  bodyConsumed.req.aborted = false;
+  const consumedLife = createRequestLifecycle({
+    req: bodyConsumed.req,
+    res: bodyConsumed.res,
+    requestId: 'body-consumed',
+  });
+  const sentAfterBody = trySendJson(
+    bodyConsumed.req,
+    bodyConsumed.res,
+    consumedLife,
+    null,
+    { response: 'trend-ok' }
+  );
+  check('req.destroyed after body read still jsons', sentAfterBody === true && bodyConsumed.res.jsonCalls === 1);
+
   section('Abort before Azure skips the call');
   const preAzureCalls = [];
   const skipped = await callAzureOnce({
