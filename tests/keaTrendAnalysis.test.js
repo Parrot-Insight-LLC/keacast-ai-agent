@@ -7,11 +7,12 @@ const {
   applyContinuationPersistence,
 } = require('../services/keaCapabilityRouter');
 const { resolveGroundingPolicy, isFailSoft, failSoftTextFor } = require('../services/keaGroundingPolicy');
-const {
-  prefetchGrounding,
-  buildEvidenceSystemSection,
-  shouldForceDirectAnswer,
-} = require('../services/keaGroundingPrefetch');
+  const {
+    prefetchGrounding,
+    buildEvidenceSystemSection,
+    azureFacingEvidence,
+    shouldForceDirectAnswer,
+  } = require('../services/keaGroundingPrefetch');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const { createKeaTelemetry } = require('../services/keaTelemetry');
 const { functionSchemas } = require('../services/openaiService');
@@ -154,6 +155,55 @@ async function run() {
   check('trend prompt forbids extrapolation', /Do not forecast that the trend will continue/.test(trendBlock));
   check('trend prompt forbids mixed-as-increasing', /Do not call a mixed series increasing/.test(trendBlock));
   check('trend prompt uses supplied labels', /Use the supplied periods\[\]\.label/.test(trendBlock));
+  check('trend prompt requires first sentence direction', /The first sentence must state the focused metric direction/.test(trendBlock));
+  check('trend prompt mixed is not improved', /Do not say the trend improved when direction is mixed/.test(trendBlock));
+  check('trend prompt exact labels not early August', /Do not say early August, first half, or mid-August/.test(trendBlock));
+  check('trend prompt category spending-only', /Category trend is spending-only/.test(trendBlock));
+  check('trend prompt no restaurant income claim', /Do not claim there was no income related to the category/.test(trendBlock));
+
+  const mixedFacing = azureFacingEvidence({
+    status: 'ok',
+    source: ['cashflow_trend'],
+    facts: {
+      metricScope: 'net',
+      periods: [
+        { label: 'June 1–17, 2026', start: '2026-06-01', end: '2026-06-17', income: 7357.85, spending: 10829.73, net: -3471.88, transactionCount: 3 },
+        { label: 'July 1–17, 2026', start: '2026-07-01', end: '2026-07-17', income: 4798, spending: 10464.98, net: -5666.98, transactionCount: 3 },
+        { label: 'August 1–17, 2026', start: '2026-08-01', end: '2026-08-17', income: 8231.12, spending: 7924.36, net: 306.76, transactionCount: 3 },
+      ],
+      trend: {
+        income: { direction: 'mixed', firstToLast: { absolute: 873.27, percent: 11.87, baselineZero: false } },
+        spending: { direction: 'decreasing', firstToLast: { absolute: -2905.37, percent: -26.83, baselineZero: false } },
+        net: { direction: 'mixed', firstToLast: { absolute: 3778.64, percent: null, baselineZero: false, crossedZero: true, crossing: 'negative_to_positive' } },
+      },
+    },
+    observations: [{ code: 'net_mixed' }],
+  });
+  check('mixed net direction preserved in compact', mixedFacing.facts.trend.net.direction === 'mixed');
+  check('mixed firstToLast remains separate', mixedFacing.facts.trend.net.firstToLast.absolute === 3778.64);
+
+  const catFacing = azureFacingEvidence({
+    status: 'ok',
+    source: ['cashflow_trend'],
+    facts: {
+      metricScope: 'category',
+      categoryFilter: 'restaurants',
+      periods: [
+        { label: 'June 1–16, 2026', start: '2026-06-01', end: '2026-06-16', income: 0, spending: 40, net: -40, transactionCount: 2 },
+        { label: 'July 1–16, 2026', start: '2026-07-01', end: '2026-07-16', income: 0, spending: 30, net: -30, transactionCount: 2 },
+        { label: 'August 1–16, 2026', start: '2026-08-01', end: '2026-08-16', income: 0, spending: 20, net: -20, transactionCount: 2 },
+      ],
+      trend: {
+        income: { direction: 'unchanged', firstToLast: { absolute: 0, percent: 0, baselineZero: true } },
+        spending: { direction: 'decreasing', firstToLast: { absolute: -20, percent: -50, baselineZero: false } },
+        net: { direction: 'increasing', firstToLast: { absolute: 20, percent: 50, baselineZero: false } },
+      },
+    },
+    observations: [{ code: 'category_decreasing', category: 'restaurants' }],
+  });
+  check('category compact omits income zeros', catFacing.facts.periods.every((p) => p.income === undefined && p.net === undefined));
+  check('category compact keeps spending', catFacing.facts.periods[0].spending === 40);
+  check('category compact omits trend.income', catFacing.facts.trend.income === undefined);
 
   const macroPrompt = T.buildMacroAnalysisPrompt({
     currentDate: '2026-08-16',

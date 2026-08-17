@@ -1,6 +1,7 @@
 'use strict';
 
 const { check, section } = require('./harness');
+const { cashflowHttpTimeoutMs } = require('../services/keaRequestBudget');
 const { buildSelectedAccountAxiosConfig } = require('../tools/keacast_tool_layer');
 const logging = require('../middleware/logging');
 const { identityFromCashflowAuth } = require('../services/keaTelemetry');
@@ -31,7 +32,7 @@ async function run() {
     requestId: '   ',
   });
   check('blank requestId does not attach header', blank.headers['X-Request-Id'] === undefined);
-  check('blank requestId does not invent timeout', blank.timeout === undefined);
+  check('blank requestId still applies HTTP timeout', blank.timeout === cashflowHttpTimeoutMs());
 
   section('pino customProps no longer emit anon identity');
   const propsEarly = logging.buildPinoCustomProps({ id: 'req-1', body: { sessionId: 7 } });

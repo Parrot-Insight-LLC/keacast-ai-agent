@@ -9,6 +9,7 @@ const { buildCorsOptions } = require('./middleware/corsConfig');
 // Pick ONE: simple (dev) or redis (prod)
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit.redis'); 
 // const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit.simple');
+const { attachChatAbortLifecycle } = require('./middleware/chatAbortLifecycle');
 
 const openaiRoutes = require('./routes/openaiRoutes');
 const authRoutes = require('./routes/authRoutes');
@@ -24,6 +25,7 @@ app.use(requestId);
 app.use(cors(buildCorsOptions()));
 app.use(logging);
 app.use(securityHeaders);
+app.use(attachChatAbortLifecycle);
 app.use(globalLimiter);
 app.use(sensitiveLimiter);
 

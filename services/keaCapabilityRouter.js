@@ -1946,6 +1946,9 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       },
       windowKind: slots.windowKind ? String(slots.windowKind).slice(0, 32) : null,
     };
+    if (route.capability === 'cashflow_comparison' && dialogueState.lastTrend) {
+      dialogueState.lastTrend = { ...dialogueState.lastTrend, categoryFilter: null };
+    }
   }
   if (cap === 'cashflow_trend' && Array.isArray(slots.periods) && slots.periods.length) {
     dialogueState.lastTrend = {

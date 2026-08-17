@@ -3,6 +3,8 @@
 const DEFAULT_AZURE_CHAT_TIMEOUT_MS = 25000;
 const DEFAULT_MACRO_TIMEOUT_MS = 15000;
 const DEFAULT_CHAT_BUDGET_MS = 60000;
+const DEFAULT_REDIS_COMMAND_TIMEOUT_MS = 8000;
+const DEFAULT_AUTH_DB_TIMEOUT_MS = 5000;
 const FRONTEND_ABORT_MS = 120000;
 
 const STAGES = Object.freeze([
@@ -37,6 +39,24 @@ function macroTimeoutMs() {
 function chatBudgetMs() {
   const n = parseEnvMs('KEA_CHAT_BUDGET_MS', DEFAULT_CHAT_BUDGET_MS, 15000, 110000);
   return Math.min(n, FRONTEND_ABORT_MS - 10000);
+}
+
+function redisCommandTimeoutMs() {
+  return parseEnvMs('KEA_REDIS_COMMAND_TIMEOUT_MS', DEFAULT_REDIS_COMMAND_TIMEOUT_MS, 5000, 10000);
+}
+
+function cashflowHttpTimeoutMs() {
+  return macroTimeoutMs();
+}
+
+function authDbTimeoutMs() {
+  return parseEnvMs('KEA_AUTH_DB_TIMEOUT_MS', DEFAULT_AUTH_DB_TIMEOUT_MS, 1000, 15000);
+}
+
+function responseWasCompleted(res, lifecycle) {
+  if (lifecycle && lifecycle.responseStarted) return true;
+  if (res && res.headersSent === true && res.writableEnded === true) return true;
+  return false;
 }
 
 function classifyHttpFailure(err) {
@@ -128,6 +148,7 @@ function createRequestLifecycle({ req, res, telemetry, requestId } = {}) {
   let clientAborted = false;
   let abortEmitted = false;
   let responseStarted = false;
+  let listenersAttached = false;
 
   function setStage(stage) {
     if (typeof stage === 'string' && stage) lastStage = stage;
@@ -146,7 +167,7 @@ function createRequestLifecycle({ req, res, telemetry, requestId } = {}) {
 
   function emitAbortIfNeeded() {
     if (abortEmitted) return false;
-    if (res && res.writableEnded) return false;
+    if (responseWasCompleted(res, { responseStarted })) return false;
     abortEmitted = true;
     markClientAborted();
     if (telemetry && typeof telemetry.emitAbort === 'function') {
@@ -162,16 +183,14 @@ function createRequestLifecycle({ req, res, telemetry, requestId } = {}) {
   }
 
   function attachListeners() {
-    if (!req || !res) return;
+    if (listenersAttached || !req || !res) return;
+    listenersAttached = true;
     const onAbort = () => {
-      if (res.writableEnded) return;
+      if (responseWasCompleted(res, { responseStarted })) return;
       emitAbortIfNeeded();
     };
     req.on('aborted', onAbort);
-    res.on('close', () => {
-      if (res.writableEnded) return;
-      onAbort();
-    });
+    res.on('close', onAbort);
   }
 
   function markResponseStarted() {
@@ -189,6 +208,7 @@ function createRequestLifecycle({ req, res, telemetry, requestId } = {}) {
     markResponseStarted,
     emitAbortIfNeeded,
     attachListeners,
+    get listenersAttached() { return listenersAttached; },
     remainingBudget: () => remainingBudget(startedAt, budgetMs),
     hasBudgetFor: (neededMs) => hasBudgetFor(startedAt, budgetMs, neededMs),
     canSendResponse: () => canSendHttpResponse(req, res, {
@@ -201,12 +221,18 @@ module.exports = {
   DEFAULT_AZURE_CHAT_TIMEOUT_MS,
   DEFAULT_MACRO_TIMEOUT_MS,
   DEFAULT_CHAT_BUDGET_MS,
+  DEFAULT_REDIS_COMMAND_TIMEOUT_MS,
+  DEFAULT_AUTH_DB_TIMEOUT_MS,
   FRONTEND_ABORT_MS,
   STAGES,
   parseEnvMs,
   azureChatTimeoutMs,
   macroTimeoutMs,
   chatBudgetMs,
+  redisCommandTimeoutMs,
+  cashflowHttpTimeoutMs,
+  authDbTimeoutMs,
+  responseWasCompleted,
   classifyHttpFailure,
   classifyAzureFailure,
   classifyMacroFailure,

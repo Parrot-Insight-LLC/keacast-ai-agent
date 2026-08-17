@@ -113,6 +113,22 @@ async function run() {
     check('OPTIONS skips JWT verification', state.called && res.statusCode === 200);
   }
 
+  {
+    const token = jwt.sign({ username: 'a', id: 7, jti: 'jti-hang' }, SECRET, { expiresIn: '1h' });
+    const hungMw = cashflowAuth({
+      queryFn: () => new Promise(() => {}),
+      dbTimeoutMs: 40,
+    });
+    const req = mockReq({ headers: { authorization: `Bearer ${token}` } });
+    const res = mockRes();
+    const { state, next } = nextFlag();
+    const started = Date.now();
+    await hungMw(req, res, next);
+    const elapsed = Date.now() - started;
+    check('hung user_sessions lookup is bounded', elapsed < 500);
+    check('auth db timeout keeps JWT fail-soft', state.called && req.cashflowUser?.id === 7);
+  }
+
   if (prev === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prev;
 }

@@ -7,11 +7,12 @@ const {
   applyContinuationPersistence,
 } = require('../services/keaCapabilityRouter');
 const { resolveGroundingPolicy, isFailSoft, failSoftTextFor } = require('../services/keaGroundingPolicy');
-const {
-  prefetchGrounding,
-  buildEvidenceSystemSection,
-  shouldForceDirectAnswer,
-} = require('../services/keaGroundingPrefetch');
+  const {
+    prefetchGrounding,
+    buildEvidenceSystemSection,
+    azureFacingEvidence,
+    shouldForceDirectAnswer,
+  } = require('../services/keaGroundingPrefetch');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const { createKeaTelemetry } = require('../services/keaTelemetry');
 const { functionSchemas } = require('../services/openaiService');
@@ -68,6 +69,7 @@ function sampleComparisonResult(body = {}) {
       { code: 'spending_decreased' },
       { code: 'income_increased' },
       { code: 'net_improved' },
+      { code: 'largest_category_decrease', category: 'Retail', absolute: -250 },
     ],
     limitations: [],
     dataAsOf: '2026-08-16T12:00:00.000Z',
@@ -185,7 +187,7 @@ async function run() {
   check('comparison prompt forbids own percentages', /Do not calculate your own percentages/.test(cmpBlock));
   check('comparison prompt forbids full-month mislabel', /not full months/.test(cmpBlock));
   check('comparison prompt forbids all accounts', /Do not say across your accounts/.test(cmpBlock));
-  check('comparison prompt forbids subjective words', /Do not say healthy/.test(cmpBlock));
+  check('comparison prompt forbids subjective words', /healthy, unhealthy/.test(cmpBlock) && /Do not say significant/.test(cmpBlock));
   check('comparison prompt null percent not 0%', /do not say 0%/.test(cmpBlock));
   check('comparison prompt forbids causal because/due to', /Do not say because, due to, driven by, or primarily because/.test(cmpBlock));
   check('comparison prompt forbids unsupported proportional cause', /Do not claim a larger proportional or percentage change caused the net result/.test(cmpBlock));
@@ -193,6 +195,43 @@ async function run() {
   check('comparison prompt suppresses net percent on crossedZero', /If changes\.net\.crossedZero is true[\s\S]*Do not narrate a net percentage/.test(cmpBlock));
   check('comparison uses compact macro identity when assembled', !/Always use the word "disposable"/.test(cmpBlock));
   check('comparison evidence has no transactions array', !/"transactions"\s*:/.test(cmpBlock));
+  check('unfiltered comparison omits categoryChanges', !/"categoryChanges"/.test(cmpBlock));
+  check('unfiltered comparison omits Retail subject', !/"Retail"/.test(cmpBlock));
+  check('unfiltered comparison keeps overall net', /"net":800/.test(cmpBlock.replace(/\s+/g, '')) || /"net": 800/.test(cmpBlock));
+  check('unfiltered comparison prompt forbids category subject', /Do not treat categoryChanges/.test(cmpBlock));
+  check('comparison prompt bans significant/financial position', /Do not say significant, financial position/.test(cmpBlock));
+
+  const restaurantCmp = route('Compare restaurant spending in July and June');
+  check('restaurant July/June is comparison', restaurantCmp.capability === 'cashflow_comparison');
+  check('restaurant July/June has category subject', restaurantCmp.slots.subjectKind === 'category');
+  const restEv = await prefetchGrounding({
+    trustedUserId: 5,
+    accountId: 10,
+    currentDate: '2026-08-16',
+    policy: resolveGroundingPolicy(restaurantCmp, { message: 'Compare restaurant spending in July and June' }),
+    route: restaurantCmp,
+    token: 'jwt',
+    fetchPeriodComparison: async ({ body }) => sampleComparisonResult({
+      ...body,
+      categoryFilter: body.categoryFilter,
+    }),
+    fetchCashflowAnalysis: async () => { throw new Error('must not run analysis'); },
+    fetchAffordabilityAnalysis: async () => { throw new Error('must not run affordability'); },
+  });
+  const restFacing = azureFacingEvidence(restEv);
+  check('filtered comparison keeps categoryFilter', restFacing.facts.categoryFilter === 'restaurant' || restFacing.facts.categoryFilter === 'restaurants');
+  check('filtered comparison may keep categoryChanges', !!restFacing.facts.categoryChanges);
+
+  const trendThenRest = T.emptyDialogueState();
+  applyContinuationPersistence(trendThenRest, route('How did my spending trend from May through July?'), { accountId: '10', failSoft: false });
+  const restFollow = route('What about restaurants?', { dialogueState: trendThenRest, accountId: '10' });
+  applyContinuationPersistence(trendThenRest, restFollow, { accountId: '10', failSoft: false });
+  check('restaurant follow-up stored categoryFilter', trendThenRest.lastTrend && trendThenRest.lastTrend.categoryFilter != null);
+  const freshJulyJune = route('Compare July and June.', { dialogueState: trendThenRest, accountId: '10' });
+  check('fresh July/June after restaurants is comparison', freshJulyJune.capability === 'cashflow_comparison' && freshJulyJune.continuationUsed !== true);
+  check('fresh July/June has no categoryFilter slot', freshJulyJune.slots.subjectKind !== 'category');
+  applyContinuationPersistence(trendThenRest, freshJulyJune, { accountId: '10', failSoft: false });
+  check('fresh comparison clears lastTrend.categoryFilter', trendThenRest.lastTrend.categoryFilter == null);
 
   const crossedEv = {
     ...cmpEv,

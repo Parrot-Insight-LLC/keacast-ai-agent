@@ -9,9 +9,15 @@ const {
   azureChatTimeoutMs,
   macroTimeoutMs,
   chatBudgetMs,
+  redisCommandTimeoutMs,
+  cashflowHttpTimeoutMs,
+  authDbTimeoutMs,
+  responseWasCompleted,
   DEFAULT_AZURE_CHAT_TIMEOUT_MS,
   DEFAULT_MACRO_TIMEOUT_MS,
   DEFAULT_CHAT_BUDGET_MS,
+  DEFAULT_REDIS_COMMAND_TIMEOUT_MS,
+  DEFAULT_AUTH_DB_TIMEOUT_MS,
   FRONTEND_ABORT_MS,
   classifyHttpFailure,
   classifyAzureFailure,
@@ -53,6 +59,7 @@ function mockReqRes({ aborted = false, writableEnded = false, destroyed = false 
   req.id = 'req-1';
   res.writableEnded = writableEnded;
   res.destroyed = destroyed;
+  res.headersSent = false;
   res.statusCode = null;
   res.body = null;
   res.jsonCalls = 0;
@@ -63,6 +70,7 @@ function mockReqRes({ aborted = false, writableEnded = false, destroyed = false 
   res.json = function json(body) {
     this.jsonCalls += 1;
     this.body = body;
+    this.headersSent = true;
     this.writableEnded = true;
     return this;
   };
@@ -249,6 +257,12 @@ async function run() {
   check('azure default 25000', azureChatTimeoutMs() === DEFAULT_AZURE_CHAT_TIMEOUT_MS);
   check('macro default 15000', macroTimeoutMs() === DEFAULT_MACRO_TIMEOUT_MS);
   check('chat budget default 60000', chatBudgetMs() === DEFAULT_CHAT_BUDGET_MS);
+  check('redis command timeout default 8000', redisCommandTimeoutMs() === DEFAULT_REDIS_COMMAND_TIMEOUT_MS);
+  check('redis command timeout under frontend', redisCommandTimeoutMs() <= 10000 && redisCommandTimeoutMs() >= 5000);
+  check('redis command timeout cannot reach 120s', redisCommandTimeoutMs() * 2 < FRONTEND_ABORT_MS);
+  check('cashflow HTTP timeout is macro timeout', cashflowHttpTimeoutMs() === macroTimeoutMs());
+  check('auth db timeout default 5000', authDbTimeoutMs() === DEFAULT_AUTH_DB_TIMEOUT_MS);
+  check('auth db timeout under frontend', authDbTimeoutMs() < FRONTEND_ABORT_MS);
   check('azure default under frontend', DEFAULT_AZURE_CHAT_TIMEOUT_MS < FRONTEND_ABORT_MS);
   check('worst-case Azure under frontend', DEFAULT_AZURE_CHAT_TIMEOUT_MS * 2 < FRONTEND_ABORT_MS);
   check('worst-case Azure under budget', DEFAULT_AZURE_CHAT_TIMEOUT_MS * 2 < DEFAULT_CHAT_BUDGET_MS);
@@ -479,6 +493,56 @@ async function run() {
   okPair.res.json({ response: 'ok' });
   okPair.res.emit('close');
   check('normal finish has no kea_chat_aborted', okLogs.every((p) => p.event !== 'kea_chat_aborted'));
+  check('completed response with headersSent+ended', responseWasCompleted(okPair.res, okLife) === true);
+
+  section('Abnormal close still emits abort');
+  const ghostLogs = [];
+  const ghostTel = createKeaTelemetry({ requestId: 'abc-ghost' });
+  const ghost = mockReqRes();
+  ghost.res.writableEnded = true;
+  ghost.res.headersSent = false;
+  ghost.res.statusCode = null;
+  ghost.req.log = { info: (payload) => ghostLogs.push(payload) };
+  const ghostLife = createRequestLifecycle({ req: ghost.req, res: ghost.res, telemetry: ghostTel, requestId: 'abc-ghost' });
+  ghostLife.attachListeners();
+  ghost.res.emit('close');
+  check('writableEnded without headersSent emits abort', ghostLogs.some((p) => p.event === 'kea_chat_aborted'));
+
+  section('Early abort middleware');
+  const { attachChatAbortLifecycle, isChatPost } = require('../middleware/chatAbortLifecycle');
+  check('isChatPost true for chat POST', isChatPost({ method: 'POST', originalUrl: '/api/agent/chat' }) === true);
+  check('isChatPost false for GET', isChatPost({ method: 'GET', originalUrl: '/api/agent/chat' }) === false);
+  const earlyReq = new EventEmitter();
+  const earlyRes = new EventEmitter();
+  earlyReq.method = 'POST';
+  earlyReq.originalUrl = '/api/agent/chat';
+  earlyReq.id = 'early-1';
+  earlyReq.log = { info: (payload) => { earlyReq._abort = payload; } };
+  earlyRes.writableEnded = false;
+  earlyRes.headersSent = false;
+  let earlyNext = false;
+  attachChatAbortLifecycle(earlyReq, earlyRes, () => { earlyNext = true; });
+  check('early middleware attaches lifecycle', earlyNext && !!earlyReq.keaLifecycle && !!earlyReq.keaTelemetry);
+  earlyRes.emit('close');
+  check('abort before handler emits kea_chat_aborted', earlyReq._abort && earlyReq._abort.event === 'kea_chat_aborted');
+
+  const redis = require('../services/redisService');
+  check('shared redis has commandTimeout', redis.options.commandTimeout === redisCommandTimeoutMs());
+  const { withTimeout } = require('../middleware/cashflowAuth');
+  const hangStarted = Date.now();
+  let hangRejected = false;
+  try {
+    await withTimeout(new Promise(() => {}), 40, 'hung redis GET');
+  } catch (err) {
+    hangRejected = err && err.code === 'ETIMEDOUT';
+  }
+  check('hung Redis-style GET rejects inside bound', hangRejected && Date.now() - hangStarted < 500);
+  check('Redis commandTimeout cannot reach frontend 120s', redisCommandTimeoutMs() < FRONTEND_ABORT_MS);
+
+  const toolSrc = fs.readFileSync(path.join(__dirname, '../tools/keacast_tool_layer.js'), 'utf8');
+  check('AUTH_HEADER sets timeout', /timeout:\s*cashflowHttpTimeoutMs\(\)/.test(toolSrc));
+  check('recallFacts uses AUTH_HEADER', /async function recallFacts[\s\S]{0,600}AUTH_HEADER\(token\)/.test(toolSrc));
+  check('buildSelectedAccountAxiosConfig always sets timeout', /config\.timeout = Number\.isFinite\(timeoutMs\) \? timeoutMs : cashflowHttpTimeoutMs\(\)/.test(toolSrc));
 
   section('No write to destroyed socket');
   const dead = mockReqRes({ aborted: true });

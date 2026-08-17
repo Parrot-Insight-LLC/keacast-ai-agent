@@ -1,6 +1,7 @@
 'use strict';
 
 const jwt = require('jsonwebtoken');
+const { authDbTimeoutMs } = require('../services/keaRequestBudget');
 
 /**
  * Verify a cashflow-backend user session JWT.
@@ -38,11 +39,30 @@ function extractSessionUserId(payload) {
   return null;
 }
 
-async function isCashflowSessionActive(jti, userId, queryFn) {
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`${label} timed out after ${ms}ms`);
+      err.code = 'ETIMEDOUT';
+      reject(err);
+    }, ms);
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function isCashflowSessionActive(jti, userId, queryFn, timeoutMs) {
   if (!jti || userId == null) return false;
-  const rows = await queryFn(
-    'SELECT id FROM user_sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL LIMIT 1',
-    [jti, userId]
+  const boundMs = Number.isFinite(timeoutMs) ? timeoutMs : authDbTimeoutMs();
+  const rows = await withTimeout(
+    queryFn(
+      'SELECT id FROM user_sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL LIMIT 1',
+      [jti, userId]
+    ),
+    boundMs,
+    'cashflowAuth user_sessions'
   );
   return !!(rows && rows.length);
 }
@@ -102,7 +122,12 @@ function cashflowAuth(options = {}) {
     if (payload.jti) {
       try {
         const queryFn = injectedQuery || require('../services/db').query;
-        const active = await isCashflowSessionActive(payload.jti, userId, queryFn);
+        const active = await isCashflowSessionActive(
+          payload.jti,
+          userId,
+          queryFn,
+          options.dbTimeoutMs
+        );
         if (!active) {
           return res.status(401).json({
             error: 'Session revoked or expired. Please log in again.',
@@ -133,4 +158,5 @@ module.exports = {
   extractSessionUserId,
   getCashflowJwtSecret,
   isCashflowSessionActive,
+  withTimeout,
 };

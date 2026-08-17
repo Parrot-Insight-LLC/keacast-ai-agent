@@ -3152,8 +3152,8 @@ async function executeToolCalls(originalMessages, toolCalls, ctx) {
 // 🧠 Chat with memory + tools (functionMap.js)
 // ----------------------------
 exports.chat = async (req, res) => {
-  const telemetry = createKeaTelemetry({ requestId: req.id });
-  const lifecycle = createRequestLifecycle({ req, res, telemetry, requestId: req.id });
+  const telemetry = req.keaTelemetry || createKeaTelemetry({ requestId: req.id });
+  const lifecycle = req.keaLifecycle || createRequestLifecycle({ req, res, telemetry, requestId: req.id });
   try {
     // Redacted request log: never emit `token` or the full message/PII to logs.
     console.log('Chat endpoint called:', JSON.stringify(redactChatBodyForLog(req.body)));

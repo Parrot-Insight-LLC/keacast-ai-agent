@@ -23,8 +23,12 @@ function wrapLimiter(instance) {
       await instance.consume(key, 1);
       next();
     } catch (rej) {
-      res.set('Retry-After', String(Math.ceil(rej.msBeforeNext / 1000)));
-      return res.status(429).json({ error: 'Too many requests' });
+      if (rej && typeof rej.msBeforeNext === 'number') {
+        res.set('Retry-After', String(Math.ceil(rej.msBeforeNext / 1000)));
+        return res.status(429).json({ error: 'Too many requests' });
+      }
+      console.warn('Rate limiter store failed:', rej && rej.message);
+      return res.status(503).json({ error: 'Service temporarily unavailable' });
     }
   };
 }

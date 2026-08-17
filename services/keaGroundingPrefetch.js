@@ -647,11 +647,15 @@ async function prefetchCashflowComparisonMacro({
         categoryFilter: slots.subjectKind === 'category' ? slots.subjectValue : undefined,
       },
     });
-    return evidenceFromMacroResult(result, {
+    const evidence = evidenceFromMacroResult(result, {
       source: 'cashflow_period_comparison',
       currentDate,
       assumptions: [],
     });
+    if (slots.subjectKind === 'category' && slots.subjectValue && evidence.facts) {
+      evidence.facts.categoryFilter = slots.subjectValue;
+    }
+    return evidence;
   } catch (err) {
     return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null });
   }
@@ -700,11 +704,16 @@ async function prefetchCashflowTrendMacro({
         categoryFilter: slots.subjectKind === 'category' ? slots.subjectValue : undefined,
       },
     });
-    return evidenceFromMacroResult(result, {
+    const evidence = evidenceFromMacroResult(result, {
       source: 'cashflow_trend',
       currentDate,
       assumptions: [],
     });
+    if (slots.subjectKind === 'category' && slots.subjectValue && evidence.facts) {
+      evidence.facts.categoryFilter = slots.subjectValue;
+      if (!evidence.facts.metricScope) evidence.facts.metricScope = 'category';
+    }
+    return evidence;
   } catch (err) {
     return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null });
   }
@@ -1056,6 +1065,37 @@ function azureFacingEvidence(evidence) {
       delete compact.facts.negativeBalanceRisk;
     }
   }
+  if (Array.isArray(compact.source) && compact.source.includes('cashflow_period_comparison') && compact.facts) {
+    if (!compact.facts.categoryFilter) {
+      delete compact.facts.categoryChanges;
+      if (Array.isArray(compact.observations)) {
+        compact.observations = compact.observations.filter((row) => {
+          const code = row && row.code;
+          return code !== 'largest_category_increase' && code !== 'largest_category_decrease';
+        });
+      }
+    }
+  }
+  if (Array.isArray(compact.source) && compact.source.includes('cashflow_trend') && compact.facts) {
+    const categoryScope = compact.facts.metricScope === 'category' || !!compact.facts.categoryFilter;
+    if (categoryScope && Array.isArray(compact.facts.periods)) {
+      compact.facts.periods = compact.facts.periods.map((period) => {
+        if (!period || typeof period !== 'object') return period;
+        return {
+          label: period.label,
+          start: period.start,
+          end: period.end,
+          spending: period.spending,
+          transactionCount: period.transactionCount,
+        };
+      });
+      if (compact.facts.trend && typeof compact.facts.trend === 'object') {
+        compact.facts.trend = {
+          spending: compact.facts.trend.spending,
+        };
+      }
+    }
+  }
   return compact;
 }
 
@@ -1160,19 +1200,23 @@ function buildEvidenceSystemSection(evidence) {
       'These figures are posted actual transactions only. Do not introduce balances, remaining forecast, savingsPotential, or goal projections.',
       'Selected account only. Do not imply all accounts or another institution.',
       'If observations include both_periods_empty, say there were no posted transactions in either period. Do not invent an increase or decrease.',
-      'Use descriptive language only. Do not say healthy, unhealthy, good, bad, comfortable, safe, concerning, better financial health, or overspending.',
+      'Lead with period income, spending, and net. Do not treat categoryChanges or largest_category_* as the comparison subject unless facts.categoryFilter is present.',
+      'Use descriptive language only. Do not say significant, financial position, financial health, healthy, unhealthy, good, bad, strong, weak, comfortable, safe, concerning, better financial health, or overspending.',
     ].join(' ')
     : '';
   const trendInstruction = compact.source.includes('cashflow_trend')
     ? [
-      'Use the supplied periods[].label values when naming windows. Never say periodA, periodB, period1, or window3.',
-      'Use trend.*.direction exactly. Do not call a mixed series increasing just because first-to-last is positive.',
+      'Use the supplied periods[].label values when naming windows. Never say periodA, periodB, period1, or window3. Copy labels exactly. Do not say early August, first half, or mid-August.',
+      'The first sentence must state the focused metric direction: spending uses trend.spending.direction, income uses trend.income.direction, net uses trend.net.direction, category uses trend.spending.direction.',
+      'TREND DIRECTION is not FIRST-TO-LAST. If direction is mixed, say mixed. Do not say the trend improved when direction is mixed. firstToLast is a separate supplied fact.',
+      'Use trend.*.direction exactly. Do not recalculate direction from the period values. Do not call a mixed series increasing just because first-to-last is positive.',
       'Use trend.*.firstToLast.absolute and firstToLast.percent. Do not calculate percentages. If percent is null, do not narrate a percentage.',
       'If firstToLast.crossedZero is true, describe the surplus/deficit move using supplied period nets and the absolute change only.',
       'Respect windowKind. matched_elapsed windows are not full months. Do not call August 1-16 "August".',
       'These figures are posted actual transactions only. Do not forecast that the trend will continue. Do not mention balances, remaining forecast, or savingsPotential.',
       'Do not infer causes. Do not say because, due to, driven by, statistically significant, accelerating, momentum, or volatility.',
       'Selected account only. Use descriptive language only. Do not say healthy, unhealthy, good, bad, comfortable, safe, concerning, or overspending.',
+      'Category trend is spending-only. Do not claim there was no income related to the category.',
       'If observations include all_periods_empty, say there were no posted transactions in those windows.',
     ].join(' ')
     : '';

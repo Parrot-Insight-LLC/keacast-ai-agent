@@ -3,6 +3,7 @@
 
 const axios = require('axios');
 const moment = require('moment');
+const { cashflowHttpTimeoutMs } = require('../services/keaRequestBudget');
 
 // Normalize base URL to avoid double slashes when composing paths
 const RAW_BASE_URL = process.env.CASHFLOW_API_URL || 'https://cashflow-backend-production.herokuapp.com';
@@ -11,8 +12,8 @@ const BASE_URL = RAW_BASE_URL.replace(/\/+$/, '');
 // Only attach Authorization header when token is provided
 const AUTH_HEADER = (token) => (
   token
-    ? { headers: { Authorization: `Bearer ${token}` } }
-    : { headers: {} }
+    ? { headers: { Authorization: `Bearer ${token}` }, timeout: cashflowHttpTimeoutMs() }
+    : { headers: {}, timeout: cashflowHttpTimeoutMs() }
 );
 
 // --------------------------------------
@@ -78,7 +79,7 @@ async function getSelectedKeacastAccounts({ userId, token, body }) {
 // account without paying the multi-account cost of getSelectedKeacastAccounts.
 function buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId } = {}) {
   const config = AUTH_HEADER(token);
-  if (Number.isFinite(timeoutMs)) config.timeout = timeoutMs;
+  config.timeout = Number.isFinite(timeoutMs) ? timeoutMs : cashflowHttpTimeoutMs();
   if (requestId != null && String(requestId).trim() !== '') {
     config.headers['X-Request-Id'] = String(requestId).trim();
   }
