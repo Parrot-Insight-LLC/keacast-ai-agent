@@ -23,6 +23,7 @@ const {
   buildConversationClarifyText,
 } = require('../services/keaConversationContinuation');
 const { TRANSITION } = require('../services/keaConversationStateResolver');
+const { resolveGroundingPolicy } = require('../services/keaGroundingPolicy');
 const { __testables: T } = require('../controllers/openaiController');
 const { shiftCalendarWeek } = require('../services/keaUpcomingPeriod');
 const { createKeaTelemetry } = require('../services/keaTelemetry');
@@ -167,6 +168,49 @@ async function run() {
   const shifted = shiftCalendarWeek({ start: '2026-08-23', end: '2026-08-29', relation: 'next_week' });
   check('week after uses shiftCalendarWeek', up.capsule.activeThread.period.start === shifted.start
     && up.capsule.activeThread.period.end === shifted.end);
+
+  section('3A.4 unsupported financial follow-up escape');
+
+  const upUnsup = T.emptyDialogueState();
+  persist(upUnsup, route('What bills are due next week?'));
+  const storedStart = upUnsup.capsule.activeThread.period.start;
+  const storedEnd = upUnsup.capsule.activeThread.period.end;
+  const largestOnUp = route('Which is the largest?', { dialogueState: upUnsup });
+  check('upcoming largest is conversation_clarify', largestOnUp.capability === 'conversation_clarify'
+    && largestOnUp.continuationUsed === false
+    && largestOnUp.capsuleTransition === TRANSITION.UNSUPPORTED_FOLLOWUP
+    && largestOnUp.capsuleClear !== true
+    && largestOnUp.clarifyReason === 'unsupported_thread_followup');
+  check('upcoming largest skips Azure', shouldSkipAzureForRoute(largestOnUp) === true);
+  const largestGrounding = resolveGroundingPolicy(largestOnUp, { message: 'Which is the largest?' });
+  check('upcoming largest has no Azure grounding path', largestGrounding.grounding === 'NONE'
+    && largestGrounding.effectiveCapability === 'conversation_clarify');
+  const largestText = buildDeterministicAffirmativeText(largestOnUp, upUnsup, { message: 'Which is the largest?' });
+  check('upcoming largest clarify is not ranking', typeof largestText === 'string'
+    && /isn'?t supported/i.test(largestText)
+    && !/rank/i.test(largestText));
+  persist(upUnsup, largestOnUp);
+  check('unsupported follow-up preserves upcoming capsule',
+    upUnsup.capsule.activeThread
+    && upUnsup.capsule.activeThread.kind === THREAD_KINDS.UPCOMING
+    && upUnsup.capsule.activeThread.period.start === storedStart
+    && upUnsup.capsule.activeThread.period.end === storedEnd);
+  const totalAfterUnsupported = route('How much total?', { dialogueState: upUnsup });
+  check('total after unsupported is upcoming continuation',
+    totalAfterUnsupported.capability === 'continuation'
+    && totalAfterUnsupported.parentCapability === 'cashflow_upcoming'
+    && totalAfterUnsupported.continuationUsed === true
+    && totalAfterUnsupported.slots.period.start === storedStart
+    && totalAfterUnsupported.slots.period.end === storedEnd);
+
+  const recUnsup = T.emptyDialogueState();
+  persist(recUnsup, route('What recurring expenses do I have?'));
+  const recLargest = route('Which is the largest?', { dialogueState: recUnsup });
+  check('recurring largest still continues', recLargest.capability === 'continuation'
+    && recLargest.parentCapability === 'cashflow_recurring'
+    && recLargest.continuationUsed === true
+    && recLargest.slots.rankingMode === 'largest'
+    && recLargest.capsuleTransition === TRANSITION.REFINED);
 
   section('3A.4 slot parity — income horizon');
 

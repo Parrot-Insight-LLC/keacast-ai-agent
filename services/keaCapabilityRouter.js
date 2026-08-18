@@ -2059,12 +2059,20 @@ function routeCapabilityUnwrapped(input = {}) {
         capsuleClear: false,
       };
     }
+    return {
+      ...base,
+      capability: 'conversation_clarify',
+      confidence: 'high',
+      continuationUsed: false,
+      capsuleClear: false,
+      capsuleTransition: TRANSITION.UNSUPPORTED_FOLLOWUP,
+      accountChanged: false,
+      clarifyReason: applied.error || 'unsupported_thread_followup',
+      message,
+    };
   }
 
-  if (resolved.resolution === RESOLUTION.CLARIFY
-    && (resolved.reason === 'no_active_thread'
-      || resolved.reason === 'invalid_capsule'
-      || resolved.reason === 'account_mismatch')) {
+  if (resolved.resolution === RESOLUTION.CLARIFY) {
     return {
       ...base,
       capability: 'conversation_clarify',

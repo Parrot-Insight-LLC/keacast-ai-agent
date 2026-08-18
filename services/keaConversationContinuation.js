@@ -405,6 +405,10 @@ function buildConversationClarifyText(route, message) {
   if (route && route.accountChanged) {
     return 'I need a period or financial view for this account. What should I look at?';
   }
+  if (route && (route.clarifyReason === 'unsupported_thread_followup'
+    || route.capsuleTransition === 'unsupported_followup')) {
+    return 'I can keep using this current view, but that refinement isn\'t supported. What would you like to know about it?';
+  }
   if (/how much total|what(?:'|’)?s the total|^the total\b/.test(m)) {
     return 'Which period or financial view would you like the total for?';
   }

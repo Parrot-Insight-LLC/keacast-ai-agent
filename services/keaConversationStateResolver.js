@@ -245,7 +245,7 @@ function resolveConversationState(input = {}) {
   if (threadEligible && shaped && !followUp && freshCap === 'unknown') {
     return emptyResult({
       resolution: RESOLUTION.CLARIFY,
-      effectiveCapability: 'unknown',
+      effectiveCapability: 'conversation_clarify',
       continuationUsed: false,
       transition: TRANSITION.UNSUPPORTED_FOLLOWUP,
       activeThreadKind: threadKind,

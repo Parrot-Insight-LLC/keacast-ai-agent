@@ -277,6 +277,14 @@ async function run() {
   assertParity('upcoming what about income', 'What about income?', upState);
   assertParity('upcoming week after', 'What about the week after?', upState);
   check('week after action', shadow('What about the week after?', upState).resolved.continuationAction === 'upcoming_week_after');
+  assertParity('upcoming which is largest is unsupported followup', 'Which is the largest?', upState);
+  const upLargest = shadow('Which is the largest?', upState);
+  check('upcoming largest is typed clarify', upLargest.resolved.resolution === RESOLUTION.CLARIFY
+    && upLargest.resolved.effectiveCapability === 'conversation_clarify'
+    && upLargest.resolved.transition === TRANSITION.UNSUPPORTED_FOLLOWUP
+    && upLargest.resolved.reason === 'unsupported_thread_followup'
+    && upLargest.resolved.continuationUsed === false
+    && upLargest.resolved.activeThreadKind === THREAD_KINDS.UPCOMING);
   assertParity('upcoming to recurring', 'What recurring expenses do I have?', upState);
   assertParity('upcoming to comparison', 'Compare July and June', upState);
   assertParity('upcoming will I go negative is fresh analysis', 'Will I go negative?', upState);
