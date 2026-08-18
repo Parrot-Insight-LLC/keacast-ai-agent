@@ -16,6 +16,7 @@ const {
 } = require('./keaEvidenceTelemetry');
 
 const LEDGER_PROMPT_ENV_KEY = 'USE_EVIDENCE_LEDGER_PROMPT';
+const LOOKUP_PROMPT_ENV_KEY = 'USE_LOOKUP_EVIDENCE_LEDGER_PROMPT';
 const FLAG_OFF = /^(0|false|off|no)$/i;
 const FLAG_ON = /^(1|true|on|yes)$/i;
 
@@ -49,12 +50,36 @@ function isEvidenceRollbackActive() {
   return parseLedgerPromptFlag(process.env[LEDGER_PROMPT_ENV_KEY]).rollbackActive;
 }
 
+function isLookupLedgerPromptEnabled() {
+  return parseLedgerPromptFlag(process.env[LOOKUP_PROMPT_ENV_KEY]).enabled;
+}
+
+function isLookupEvidenceRollbackActive() {
+  return parseLedgerPromptFlag(process.env[LOOKUP_PROMPT_ENV_KEY]).rollbackActive;
+}
+
+function firstEvidenceSource(evidence) {
+  return evidence && Array.isArray(evidence.source) ? evidence.source[0] : null;
+}
+
+function isEligibleLookupCutover({ capability, evidence } = {}) {
+  return capability === 'financial_lookup' && firstEvidenceSource(evidence) === 'user_transactions';
+}
+
+function isSnapshotBackedLookup({ capability, evidence } = {}) {
+  return capability === 'financial_lookup' && firstEvidenceSource(evidence) === 'kea_snapshot';
+}
+
 function isApprovedMacroCapability(capability) {
   return APPROVED_SET.has(capability);
 }
 
 function shouldUseLedgerPrompt(capability) {
   return isLedgerPromptEnabled() && isApprovedMacroCapability(capability);
+}
+
+function shouldUseLookupLedgerPrompt({ capability, evidence } = {}) {
+  return isLookupLedgerPromptEnabled() && isEligibleLookupCutover({ capability, evidence });
 }
 
 function resolveCutoverCapability({ capability, route, evidence } = {}) {
@@ -103,6 +128,9 @@ function logProjectionFailure(reason, capability) {
 function withTelemetry(result, extra = {}) {
   let telemetry;
   try {
+    const rollbackActive = extra.rollbackActive != null
+      ? extra.rollbackActive === true
+      : isEvidenceRollbackActive();
     telemetry = deriveFromLedgerProjection({
       mode: result.mode,
       ok: result.ok,
@@ -112,13 +140,183 @@ function withTelemetry(result, extra = {}) {
       ledger: extra.ledger || null,
       promptEvidence: result.promptEvidence || extra.promptEvidence || null,
       sourceKind: extra.sourceKind || null,
-      rollbackActive: isEvidenceRollbackActive(),
+      rollbackActive,
     });
   } catch (err) {
     telemetry = emptyEvidenceTelemetry();
   }
   result.telemetry = telemetry;
   return result;
+}
+
+function projectLookupLedgerView(input = {}) {
+  const evidence = input.evidence;
+  if (!evidence || typeof evidence !== 'object') {
+    return { ok: false, reason: 'missing_evidence', ledger: null, view: null, promptable: false };
+  }
+  const built = buildEvidenceLedger({
+    capability: 'financial_lookup',
+    evidence,
+    route: input.route || null,
+    accountContext: input.accountContext || null,
+    responseMode: input.responseMode || null,
+  });
+  if (!built.ok || !built.ledger) {
+    return {
+      ok: false,
+      reason: built.reason === 'validation_failed' ? 'ledger_invalid' : (built.reason || 'ledger_failed'),
+      ledger: null,
+      view: null,
+      promptable: false,
+    };
+  }
+  if (built.ledger.status === 'unavailable' || built.ledger.status === 'unsupported') {
+    return {
+      ok: true,
+      reason: built.ledger.status,
+      ledger: built.ledger,
+      view: null,
+      promptable: false,
+    };
+  }
+  const view = toPromptEvidence(built.ledger, { responseMode: input.responseMode || null });
+  if (!view.ok || !view.promptable || !view.promptEvidence) {
+    const mapped = view.reason === 'validation_failed' || view.reason === 'invalid_ledger'
+      ? 'prompt_view_invalid'
+      : (view.reason || 'prompt_view_failed');
+    return {
+      ok: false,
+      reason: mapped,
+      ledger: built.ledger,
+      view,
+      promptable: false,
+    };
+  }
+  return {
+    ok: true,
+    reason: null,
+    ledger: built.ledger,
+    view,
+    promptable: true,
+  };
+}
+
+function projectLookupEvidenceUnsafe(input = {}) {
+  const capability = input.capability || 'financial_lookup';
+  const evidence = input.evidence;
+  const sourceKind = firstEvidenceSource(evidence) || null;
+
+  if (!isEligibleLookupCutover({ capability, evidence })) {
+    return withTelemetry({
+      ok: true,
+      mode: 'legacy',
+      promptable: true,
+      failSoft: false,
+      block: null,
+      reason: 'legacy',
+      capability,
+    }, {
+      rollbackActive: false,
+      sourceKind: sourceKind || 'none',
+    });
+  }
+
+  if (!isLookupLedgerPromptEnabled()) {
+    return withTelemetry({
+      ok: true,
+      mode: 'legacy',
+      promptable: true,
+      failSoft: false,
+      block: null,
+      reason: 'legacy',
+      capability,
+    }, {
+      rollbackActive: true,
+      sourceKind: 'user_transactions',
+    });
+  }
+
+  if (!evidence || typeof evidence !== 'object') {
+    logProjectionFailure('missing_evidence', capability);
+    return withTelemetry({
+      ok: false,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: 'missing_evidence',
+      capability,
+    }, { rollbackActive: false, sourceKind: 'user_transactions' });
+  }
+  if (evidence.status === 'unavailable') {
+    return withTelemetry({
+      ok: true,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: 'unavailable',
+      capability,
+    }, { rollbackActive: false, sourceKind: 'user_transactions' });
+  }
+
+  const projected = projectLookupLedgerView(input);
+  if (!projected.ok) {
+    logProjectionFailure(projected.reason, capability);
+    return withTelemetry({
+      ok: false,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: projected.reason || 'projection_failed',
+      capability,
+    }, { ledger: projected.ledger, rollbackActive: false, sourceKind: 'user_transactions' });
+  }
+  if (!projected.promptable) {
+    return withTelemetry({
+      ok: true,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: projected.reason || 'unavailable',
+      capability,
+    }, { ledger: projected.ledger, rollbackActive: false, sourceKind: 'user_transactions' });
+  }
+
+  return withTelemetry({
+    ok: true,
+    mode: 'ledger_v1',
+    promptable: true,
+    failSoft: false,
+    block: buildLedgerEvidenceSystemSection(projected.view.promptEvidence),
+    promptEvidence: projected.view.promptEvidence,
+    reason: null,
+    capability,
+  }, {
+    ledger: projected.ledger,
+    promptEvidence: projected.view.promptEvidence,
+    rollbackActive: false,
+    sourceKind: 'user_transactions',
+  });
+}
+
+function projectLookupEvidence(input) {
+  try {
+    return projectLookupEvidenceUnsafe(input);
+  } catch (err) {
+    logProjectionFailure('projection_exception', input && input.capability);
+    return withTelemetry({
+      ok: false,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: 'projection_exception',
+      capability: input && input.capability ? input.capability : 'financial_lookup',
+    }, { rollbackActive: false, sourceKind: 'user_transactions' });
+  }
 }
 
 function projectApprovedMacroEvidenceUnsafe(input = {}) {
@@ -241,14 +439,23 @@ function projectApprovedMacroEvidence(input) {
 
 module.exports = {
   LEDGER_PROMPT_ENV_KEY,
+  LOOKUP_PROMPT_ENV_KEY,
   APPROVED_MACRO_CAPABILITIES,
   isLedgerPromptEnabled,
   isEvidenceRollbackActive,
+  isLookupLedgerPromptEnabled,
+  isLookupEvidenceRollbackActive,
   parseLedgerPromptFlag,
   isApprovedMacroCapability,
   shouldUseLedgerPrompt,
+  shouldUseLookupLedgerPrompt,
+  isEligibleLookupCutover,
+  isSnapshotBackedLookup,
+  firstEvidenceSource,
   resolveCutoverCapability,
   resolveCutoverResponseMode,
   buildLedgerEvidenceSystemSection,
   projectApprovedMacroEvidence,
+  projectLookupLedgerView,
+  projectLookupEvidence,
 };
