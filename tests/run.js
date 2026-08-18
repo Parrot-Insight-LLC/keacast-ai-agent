@@ -28,6 +28,7 @@ const suites = [
   './keaIncomeHorizon.test.js',
   './keaConversationCapsule.test.js',
   './keaConversationStateResolver.test.js',
+  './keaConversationCapsulePersistence.test.js',
   './keaRequestReliability.test.js',
   './keaInvitationContinuation.test.js',
   './keaWriteCommitAck.test.js',

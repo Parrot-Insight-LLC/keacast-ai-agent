@@ -268,6 +268,25 @@ async function run() {
   const pDefault = tDefault.toPayload();
   check('pending_write_routing_reason defaults none', pDefault.pending_write_routing_reason === 'none');
   check('effective_capability defaults null', pDefault.effective_capability === null);
+  check('capsule_present defaults false', pDefault.capsule_present === false);
+  check('capsule_kind defaults none', pDefault.capsule_kind === 'none');
+  check('capsule_version defaults null', pDefault.capsule_version === null);
+  check('capsule_account_match defaults null', pDefault.capsule_account_match === null);
+
+  tG.recordGrounding({
+    capsule_present: true,
+    capsule_kind: 'upcoming',
+    capsule_version: 1,
+    capsule_account_match: true,
+  });
+  const pCap = tG.toPayload();
+  check('capsule_present recorded', pCap.capsule_present === true);
+  check('capsule_kind recorded', pCap.capsule_kind === 'upcoming');
+  check('capsule_version recorded', pCap.capsule_version === 1);
+  check('capsule_account_match recorded', pCap.capsule_account_match === true);
+  check('continuation_used unchanged by capsule telemetry', pCap.continuation_used === true);
+  check('capsule telemetry has no account id', pCap.accountId === undefined && pCap.lastAccountId === undefined);
+  check('no capsule_transition yet', pCap.capsule_transition === undefined);
 
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;

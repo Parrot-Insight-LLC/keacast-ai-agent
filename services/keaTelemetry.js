@@ -128,6 +128,10 @@ function createKeaTelemetry({ requestId } = {}) {
     income_horizon_horizon_days_bucket: null,
     income_horizon_negative_before: null,
     income_horizon_expense_count_bucket: null,
+    capsule_present: false,
+    capsule_kind: 'none',
+    capsule_version: null,
+    capsule_account_match: null,
   };
 
   let lastStage = null;
@@ -337,6 +341,18 @@ function createKeaTelemetry({ requestId } = {}) {
     if (flags.income_horizon_expense_count_bucket === null || typeof flags.income_horizon_expense_count_bucket === 'string') {
       grounding.income_horizon_expense_count_bucket = flags.income_horizon_expense_count_bucket || null;
     }
+    if (flags.capsule_present === true || flags.capsule_present === false) {
+      grounding.capsule_present = flags.capsule_present;
+    }
+    if (typeof flags.capsule_kind === 'string') {
+      grounding.capsule_kind = flags.capsule_kind;
+    }
+    if (flags.capsule_version === null || flags.capsule_version === 1) {
+      grounding.capsule_version = flags.capsule_version;
+    }
+    if (flags.capsule_account_match === true || flags.capsule_account_match === false || flags.capsule_account_match === null) {
+      grounding.capsule_account_match = flags.capsule_account_match;
+    }
   }
 
   function setResponseCharacterCount(n) {
@@ -528,6 +544,10 @@ function createKeaTelemetry({ requestId } = {}) {
       income_horizon_horizon_days_bucket: grounding.income_horizon_horizon_days_bucket || null,
       income_horizon_negative_before: grounding.income_horizon_negative_before,
       income_horizon_expense_count_bucket: grounding.income_horizon_expense_count_bucket || null,
+      capsule_present: !!grounding.capsule_present,
+      capsule_kind: grounding.capsule_kind || 'none',
+      capsule_version: grounding.capsule_version,
+      capsule_account_match: grounding.capsule_account_match,
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,

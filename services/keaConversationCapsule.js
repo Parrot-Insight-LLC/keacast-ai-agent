@@ -16,8 +16,11 @@
  *   - simulation state
  *   - Azure memory (history, rolling summary, long-term facts)
  *
- * Phase 3A.1: derive-only. lastX objects remain production state. This module
- * does not persist, does not route, and does not talk to Redis/Cashflow/Azure.
+ * Phase 3A.1: derive-only. lastX objects remain production routing state.
+ * Phase 3A.3: projectConversationCapsule() is the persistence hygiene helper
+ * (strip invalidReason, persist null when there is no active thread). Assignment
+ * happens in applyContinuationPersistence / saveDialogueState. This module
+ * still does not route and does not talk to Redis/Cashflow/Azure.
  *
  * Forecast mapping (3A.1): financial_forecast uses the same generic lastPeriod
  * machinery as analysis, so it maps to a thin `forecast` thread with period
@@ -374,6 +377,61 @@ function deriveConversationCapsule(dialogueState, currentAccountId) {
   };
 }
 
+/**
+ * Persistence projection: valid Capsule V1 with an active thread, or null.
+ *
+ * - Derives from lastX / lastCapability only (ignores any existing .capsule).
+ * - Strips invalidReason (debug/derivation metadata, never stored).
+ * - Returns null when there is no active referent (canonical empty contract).
+ * - Returns null rather than a malformed object.
+ *
+ * Does not take currentAccountId: persistence projects the stored lastAccountId
+ * thread. Request-vs-stored account mismatch is a routing concern, not a reason
+ * to fabricate or wipe the stored projection here.
+ */
+function projectConversationCapsule(dialogueState) {
+  const derived = deriveConversationCapsule(dialogueState);
+  if (!derived || derived.activeThread == null) return null;
+  const persisted = {
+    version: derived.version,
+    accountId: derived.accountId,
+    updatedAt: derived.updatedAt,
+    activeThread: derived.activeThread,
+  };
+  if (!isConversationCapsuleV1(persisted)) return null;
+  return persisted;
+}
+
+function syncConversationCapsule(dialogueState) {
+  if (!dialogueState || typeof dialogueState !== 'object') return dialogueState;
+  dialogueState.capsule = projectConversationCapsule(dialogueState);
+  return dialogueState;
+}
+
+function persistedCapsuleEqualsProjection(dialogueState) {
+  if (!dialogueState || typeof dialogueState !== 'object') return false;
+  return JSON.stringify(dialogueState.capsule) === JSON.stringify(projectConversationCapsule(dialogueState));
+}
+
+/**
+ * Low-cardinality Capsule telemetry. No account ids, subjects, or amounts.
+ * Semantics: post-resolution/post-persistence projection intended for the next
+ * turn (derived from current lastX, not the possibly-stale loaded .capsule).
+ */
+function capsuleTelemetryFields(capsule, currentAccountId) {
+  const valid = !!(capsule && isConversationCapsuleV1(capsule) && capsule.activeThread);
+  let accountMatch = null;
+  if (valid && currentAccountId != null && currentAccountId !== '') {
+    accountMatch = accountsMatch(capsule.accountId, currentAccountId);
+  }
+  return {
+    capsule_present: valid,
+    capsule_kind: valid ? capsule.activeThread.kind : 'none',
+    capsule_version: valid ? CAPSULE_VERSION : null,
+    capsule_account_match: accountMatch,
+  };
+}
+
 module.exports = {
   CAPSULE_VERSION,
   THREAD_KINDS,
@@ -381,4 +439,8 @@ module.exports = {
   deriveConversationCapsule,
   validateConversationCapsule,
   isConversationCapsuleV1,
+  projectConversationCapsule,
+  syncConversationCapsule,
+  persistedCapsuleEqualsProjection,
+  capsuleTelemetryFields,
 };

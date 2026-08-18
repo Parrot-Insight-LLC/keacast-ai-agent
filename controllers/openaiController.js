@@ -25,6 +25,11 @@ const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
 const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
 const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions, applyInvitationLifecycle, applyRepeatWriteLifecycle, maybeSetAffordabilityInvitation, shouldSkipAzureForRoute, buildDeterministicAffirmativeText } = require('../services/keaCapabilityRouter');
 const {
+  projectConversationCapsule,
+  syncConversationCapsule,
+  capsuleTelemetryFields,
+} = require('../services/keaConversationCapsule');
+const {
   resolveGroundingPolicy,
   isFailSoft,
   responseModeFor,
@@ -1161,6 +1166,7 @@ function emptyDialogueState() {
     lastUpcoming: null,
     lastIncomeHorizon: null,
     pendingInvitation: null,
+    capsule: null,
     updatedAt: null,
   };
 }
@@ -1327,8 +1333,9 @@ async function loadDialogueState(userId) {
 async function saveDialogueState(userId, state) {
   if (!userId || !state) return;
   try {
-    const toSave = { ...state, updatedAt: new Date().toISOString() };
-    await redis.set(buildDialogueKey(userId), JSON.stringify(toSave), 'EX', DIALOGUE_TTL);
+    state.updatedAt = new Date().toISOString();
+    syncConversationCapsule(state);
+    await redis.set(buildDialogueKey(userId), JSON.stringify(state), 'EX', DIALOGUE_TTL);
   } catch (e) {
     console.warn('Dialogue state save failed:', e.message);
   }
@@ -3476,6 +3483,10 @@ exports.chat = async (req, res) => {
       accountId: accountid,
       failSoft: phase1FailSoft,
     });
+    const capsuleTelemetry = capsuleTelemetryFields(
+      projectConversationCapsule(dialogueState),
+      accountid
+    );
     const phase1Performed = !phase1FailSoft
       && !!phase1Evidence
       && (phase1Evidence.status === 'ok' || phase1Evidence.status === 'partial')
@@ -3543,6 +3554,10 @@ exports.chat = async (req, res) => {
         ? phase1Evidence.prefetchMeta.periodReadCount : null,
       capability_confidence_bucket: phase1Route.confidence,
       continuation_used: !!phase1Route.continuationUsed,
+      capsule_present: capsuleTelemetry.capsule_present,
+      capsule_kind: capsuleTelemetry.capsule_kind,
+      capsule_version: capsuleTelemetry.capsule_version,
+      capsule_account_match: capsuleTelemetry.capsule_account_match,
       financial_macro: financialMacro,
       macro_performed: macroAttempted,
       macro_status: macroAttempted

@@ -7,6 +7,7 @@ const {
   shiftCalendarWeek,
   isUpcomingPeriodCurrentOrFuture,
 } = require('./keaUpcomingPeriod');
+const { syncConversationCapsule } = require('./keaConversationCapsule');
 
 const CAPABILITIES = Object.freeze([
   'confirmation',
@@ -2405,6 +2406,7 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       definition: 'kea_scheduled_recurring_income',
     };
   }
+  syncConversationCapsule(dialogueState);
   return dialogueState;
 }
 

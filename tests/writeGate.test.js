@@ -17,6 +17,7 @@ async function run() {
   check('emptyDialogueState has no pendingInvitation', T.emptyDialogueState().pendingInvitation === null);
   check('emptyDialogueState lastPeriod starts null', T.emptyDialogueState().lastPeriod === null);
   check('emptyDialogueState lastAccountId starts null', T.emptyDialogueState().lastAccountId === null);
+  check('emptyDialogueState capsule starts null', T.emptyDialogueState().capsule === null);
   check('emptyDialogueState needsReconfirm starts false', T.emptyDialogueState().needsReconfirm === false);
   check('emptyDialogueState goalNeedsReconfirm starts false', T.emptyDialogueState().goalNeedsReconfirm === false);
 
