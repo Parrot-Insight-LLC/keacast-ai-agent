@@ -1690,6 +1690,235 @@ function maybeSetAffordabilityInvitation(dialogueState, {
 }
 
 /**
+ * True when the current message is an explicit fresh financial intent that
+ * must replace an active continuation thread. Same formula the production
+ * router uses (breakContinuation). Does not read lastX payloads.
+ */
+function wouldBreakContinuation(message, lastCap, currentDate) {
+  const namedFollowUp = collectNamedMonths(String(message || '').toLowerCase(),
+    moment(currentDate, 'YYYY-MM-DD', true).isValid() ? moment(currentDate, 'YYYY-MM-DD') : moment());
+  return (namedFollowUp.length === 2 && lastCap === 'cashflow_trend')
+    || (isCashflowTrend(message) && lastCap !== 'cashflow_trend')
+    || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend')
+    || (isCashflowRecurring(message) && lastCap !== 'cashflow_recurring')
+    || (isCashflowUpcoming(message, currentDate) && lastCap !== 'cashflow_upcoming')
+    || (isCashflowIncomeHorizon(message, currentDate) && lastCap !== 'cashflow_income_horizon');
+}
+
+function intentStrengthFor(capability) {
+  if (
+    capability === 'cashflow_recurring'
+    || capability === 'cashflow_upcoming'
+    || capability === 'cashflow_income_horizon'
+    || capability === 'cashflow_trend'
+    || capability === 'cashflow_comparison'
+  ) {
+    return 'strong_fresh';
+  }
+  if (FINANCIAL_CAPABILITIES.has(capability) || capability === 'mixed_macro') {
+    return 'contextual_fresh';
+  }
+  return 'none';
+}
+
+/**
+ * Fresh-intent classification independent of lastX / Capsule.
+ * Does not decide write confirmation, invitation, or continuation.
+ * Invitation/write-utterance branches are included so production can call
+ * this at the existing classifier site without reordering; resolver callers
+ * omit invitation flags.
+ */
+function classifyFreshIntentCandidate(input = {}) {
+  const message = String(input.message || '');
+  const currentDate = input.currentDate;
+  const knownCategories = input.knownCategories;
+  const slots = input.slots || extractSlots(message, currentDate, knownCategories);
+  const simulationMode = input.simulationMode === true;
+  const invitationOk = input.invitationOk === true;
+  const invitation = input.invitation || null;
+
+  const pack = (capability, extra = {}) => ({
+    capability,
+    confidence: extra.confidence || 'high',
+    slots: extra.slots || slots,
+    invitationWriteHandoff: extra.invitationWriteHandoff === true,
+    affirmativeResolution: extra.affirmativeResolution || 'none',
+    intentStrength: extra.intentStrength || intentStrengthFor(capability),
+  });
+
+  if (simulationMode && isSimUtterance(message)) {
+    return pack('simulation');
+  }
+  if (isProductHelp(message)) {
+    return pack('product_help');
+  }
+  if (isSimUtterance(message)) {
+    return pack('simulation', { confidence: 'medium' });
+  }
+  if (isGoalWriteUtterance(message)) {
+    return pack('goal_write');
+  }
+  if (isWriteUtterance(message) || (invitationOk && isInvitationReferringWrite(message))) {
+    const parsed = invitationOk ? parseInvitationSlotFill(message, knownCategories) : { title: null, category: null };
+    const writeSlots = invitationHandoffSlots(invitationOk ? invitation : null, slots, parsed);
+    return pack('transaction_write', {
+      slots: writeSlots,
+      invitationWriteHandoff: !!invitationOk,
+      affirmativeResolution: invitationOk ? 'write_handoff' : 'none',
+    });
+  }
+  if (isNavUtterance(message)) {
+    return pack('navigation_ui');
+  }
+  if (detectWantsUiAction(message)) {
+    const nav = extractNavLookup(message, currentDate, knownCategories);
+    const navSlots = nav
+      ? {
+          ...slots,
+          subjectKind: nav.subjectKind || slots.subjectKind,
+          subjectValue: nav.subjectValue || slots.subjectValue,
+          period: nav.period || slots.period,
+          displaySubject: nav.displaySubject || slots.displaySubject,
+        }
+      : slots;
+    return pack('navigation_ui', { slots: navSlots });
+  }
+  if (isCasual(message)) {
+    return pack('casual_conversation');
+  }
+  if (isPaydayAffordabilityMix(message) || isSafeSpendBeforePayday(message) || isCashflowIncomeHorizon(message, currentDate)) {
+    return pack('cashflow_income_horizon', {
+      slots: {
+        ...slots,
+        incomeHorizonError: incomeHorizonErrorFor(message),
+      },
+    });
+  }
+  if (isMixedMacro(message)) {
+    return pack('mixed_macro');
+  }
+  if (isAffordability(message)) {
+    return pack('affordability_or_planning');
+  }
+  if (isCashflowTrend(message)) {
+    const trend = parseTrendPeriods(message, currentDate);
+    const trendError = slots.subjectKind === 'merchant'
+      ? 'merchant_trend_unsupported'
+      : (categoryStemsIn(message).size >= 2 ? 'compound_trend_unsupported' : (trend.error || null));
+    return pack('cashflow_trend', {
+      slots: {
+        ...slots,
+        periods: trend.periods || null,
+        windowKind: trend.windowKind || null,
+        metricScope: trendMetricScope(message, slots.subjectKind),
+        trendError,
+      },
+    });
+  }
+  if (isCashflowComparison(message)) {
+    const comparison = parseComparisonPeriods(message, currentDate);
+    return pack('cashflow_comparison', {
+      slots: {
+        ...slots,
+        periodA: comparison.periodA || null,
+        periodB: comparison.periodB || null,
+        windowKind: comparison.windowKind || null,
+        comparisonError: comparison.error || null,
+      },
+    });
+  }
+  if (isCashflowRecurring(message)) {
+    let recurringError = null;
+    if (isSubscriptionQuestion(message)) recurringError = 'recurring_definition_unsupported';
+    else if (isRecurringShareQuestion(message)) recurringError = 'recurring_share_unsupported';
+    else if (isRecurringTrendQuestion(message)) recurringError = 'recurring_trend_unsupported';
+    const named = parseNamedRecurringSubject(message);
+    return pack('cashflow_recurring', {
+      slots: {
+        ...slots,
+        metricScope: recurringMetricScope(message, 'all'),
+        rankingMode: recurringRankingMode(message, null),
+        recurringError,
+        recurringCancel: isRecurringCancelQuestion(message) || undefined,
+        subjectKind: named ? 'merchant' : slots.subjectKind,
+        subjectValue: named || slots.subjectValue,
+      },
+    });
+  }
+  if (isCashflowUpcoming(message, currentDate)) {
+    const resolved = resolveUpcomingPeriod(message, currentDate);
+    let upcomingError = null;
+    let period = null;
+    if (resolved && resolved.error) {
+      upcomingError = resolved.error;
+      if (resolved.start && resolved.end) {
+        period = {
+          start: resolved.start,
+          end: resolved.end,
+          label: resolved.label,
+          relation: resolved.relation,
+        };
+      }
+    } else if (!resolved || !resolved.start || !resolved.end) {
+      upcomingError = 'upcoming_period_unresolved';
+    } else if (!isUpcomingPeriodCurrentOrFuture(resolved, currentDate)) {
+      upcomingError = 'upcoming_historical_period';
+      period = {
+        start: resolved.start,
+        end: resolved.end,
+        label: resolved.label,
+        relation: resolved.relation,
+      };
+    } else {
+      period = {
+        start: resolved.start,
+        end: resolved.end,
+        label: resolved.label,
+        relation: resolved.relation,
+      };
+    }
+    return pack('cashflow_upcoming', {
+      slots: {
+        ...slots,
+        period,
+        metricScope: upcomingMetricScope(message, 'all'),
+        upcomingError,
+      },
+    });
+  }
+  if (isCashflowAnalysis(message)) {
+    let period = slots.period;
+    if (!period && isNegativeRiskQuestion(message)) {
+      const today = moment(currentDate, 'YYYY-MM-DD', true).isValid()
+        ? moment(currentDate, 'YYYY-MM-DD')
+        : moment();
+      period = {
+        start: today.format('YYYY-MM-DD'),
+        end: today.clone().add(90, 'days').format('YYYY-MM-DD'),
+        label: 'forecast_horizon',
+      };
+    } else if (!period) {
+      period = parsePeriod('this month', currentDate);
+    }
+    return pack('cashflow_analysis', { slots: { ...slots, period } });
+  }
+  if (isForecast(message)) {
+    return pack('financial_forecast');
+  }
+  if (isLookup(message)) {
+    const kind = /\b(balance|available|credit limit)\b/.test(message.toLowerCase()) && !/\b(spend|spent)\b/.test(message.toLowerCase())
+      ? 'account'
+      : slots.subjectKind;
+    const value = kind === 'account' ? 'balance' : slots.subjectValue;
+    return pack('financial_lookup', {
+      slots: { ...slots, subjectKind: kind || slots.subjectKind, subjectValue: value || slots.subjectValue },
+    });
+  }
+
+  return pack('unknown', { confidence: 'low', intentStrength: 'none' });
+}
+
+/**
  * Deterministic first-match capability router. No LLM.
  */
 function routeCapabilityUnwrapped(input = {}) {
@@ -1772,14 +2001,7 @@ function routeCapabilityUnwrapped(input = {}) {
     && !accountChanged
     && accountsMatch(last.lastAccountId, currentAccountId);
 
-  const namedFollowUp = collectNamedMonths(String(message || '').toLowerCase(),
-    moment(currentDate, 'YYYY-MM-DD', true).isValid() ? moment(currentDate, 'YYYY-MM-DD') : moment());
-  const breakContinuation = (namedFollowUp.length === 2 && lastCap === 'cashflow_trend')
-    || (isCashflowTrend(message) && lastCap !== 'cashflow_trend')
-    || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend')
-    || (isCashflowRecurring(message) && lastCap !== 'cashflow_recurring')
-    || (isCashflowUpcoming(message, currentDate) && lastCap !== 'cashflow_upcoming')
-    || (isCashflowIncomeHorizon(message, currentDate) && lastCap !== 'cashflow_income_horizon');
+  const breakContinuation = wouldBreakContinuation(message, lastCap, currentDate);
   const recurringFollowUp = lastCap === 'cashflow_recurring'
     && isRecurringFollowUp(message)
     && !accountChanged
@@ -1905,213 +2127,25 @@ function routeCapabilityUnwrapped(input = {}) {
     return { ...base, capability: 'unknown', confidence: 'low', accountChanged: true };
   }
 
-  // 5. Deterministic normal classifier
-  if (input.simulationMode && isSimUtterance(message)) {
-    return { ...base, capability: 'simulation', confidence: 'high', accountChanged };
-  }
-  if (isProductHelp(message)) {
-    return { ...base, capability: 'product_help', confidence: 'high', accountChanged };
-  }
-  if (isSimUtterance(message)) {
-    return { ...base, capability: 'simulation', confidence: 'medium', accountChanged };
-  }
-  if (isGoalWriteUtterance(message)) {
-    return { ...base, capability: 'goal_write', confidence: 'high', accountChanged };
-  }
-  if (isWriteUtterance(message) || (invitationOk && isInvitationReferringWrite(message))) {
-    const parsed = invitationOk ? parseInvitationSlotFill(message, knownCategories) : { title: null, category: null };
-    const writeSlots = invitationHandoffSlots(invitationOk ? invitation : null, slots, parsed);
+  // 5. Deterministic normal classifier (shared with Capsule resolver tests)
+  const classified = classifyFreshIntentCandidate({
+    message,
+    currentDate,
+    knownCategories,
+    slots,
+    simulationMode: input.simulationMode === true,
+    invitationOk,
+    invitation,
+  });
+  if (classified.capability !== 'unknown') {
     return {
       ...base,
-      capability: 'transaction_write',
-      confidence: 'high',
+      capability: classified.capability,
+      confidence: classified.confidence,
+      slots: classified.slots || slots,
       accountChanged,
-      slots: writeSlots,
-      invitationWriteHandoff: !!invitationOk,
-      affirmativeResolution: invitationOk ? 'write_handoff' : 'none',
-    };
-  }
-  if (isNavUtterance(message)) {
-    return { ...base, capability: 'navigation_ui', confidence: 'high', accountChanged };
-  }
-  if (detectWantsUiAction(message)) {
-    const nav = extractNavLookup(message, currentDate, knownCategories);
-    const navSlots = nav
-      ? {
-          ...slots,
-          subjectKind: nav.subjectKind || slots.subjectKind,
-          subjectValue: nav.subjectValue || slots.subjectValue,
-          period: nav.period || slots.period,
-          displaySubject: nav.displaySubject || slots.displaySubject,
-        }
-      : slots;
-    return {
-      ...base,
-      capability: 'navigation_ui',
-      confidence: 'high',
-      accountChanged,
-      slots: navSlots,
-    };
-  }
-  if (isCasual(message)) {
-    return { ...base, capability: 'casual_conversation', confidence: 'high', accountChanged };
-  }
-  if (isPaydayAffordabilityMix(message) || isSafeSpendBeforePayday(message) || isCashflowIncomeHorizon(message, currentDate)) {
-    return {
-      ...base,
-      capability: 'cashflow_income_horizon',
-      confidence: 'high',
-      accountChanged,
-      slots: {
-        ...slots,
-        incomeHorizonError: incomeHorizonErrorFor(message),
-      },
-    };
-  }
-  if (isMixedMacro(message)) {
-    return { ...base, capability: 'mixed_macro', confidence: 'high', accountChanged, slots };
-  }
-  if (isAffordability(message)) {
-    return { ...base, capability: 'affordability_or_planning', confidence: 'high', accountChanged, slots };
-  }
-  if (isCashflowTrend(message)) {
-    const trend = parseTrendPeriods(message, currentDate);
-    const trendError = slots.subjectKind === 'merchant'
-      ? 'merchant_trend_unsupported'
-      : (categoryStemsIn(message).size >= 2 ? 'compound_trend_unsupported' : (trend.error || null));
-    return {
-      ...base,
-      capability: 'cashflow_trend',
-      confidence: 'high',
-      accountChanged,
-      slots: {
-        ...slots,
-        periods: trend.periods || null,
-        windowKind: trend.windowKind || null,
-        metricScope: trendMetricScope(message, slots.subjectKind),
-        trendError,
-      },
-    };
-  }
-  if (isCashflowComparison(message)) {
-    const comparison = parseComparisonPeriods(message, currentDate);
-    return {
-      ...base,
-      capability: 'cashflow_comparison',
-      confidence: 'high',
-      accountChanged,
-      slots: {
-        ...slots,
-        periodA: comparison.periodA || null,
-        periodB: comparison.periodB || null,
-        windowKind: comparison.windowKind || null,
-        comparisonError: comparison.error || null,
-      },
-    };
-  }
-  if (isCashflowRecurring(message)) {
-    let recurringError = null;
-    if (isSubscriptionQuestion(message)) recurringError = 'recurring_definition_unsupported';
-    else if (isRecurringShareQuestion(message)) recurringError = 'recurring_share_unsupported';
-    else if (isRecurringTrendQuestion(message)) recurringError = 'recurring_trend_unsupported';
-    const named = parseNamedRecurringSubject(message);
-    return {
-      ...base,
-      capability: 'cashflow_recurring',
-      confidence: 'high',
-      accountChanged,
-      slots: {
-        ...slots,
-        metricScope: recurringMetricScope(message, 'all'),
-        rankingMode: recurringRankingMode(message, null),
-        recurringError,
-        recurringCancel: isRecurringCancelQuestion(message) || undefined,
-        subjectKind: named ? 'merchant' : slots.subjectKind,
-        subjectValue: named || slots.subjectValue,
-      },
-    };
-  }
-  if (isCashflowUpcoming(message, currentDate)) {
-    const resolved = resolveUpcomingPeriod(message, currentDate);
-    let upcomingError = null;
-    let period = null;
-    if (resolved && resolved.error) {
-      upcomingError = resolved.error;
-      if (resolved.start && resolved.end) {
-        period = {
-          start: resolved.start,
-          end: resolved.end,
-          label: resolved.label,
-          relation: resolved.relation,
-        };
-      }
-    } else if (!resolved || !resolved.start || !resolved.end) {
-      upcomingError = 'upcoming_period_unresolved';
-    } else if (!isUpcomingPeriodCurrentOrFuture(resolved, currentDate)) {
-      upcomingError = 'upcoming_historical_period';
-      period = {
-        start: resolved.start,
-        end: resolved.end,
-        label: resolved.label,
-        relation: resolved.relation,
-      };
-    } else {
-      period = {
-        start: resolved.start,
-        end: resolved.end,
-        label: resolved.label,
-        relation: resolved.relation,
-      };
-    }
-    return {
-      ...base,
-      capability: 'cashflow_upcoming',
-      confidence: 'high',
-      accountChanged,
-      slots: {
-        ...slots,
-        period,
-        metricScope: upcomingMetricScope(message, 'all'),
-        upcomingError,
-      },
-    };
-  }
-  if (isCashflowAnalysis(message)) {
-    let period = slots.period;
-    if (!period && isNegativeRiskQuestion(message)) {
-      const today = moment(currentDate, 'YYYY-MM-DD', true).isValid()
-        ? moment(currentDate, 'YYYY-MM-DD')
-        : moment();
-      period = {
-        start: today.format('YYYY-MM-DD'),
-        end: today.clone().add(90, 'days').format('YYYY-MM-DD'),
-        label: 'forecast_horizon',
-      };
-    } else if (!period) {
-      period = parsePeriod('this month', currentDate);
-    }
-    return {
-      ...base,
-      capability: 'cashflow_analysis',
-      confidence: 'high',
-      accountChanged,
-      slots: { ...slots, period },
-    };
-  }
-  if (isForecast(message)) {
-    return { ...base, capability: 'financial_forecast', confidence: 'high', accountChanged, slots };
-  }
-  if (isLookup(message)) {
-    const kind = /\b(balance|available|credit limit)\b/.test(message.toLowerCase()) && !/\b(spend|spent)\b/.test(message.toLowerCase())
-      ? 'account'
-      : slots.subjectKind;
-    const value = kind === 'account' ? 'balance' : slots.subjectValue;
-    return {
-      ...base,
-      capability: 'financial_lookup',
-      confidence: 'high',
-      accountChanged,
-      slots: { ...slots, subjectKind: kind || slots.subjectKind, subjectValue: value || slots.subjectValue },
+      invitationWriteHandoff: classified.invitationWriteHandoff === true,
+      affirmativeResolution: classified.affirmativeResolution || 'none',
     };
   }
 
@@ -2503,6 +2537,16 @@ module.exports = {
   isAgreementPhrase,
   isRepeatWriteUtterance,
   isShortFollowUp,
+  isRecurringFollowUp,
+  isUpcomingFollowUp,
+  isIncomeHorizonFollowUp,
+  isWeekAfterFollowUp,
+  isAfterPaydayFollowUp,
+  isRecurringLargestIntent,
+  isCasual,
+  wouldBreakContinuation,
+  classifyFreshIntentCandidate,
+  accountsMatch,
   lastCommittedCreate,
   normalizePendingInvitation,
   buildAffordabilityInvitation,
