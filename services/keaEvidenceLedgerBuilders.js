@@ -1014,6 +1014,27 @@ function buildSnapshotEvidenceLedger(input) {
     claims.add('TOTAL', 'facts.monthExpenses', factsIn.monthExpenses, CLAIM_UNITS.USD);
   }
 
+  // Compact snapshot caps (keaAccountSnapshot). Index only; do not recap or sort.
+  const lists = {};
+  if (Array.isArray(factsIn.recents)) {
+    const indexed = indexList(factsIn.recents, { totalCount: factsIn.recents.length, cap: 10 });
+    factsIn.recents = indexed.items;
+    lists.recents = indexed.meta;
+  }
+  if (Array.isArray(factsIn.upcoming)) {
+    const indexed = indexList(factsIn.upcoming, { totalCount: factsIn.upcoming.length, cap: 10 });
+    factsIn.upcoming = indexed.items;
+    lists.upcoming = indexed.meta;
+  }
+  if (Array.isArray(factsIn.futureNegativeBalances)) {
+    const indexed = indexList(factsIn.futureNegativeBalances, {
+      totalCount: factsIn.futureNegativeBalances.length,
+      cap: 5,
+    });
+    factsIn.futureNegativeBalances = indexed.items;
+    lists.futureNegativeBalances = indexed.meta;
+  }
+
   const scope = emptyScope();
   scope.accountScope = 'selected_account';
   scope.accountLabel = accountLabelFrom(accountContext);
@@ -1031,7 +1052,7 @@ function buildSnapshotEvidenceLedger(input) {
     scope,
     facts: factsIn,
     claims: claims.claims,
-    lists: {},
+    lists,
     limitations: copyLimitations(evidence),
     assumptions: copyAssumptions(evidence),
     allowedNarration: [],
