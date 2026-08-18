@@ -26,6 +26,7 @@ const MATRIX = Object.freeze({
   mixed_macro: GROUNDING_REQUIRED,
   invitation_continuation: GROUNDING_NONE,
   bare_affirmative_unresolved: GROUNDING_NONE,
+  conversation_clarify: GROUNDING_NONE,
   continuation: 'inherited',
   unknown: GROUNDING_OPTIONAL,
 });

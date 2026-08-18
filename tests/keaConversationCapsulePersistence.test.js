@@ -238,10 +238,10 @@ async function run() {
   check('thanks does not persist financial lastX', thanks.lastCapability === 'cashflow_upcoming');
   check('thanks leaves Capsule upcoming', thanks.capsule && thanks.capsule.activeThread.kind === THREAD_KINDS.UPCOMING
     && JSON.stringify(thanks.capsule.activeThread.kind) === JSON.stringify(JSON.parse(thanksCap).activeThread.kind));
-  check('EXPECTED_3A4_HARD_SWITCH_POLICY not implemented', true);
 
   persist(thanks, route('How do I change my password?', { dialogueState: thanks }));
-  check('password/help leaves Capsule upcoming', thanks.capsule.activeThread.kind === THREAD_KINDS.UPCOMING);
+  check('password hard-switch clears Capsule', thanks.capsule && thanks.capsule.activeThread == null);
+  check('password leaves lastX zombie upcoming', thanks.lastCapability === 'cashflow_upcoming');
 
   const fail = T.emptyDialogueState();
   persist(fail, route('What bills are due next week?'), { failSoft: true });
@@ -257,9 +257,14 @@ async function run() {
   persist(sw, route('What bills are due next week?'), { accountId: '10' });
   const rejected = route('How much total?', { dialogueState: sw, accountId: '99' });
   persist(sw, rejected, { accountId: '99' });
-  check('rejected B continuation does not become B Capsule', sw.capsule.accountId === '10'
-    && sw.capsule.activeThread.kind === THREAD_KINDS.UPCOMING
-    && sw.lastAccountId === '10');
+  check('account mismatch clarifies and does not continue A on B',
+    rejected.capability === 'conversation_clarify'
+    && rejected.capsuleClear === true
+    && rejected.continuationUsed === false);
+  check('authoritative Capsule cleared, lastX remains A zombie',
+    sw.capsule && sw.capsule.activeThread == null
+    && sw.lastAccountId === '10'
+    && sw.lastUpcoming != null);
   persist(sw, route('What bills are due next week?', { accountId: '99' }), { accountId: '99' });
   check('fresh B upcoming projects B', sw.capsule.accountId === '99'
     && sw.lastAccountId === '99'
@@ -311,7 +316,8 @@ async function run() {
   const rollbackParsed = { extraUnused: true, capsule: { version: 1, accountId: '10', updatedAt: null, activeThread: null } };
   const rollbackLoad = { ...T.emptyDialogueState(), ...rollbackParsed };
   check('rollback extra capsule field is harmless', rollbackLoad.capsule != null && rollbackLoad.lastCapability === null);
-  check('routing ignores loaded Capsule', route('How much total?', { dialogueState: rollbackLoad }).capability === 'unknown');
+  check('authoritative empty Capsule does not revive lastX-less thread',
+    route('How much total?', { dialogueState: rollbackLoad }).capability === 'conversation_clarify');
 
   section('3A.3 write / invitation / UI exclusion');
 
@@ -357,7 +363,7 @@ async function run() {
   const payload = t.toPayload();
   check('turn telemetry continuation_used still from route', payload.continuation_used === true);
   check('turn telemetry capsule_kind', payload.capsule_kind === 'upcoming');
-  check('turn telemetry no transition field', payload.capsule_transition === undefined);
+  check('turn telemetry capsule_transition defaults none', payload.capsule_transition === 'none');
 
   const baseline = T.emptyDialogueState();
   persist(baseline, route('What bills are due next week?'));
@@ -379,12 +385,12 @@ async function run() {
   console.log(`  1000 projections: ${elapsed}ms`);
   check('1000 projections under 250ms', elapsed < 250, `${elapsed}ms`);
 
-  section('3A.3 routing still ignores Capsule');
+  section('3A.4 Capsule is production authority');
   const ignore = T.emptyDialogueState();
   persist(ignore, route('What bills are due next week?'));
   ignore.capsule.activeThread.kind = 'recurring';
   const stillUpcoming = route('How much total?', { dialogueState: ignore });
-  check('mutated Capsule does not change production route', stillUpcoming.parentCapability === 'cashflow_upcoming');
+  check('malformed Capsule falls back to lastX', stillUpcoming.parentCapability === 'cashflow_upcoming');
 }
 
 module.exports = { run };

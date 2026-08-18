@@ -278,6 +278,7 @@ async function run() {
     capsule_kind: 'upcoming',
     capsule_version: 1,
     capsule_account_match: true,
+    capsule_transition: 'continued',
   });
   const pCap = tG.toPayload();
   check('capsule_present recorded', pCap.capsule_present === true);
@@ -286,7 +287,8 @@ async function run() {
   check('capsule_account_match recorded', pCap.capsule_account_match === true);
   check('continuation_used unchanged by capsule telemetry', pCap.continuation_used === true);
   check('capsule telemetry has no account id', pCap.accountId === undefined && pCap.lastAccountId === undefined);
-  check('no capsule_transition yet', pCap.capsule_transition === undefined);
+  check('capsule_transition defaults none', pDefault.capsule_transition === 'none');
+  check('capsule_transition recorded', pCap.capsule_transition === 'continued');
 
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;

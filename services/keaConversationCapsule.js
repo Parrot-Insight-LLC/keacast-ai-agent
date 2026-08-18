@@ -18,9 +18,12 @@
  *
  * Phase 3A.1: derive-only. lastX objects remain production routing state.
  * Phase 3A.3: projectConversationCapsule() is the persistence hygiene helper
- * (strip invalidReason, persist null when there is no active thread). Assignment
- * happens in applyContinuationPersistence / saveDialogueState. This module
- * still does not route and does not talk to Redis/Cashflow/Azure.
+ * (strip invalidReason, persist null when there is no active thread).
+ * Phase 3A.4: resolveCurrentConversationCapsule() is the production load helper.
+ * A valid persisted Capsule with an activeThread is authority even if zombie
+ * lastCapability disagrees. capsule: null means "not projected yet" (derive from
+ * lastX). A valid V1 object with activeThread: null is an authoritative empty
+ * (hard-switch / account-mismatch) and must NOT fall back to lastX.
  *
  * Forecast mapping (3A.1): financial_forecast uses the same generic lastPeriod
  * machinery as analysis, so it maps to a thin `forecast` thread with period
@@ -243,6 +246,14 @@ function mapAffordability(ds, accountId, updatedAt) {
   }
   const purchaseDate = copyIsoDate(ds.lastPurchaseDate);
   if (purchaseDate) thread.purchaseDate = purchaseDate;
+  if (ds.lastPurchaseDateAssumption) {
+    thread.purchaseDateAssumption = String(ds.lastPurchaseDateAssumption).slice(0, 64);
+  }
+  if (ds.lastPurchaseDateAssumptionText) {
+    thread.purchaseDateAssumptionText = String(ds.lastPurchaseDateAssumptionText).slice(0, 160);
+  }
+  const period = copyPeriod(ds && ds.lastPeriod);
+  if (period) thread.period = period;
   return thread;
 }
 
@@ -308,6 +319,9 @@ function validateThread(thread) {
     case THREAD_KINDS.AFFORDABILITY: {
       if (thread.amount != null && !(Number.isFinite(thread.amount) && thread.amount > 0)) return false;
       if (thread.purchaseDate != null && !isIsoDate(thread.purchaseDate)) return false;
+      if (thread.purchaseDateAssumption != null && typeof thread.purchaseDateAssumption !== 'string') return false;
+      if (thread.purchaseDateAssumptionText != null && typeof thread.purchaseDateAssumptionText !== 'string') return false;
+      if (thread.period != null && !validatePeriod(thread.period)) return false;
       return true;
     }
     default:
@@ -402,8 +416,64 @@ function projectConversationCapsule(dialogueState) {
   return persisted;
 }
 
+function isAuthoritativeEmptyCapsule(capsule) {
+  return !!(
+    capsule
+    && typeof capsule === 'object'
+    && isConversationCapsuleV1(capsule)
+    && Object.prototype.hasOwnProperty.call(capsule, 'activeThread')
+    && capsule.activeThread == null
+  );
+}
+
+function emptyAuthoritativeCapsule(accountId, updatedAt) {
+  return {
+    version: CAPSULE_VERSION,
+    accountId: accountId == null || accountId === '' ? null : String(accountId),
+    updatedAt: updatedAt == null ? null : updatedAt,
+    activeThread: null,
+  };
+}
+
+/**
+ * Production load/fallback:
+ * 1. Valid persisted Capsule with a thread → Capsule wins (even vs lastCapability).
+ * 2. Valid persisted Capsule with activeThread null → authoritative empty, no lastX fallback.
+ * 3. Missing / corrupt / unknown version → derive from lastX when possible.
+ * Never throws.
+ */
+function resolveCurrentConversationCapsule(dialogueState, currentAccountId) {
+  try {
+    const ds = dialogueState && typeof dialogueState === 'object' ? dialogueState : {};
+    const persisted = ds.capsule;
+    if (isConversationCapsuleV1(persisted) && persisted.activeThread) {
+      return persisted;
+    }
+    if (isAuthoritativeEmptyCapsule(persisted)) {
+      return persisted;
+    }
+    if (arguments.length > 1) {
+      const derived = deriveConversationCapsule(ds, currentAccountId);
+      if (derived && isConversationCapsuleV1(derived)) return derived;
+      return null;
+    }
+    const derived = deriveConversationCapsule(ds);
+    if (derived && isConversationCapsuleV1(derived)) return derived;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function syncConversationCapsule(dialogueState) {
   if (!dialogueState || typeof dialogueState !== 'object') return dialogueState;
+  if (isAuthoritativeEmptyCapsule(dialogueState.capsule)) {
+    dialogueState.capsule = emptyAuthoritativeCapsule(
+      dialogueState.capsule.accountId,
+      dialogueState.updatedAt == null ? dialogueState.capsule.updatedAt : dialogueState.updatedAt
+    );
+    return dialogueState;
+  }
   dialogueState.capsule = projectConversationCapsule(dialogueState);
   return dialogueState;
 }
@@ -415,8 +485,8 @@ function persistedCapsuleEqualsProjection(dialogueState) {
 
 /**
  * Low-cardinality Capsule telemetry. No account ids, subjects, or amounts.
- * Semantics: post-resolution/post-persistence projection intended for the next
- * turn (derived from current lastX, not the possibly-stale loaded .capsule).
+ * Semantics: authoritative Capsule intended for the next turn (the loaded or
+ * post-persist Capsule, not a zombie lastX inference).
  */
 function capsuleTelemetryFields(capsule, currentAccountId) {
   const valid = !!(capsule && isConversationCapsuleV1(capsule) && capsule.activeThread);
@@ -443,4 +513,7 @@ module.exports = {
   syncConversationCapsule,
   persistedCapsuleEqualsProjection,
   capsuleTelemetryFields,
+  resolveCurrentConversationCapsule,
+  isAuthoritativeEmptyCapsule,
+  emptyAuthoritativeCapsule,
 };

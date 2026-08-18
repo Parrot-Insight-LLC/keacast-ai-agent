@@ -7,7 +7,7 @@ const {
   shiftCalendarWeek,
   isUpcomingPeriodCurrentOrFuture,
 } = require('./keaUpcomingPeriod');
-const { syncConversationCapsule } = require('./keaConversationCapsule');
+const { projectConversationCapsule, resolveCurrentConversationCapsule, emptyAuthoritativeCapsule } = require('./keaConversationCapsule');
 
 const CAPABILITIES = Object.freeze([
   'confirmation',
@@ -30,6 +30,7 @@ const CAPABILITIES = Object.freeze([
   'goal_write',
   'simulation',
   'navigation_ui',
+  'conversation_clarify',
   'unknown',
 ]);
 
@@ -721,7 +722,7 @@ function isSimUtterance(text) {
 function isNavUtterance(text) {
   const m = String(text || '').toLowerCase();
   return /\b(open|go to|show|switch to|select account|take me to|navigate)\b/.test(m)
-    && /\b(calendar|search|account|settings|goals|feed|day)\b/.test(m);
+    && /\b(calendar|search|account|settings|goals|feed|day|profile)\b/.test(m);
 }
 
 function isProductHelp(text) {
@@ -739,7 +740,7 @@ function isProductHelp(text) {
 
 function isCasual(text) {
   const m = String(text || '').trim().toLowerCase();
-  return /^(hi|hey|hello|thanks|thank you|yo|sup|good (morning|afternoon|evening))(\s+kea)?[!?.]*$/i.test(m)
+  return /^(hi|hey|hello|thanks|thank you|yo|sup|good (morning|afternoon|evening)|got it|okay thanks|ok thanks|appreciate it)(\s+kea)?[!?.]*$/i.test(m)
     || /^hi kea[!?.]*$/i.test(m);
 }
 
@@ -1588,6 +1589,10 @@ function buildDeterministicAffirmativeText(route, dialogueState, extras = {}) {
   if (resolution === 'analysis_clarify') {
     return 'Which would you like me to look at more closely?';
   }
+  if (route && route.capability === 'conversation_clarify') {
+    const { buildConversationClarifyText } = require('./keaConversationContinuation');
+    return buildConversationClarifyText(route, extras.message || (route && route.message));
+  }
   const draft = dialogueState && dialogueState.draftTransaction;
   if (resolution === 'repeat_write') {
     if (invitationDraftIsProposable(draft) && dialogueState && dialogueState.pendingConfirmation === true) {
@@ -1615,7 +1620,9 @@ function buildDeterministicAffirmativeText(route, dialogueState, extras = {}) {
 }
 
 function isDeterministicAffirmativeCapability(capability) {
-  return capability === 'invitation_continuation' || capability === 'bare_affirmative_unresolved';
+  return capability === 'invitation_continuation'
+    || capability === 'bare_affirmative_unresolved'
+    || capability === 'conversation_clarify';
 }
 
 function shouldSkipAzureForRoute(route) {
@@ -1993,139 +2000,82 @@ function routeCapabilityUnwrapped(input = {}) {
     }
   }
 
-  // 4. Short financial continuation (same authorized account only)
-  const lastCap = last.lastCapability;
-  const accountChanged = !!(last.lastAccountId && currentAccountId
-    && !accountsMatch(last.lastAccountId, currentAccountId));
-  const continuationEligible = FINANCIAL_CAPABILITIES.has(lastCap)
-    && isShortFollowUp(message)
-    && !accountChanged
-    && accountsMatch(last.lastAccountId, currentAccountId);
+  // 4. Capsule + resolver is the sole production continuation owner.
+  //    Lazy-require to avoid a load-time cycle with this module.
+  const {
+    resolveConversationState,
+    RESOLUTION,
+    TRANSITION,
+  } = require('./keaConversationStateResolver');
+  const { applyConversationContinuation, threadMutated } = require('./keaConversationContinuation');
 
-  const breakContinuation = wouldBreakContinuation(message, lastCap, currentDate);
-  const recurringFollowUp = lastCap === 'cashflow_recurring'
-    && isRecurringFollowUp(message)
-    && !accountChanged
-    && accountsMatch(last.lastAccountId, currentAccountId);
-  const upcomingFollowUp = lastCap === 'cashflow_upcoming'
-    && isUpcomingFollowUp(message)
-    && !accountChanged
-    && accountsMatch(last.lastAccountId, currentAccountId);
-  const incomeHorizonFollowUp = lastCap === 'cashflow_income_horizon'
-    && isIncomeHorizonFollowUp(message)
-    && !accountChanged
-    && accountsMatch(last.lastAccountId, currentAccountId);
+  const capsule = resolveCurrentConversationCapsule(last, currentAccountId);
+  const freshForResolver = classifyFreshIntentCandidate({
+    message,
+    currentDate,
+    knownCategories,
+    slots,
+  });
+  const resolved = resolveConversationState({
+    message,
+    clientDate: currentDate,
+    currentAccountId,
+    capsule,
+    freshCandidate: freshForResolver,
+    knownCategories,
+  });
+  const accountChanged = resolved.accountMatch === false
+    || !!(last.lastAccountId && currentAccountId && !accountsMatch(last.lastAccountId, currentAccountId));
+  let capsuleClear = resolved.transition === TRANSITION.CLEARED_HARD_SWITCH
+    || resolved.transition === TRANSITION.CLEARED_ACCOUNT_CHANGE;
+  const capsuleTransition = resolved.transition || TRANSITION.NONE;
+  base.accountChanged = accountChanged;
+  base.capsuleClear = capsuleClear;
+  base.capsuleTransition = capsuleTransition;
 
-  if ((continuationEligible || recurringFollowUp || upcomingFollowUp || incomeHorizonFollowUp) && !breakContinuation) {
-    const parsedPurchase = parsePurchaseDate(message, currentDate);
-    const merged = {
-      amount: slots.amount != null ? slots.amount : (lastCap === 'affordability_or_planning' && last.lastSubjectKind === 'amount'
-        ? Number(last.lastSubjectValue)
-        : null),
-      period: slots.period || last.lastPeriod || null,
-      subjectKind: slots.subjectKind || last.lastSubjectKind || null,
-      subjectValue: slots.subjectValue || last.lastSubjectValue || null,
-      purchaseDate: last.lastPurchaseDate || null,
-      purchaseDateAssumption: last.lastPurchaseDateAssumption || null,
-      purchaseDateAssumptionText: last.lastPurchaseDateAssumptionText || null,
-      purchaseDateError: null,
-    };
-    if (slots.period) merged.period = slots.period;
-    if (slots.subjectKind) {
-      merged.subjectKind = slots.subjectKind;
-      merged.subjectValue = slots.subjectValue;
-    } else {
-      merged.subjectKind = last.lastSubjectKind || merged.subjectKind;
-      merged.subjectValue = last.lastSubjectValue || merged.subjectValue;
+  if (resolved.resolution === RESOLUTION.CONTINUATION) {
+    const applied = applyConversationContinuation({
+      message,
+      activeThread: capsule && capsule.activeThread,
+      resolverResult: resolved,
+      clientDate: currentDate,
+      knownCategories,
+      slots,
+    });
+    if (applied.supported) {
+      const mutated = threadMutated(capsule && capsule.activeThread, applied.updatedThread);
+      return {
+        ...base,
+        capability: 'continuation',
+        parentCapability: resolved.effectiveCapability,
+        confidence: 'high',
+        continuationUsed: true,
+        slots: applied.slots,
+        responseMode: applied.responseMode,
+        continuationAction: applied.continuationAction,
+        capsuleTransition: mutated ? TRANSITION.REFINED : TRANSITION.CONTINUED,
+        updatedThread: applied.updatedThread,
+        accountChanged: false,
+        capsuleClear: false,
+      };
     }
-    if (slots.amount != null && (last.lastSubjectKind === 'amount' || lastCap === 'affordability_or_planning')) {
-      merged.subjectKind = 'amount';
-      merged.subjectValue = String(slots.amount);
-      merged.amount = slots.amount;
-    }
-    if (parsedPurchase && parsedPurchase.error) {
-      merged.purchaseDateError = parsedPurchase.error;
-      if (parsedPurchase.date) merged.purchaseDate = parsedPurchase.date;
-    } else if (parsedPurchase && parsedPurchase.date) {
-      merged.purchaseDate = parsedPurchase.date;
-      merged.purchaseDateAssumption = parsedPurchase.assumption;
-      merged.purchaseDateAssumptionText = parsedPurchase.assumptionText;
-      merged.purchaseDateError = null;
-    }
-    if (lastCap === 'cashflow_comparison' && last.lastComparison) {
-      merged.periodA = last.lastComparison.periodA || null;
-      merged.periodB = last.lastComparison.periodB || null;
-      merged.windowKind = last.lastComparison.windowKind || null;
-      if (categoryStemsIn(message).size >= 2) {
-        merged.comparisonError = 'compound_comparison_unsupported';
-      }
-    }
-    if (lastCap === 'cashflow_trend' && last.lastTrend) {
-      merged.periods = last.lastTrend.periods || null;
-      merged.windowKind = last.lastTrend.windowKind || null;
-      merged.metricScope = slots.subjectKind === 'category'
-        ? 'category'
-        : (last.lastTrend.metricScope || 'spending');
-      if (categoryStemsIn(message).size >= 2) {
-        merged.trendError = 'compound_trend_unsupported';
-      } else if (slots.subjectKind === 'merchant') {
-        merged.trendError = 'merchant_trend_unsupported';
-      }
-    }
-    if (lastCap === 'cashflow_recurring' && last.lastRecurring) {
-      merged.metricScope = last.lastRecurring.metricScope || 'all';
-      merged.rankingMode = recurringRankingMode(message, last.lastRecurring.rankingMode);
-      if (/\bincome\b/i.test(message)) merged.metricScope = 'income';
-      if (/\b(expense|bill)/i.test(message) && !/\bincome\b/i.test(message)) {
-        merged.metricScope = 'expense';
-      }
-      if (/\b(changed|increased|decreased|trend)\b/i.test(message)) {
-        merged.recurringError = 'recurring_trend_unsupported';
-      }
-    }
-    if (lastCap === 'cashflow_upcoming' && last.lastUpcoming) {
-      merged.period = last.lastUpcoming.period || merged.period;
-      merged.metricScope = last.lastUpcoming.metricScope || 'all';
-      if (/\bincome\b/i.test(message)) merged.metricScope = 'income';
-      if (/\b(expense|bill)/i.test(message) && !/\bincome\b/i.test(message)) {
-        merged.metricScope = 'expense';
-      }
-      if (isWeekAfterFollowUp(message)) {
-        const rel = merged.period && (merged.period.relation || merged.period.label);
-        if (isCalendarWeekRelation(rel)) {
-          const shifted = shiftCalendarWeek(merged.period);
-          if (shifted) merged.period = shifted;
-        }
-      }
-    }
-    if (lastCap === 'cashflow_income_horizon' && last.lastIncomeHorizon) {
-      merged.incomeDate = last.lastIncomeHorizon.incomeDate || null;
-      merged.windowStart = last.lastIncomeHorizon.windowStart || null;
-      merged.windowEnd = last.lastIncomeHorizon.windowEnd || null;
-      merged.incomeAmount = last.lastIncomeHorizon.incomeAmount != null
-        ? last.lastIncomeHorizon.incomeAmount
-        : last.lastIncomeHorizon.combinedIncomeAmount;
-      merged.incomeHorizonDefinition = last.lastIncomeHorizon.definition
-        || 'kea_scheduled_recurring_income';
-      if (isAfterPaydayFollowUp(message)) {
-        merged.incomeHorizonError = 'after_income_intraday_unsupported';
-      }
-    }
-    return {
-      ...base,
-      capability: 'continuation',
-      parentCapability: lastCap,
-      confidence: 'high',
-      continuationUsed: true,
-      slots: merged,
-      accountChanged: false,
-    };
   }
 
-  // Account switch: never inherit prior financial subject as continuation.
-  // A fully re-specified question still falls through to the normal classifier.
-  if (accountChanged && isShortFollowUp(message) && !slots.period && !parseMerchant(message) && !parseCategory(message)) {
-    return { ...base, capability: 'unknown', confidence: 'low', accountChanged: true };
+  if (resolved.resolution === RESOLUTION.CLARIFY
+    && (resolved.reason === 'no_active_thread'
+      || resolved.reason === 'invalid_capsule'
+      || resolved.reason === 'account_mismatch')) {
+    return {
+      ...base,
+      capability: 'conversation_clarify',
+      confidence: 'high',
+      continuationUsed: false,
+      capsuleClear,
+      capsuleTransition,
+      accountChanged: resolved.reason === 'account_mismatch',
+      clarifyReason: resolved.reason,
+      message,
+    };
   }
 
   // 5. Deterministic normal classifier (shared with Capsule resolver tests)
@@ -2139,12 +2089,20 @@ function routeCapabilityUnwrapped(input = {}) {
     invitation,
   });
   if (classified.capability !== 'unknown') {
+    if ((classified.capability === 'product_help' || classified.capability === 'navigation_ui')
+      && capsule && capsule.activeThread) {
+      capsuleClear = true;
+      base.capsuleClear = true;
+      base.capsuleTransition = TRANSITION.CLEARED_HARD_SWITCH;
+    }
     return {
       ...base,
       capability: classified.capability,
       confidence: classified.confidence,
       slots: classified.slots || slots,
       accountChanged,
+      capsuleClear,
+      capsuleTransition: base.capsuleTransition,
       invitationWriteHandoff: classified.invitationWriteHandoff === true,
       affirmativeResolution: classified.affirmativeResolution || 'none',
     };
@@ -2314,7 +2272,8 @@ function shouldPersistContinuation(route, { failSoft } = {}) {
     || route.capability === 'product_help'
     || route.capability === 'navigation_ui'
     || route.capability === 'invitation_continuation'
-    || route.capability === 'bare_affirmative_unresolved') {
+    || route.capability === 'bare_affirmative_unresolved'
+    || route.capability === 'conversation_clarify') {
     return false;
   }
   return PERSIST_CAPABILITIES.has(route.capability);
@@ -2322,6 +2281,12 @@ function shouldPersistContinuation(route, { failSoft } = {}) {
 
 function applyContinuationPersistence(dialogueState, route, { accountId, failSoft } = {}) {
   if (!dialogueState || typeof dialogueState !== 'object') return dialogueState;
+  if (route && route.capsuleClear === true) {
+    const keepAccount = dialogueState.lastAccountId
+      || (accountId == null || accountId === '' ? null : String(accountId));
+    dialogueState.capsule = emptyAuthoritativeCapsule(keepAccount, dialogueState.updatedAt);
+    return dialogueState;
+  }
   if (!shouldPersistContinuation(route, { failSoft })) return dialogueState;
 
   const cap = route.capability === 'continuation' ? route.parentCapability : route.capability;
@@ -2394,19 +2359,25 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
     };
   }
   if (cap === 'cashflow_income_horizon') {
-    const amount = slots.incomeAmount != null ? Number(slots.incomeAmount) : null;
+    const prev = dialogueState.lastIncomeHorizon && typeof dialogueState.lastIncomeHorizon === 'object'
+      ? dialogueState.lastIncomeHorizon
+      : {};
+    const amount = slots.incomeAmount != null
+      ? Number(slots.incomeAmount)
+      : (prev.incomeAmount != null ? Number(prev.incomeAmount) : null);
+    const combined = slots.combinedIncomeAmount != null
+      ? Number(slots.combinedIncomeAmount)
+      : (prev.combinedIncomeAmount != null ? Number(prev.combinedIncomeAmount) : null);
     dialogueState.lastIncomeHorizon = {
-      incomeDate: slots.incomeDate ? String(slots.incomeDate).slice(0, 10) : null,
+      incomeDate: slots.incomeDate ? String(slots.incomeDate).slice(0, 10) : (prev.incomeDate || null),
       incomeAmount: Number.isFinite(amount) ? amount : undefined,
-      combinedIncomeAmount: slots.combinedIncomeAmount != null && Number.isFinite(Number(slots.combinedIncomeAmount))
-        ? Number(slots.combinedIncomeAmount)
-        : undefined,
-      windowStart: slots.windowStart ? String(slots.windowStart).slice(0, 10) : null,
-      windowEnd: slots.windowEnd ? String(slots.windowEnd).slice(0, 10) : null,
+      combinedIncomeAmount: Number.isFinite(combined) ? combined : undefined,
+      windowStart: slots.windowStart ? String(slots.windowStart).slice(0, 10) : (prev.windowStart || null),
+      windowEnd: slots.windowEnd ? String(slots.windowEnd).slice(0, 10) : (prev.windowEnd || null),
       definition: 'kea_scheduled_recurring_income',
     };
   }
-  syncConversationCapsule(dialogueState);
+  dialogueState.capsule = projectConversationCapsule(dialogueState);
   return dialogueState;
 }
 
@@ -2548,6 +2519,9 @@ module.exports = {
   isCasual,
   wouldBreakContinuation,
   classifyFreshIntentCandidate,
+  recurringRankingMode,
+  isCalendarWeekRelation,
+  categoryStemsIn,
   accountsMatch,
   lastCommittedCreate,
   normalizePendingInvitation,

@@ -25,7 +25,6 @@ const { compactSelectedAccount } = require('../services/keaAccountSnapshot');
 const { resolveKeaSelectedAccount } = require('../services/keaSelectedAccountResolve');
 const { routeCapability, applyContinuationPersistenceFromEvidence, mergeOpenSearchUiActions, applyInvitationLifecycle, applyRepeatWriteLifecycle, maybeSetAffordabilityInvitation, shouldSkipAzureForRoute, buildDeterministicAffirmativeText } = require('../services/keaCapabilityRouter');
 const {
-  projectConversationCapsule,
   syncConversationCapsule,
   capsuleTelemetryFields,
 } = require('../services/keaConversationCapsule');
@@ -3484,7 +3483,7 @@ exports.chat = async (req, res) => {
       failSoft: phase1FailSoft,
     });
     const capsuleTelemetry = capsuleTelemetryFields(
-      projectConversationCapsule(dialogueState),
+      dialogueState.capsule,
       accountid
     );
     const phase1Performed = !phase1FailSoft
@@ -3558,6 +3557,7 @@ exports.chat = async (req, res) => {
       capsule_kind: capsuleTelemetry.capsule_kind,
       capsule_version: capsuleTelemetry.capsule_version,
       capsule_account_match: capsuleTelemetry.capsule_account_match,
+      capsule_transition: phase1Route.capsuleTransition || 'none',
       financial_macro: financialMacro,
       macro_performed: macroAttempted,
       macro_status: macroAttempted
@@ -3981,6 +3981,7 @@ exports.chat = async (req, res) => {
         accountName: hasAccount && selectedAccount
           ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name)
           : null,
+        message,
       }) };
     } else if (!shouldStartNewExpensiveWork(lifecycle)) {
       telemetry.emit(req.log);

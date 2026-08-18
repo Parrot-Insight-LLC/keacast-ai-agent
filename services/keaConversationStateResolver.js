@@ -1,25 +1,23 @@
 'use strict';
 
 /**
- * Conversation State Resolver (Phase 3A.2)
+ * Conversation State Resolver (Phase 3A.2 ownership + 3A.4 production authority)
  *
- * Shadow ownership layer: given a derived Conversation Capsule and a fresh
- * intent candidate, decide whether the turn is a continuation, a fresh
- * replacement, or an unresolved/clarify follow-up.
+ * Given a validated Conversation Capsule and a fresh intent candidate, decide
+ * whether the turn is a continuation, a fresh replacement, a hard-switch clear,
+ * or an unresolved/clarify follow-up.
  *
  * This module does NOT:
  *   - call Azure, Cashflow, Redis, or tools
  *   - authorize writes or invitations
  *   - persist Capsule or mutate dialogueState / Capsule / freshCandidate
- *   - replace production routeCapability
  *
- * Production routing remains in keaCapabilityRouter. 3A.2 proves parity.
- *
- * Hard-switch (product_help / navigation clearing Capsule) is intentionally
- * NOT implemented. Soft interjection (thanks) also does not clear a thread.
+ * Hard-switch (product_help / navigation_ui / narrow settings-password) clears
+ * the conceptual active thread. Soft interjection (thanks) does not.
  */
 
 const { THREAD_KINDS, isConversationCapsuleV1 } = require('./keaConversationCapsule');
+const { parseContinuationAction } = require('./keaConversationContinuation');
 const {
   classifyFreshIntentCandidate,
   wouldBreakContinuation,
@@ -27,11 +25,9 @@ const {
   isRecurringFollowUp,
   isUpcomingFollowUp,
   isIncomeHorizonFollowUp,
-  isWeekAfterFollowUp,
-  isAfterPaydayFollowUp,
-  isRecurringLargestIntent,
   isCasual,
   accountsMatch,
+  FINANCIAL_CAPABILITIES,
 } = require('./keaCapabilityRouter');
 
 const KIND_TO_CAPABILITY = Object.freeze({
@@ -52,7 +48,10 @@ const TRANSITION = Object.freeze({
   REFINED: 'refined',
   REPLACED_BY_FRESH_INTENT: 'replaced_by_fresh_intent',
   CLEARED_ACCOUNT_CHANGE: 'cleared_account_change',
+  CLEARED_HARD_SWITCH: 'cleared_hard_switch',
   UNSUPPORTED_FOLLOWUP: 'unsupported_followup',
+  UNCHANGED: 'unchanged',
+  NONE: 'none',
 });
 
 const RESOLUTION = Object.freeze({
@@ -61,6 +60,8 @@ const RESOLUTION = Object.freeze({
   CLARIFY: 'clarify',
   NONE: 'none',
 });
+
+const HARD_SWITCH_CAPS = new Set(['product_help', 'navigation_ui']);
 
 function capabilityForKind(kind) {
   return kind ? (KIND_TO_CAPABILITY[kind] || null) : null;
@@ -78,50 +79,26 @@ function matchesActiveThreadFollowUp(kind, message) {
   if (kind === THREAD_KINDS.RECURRING && isRecurringFollowUp(message)) return true;
   if (kind === THREAD_KINDS.UPCOMING && isUpcomingFollowUp(message)) return true;
   if (kind === THREAD_KINDS.INCOME_HORIZON && isIncomeHorizonFollowUp(message)) return true;
-  // Same as production continuationEligible: any financial thread + short follow-up.
   return isShortFollowUp(message);
 }
 
-function continuationMeta(kind, message) {
-  const out = { responseMode: null, continuationAction: null };
-  if (!kind || !message) return out;
-  const income = /\bincome\b/i.test(message);
-  const expenseOnly = /\b(expense|bill)/i.test(message) && !income;
+function isSettingsHardSwitch(text) {
+  const m = String(text || '').toLowerCase();
+  if (!m || m.length > 120) return false;
+  if (/\b(spend|spent|bill|income|forecast|afford|paycheck|balance)\b/.test(m)) return false;
+  return /\b(change|reset|update)\b.{0,32}\bpassword\b/.test(m)
+    || /\bpassword\b.{0,24}\b(change|reset|update)\b/.test(m)
+    || /\b(account settings|privacy settings|login help)\b/.test(m);
+}
 
-  if (kind === THREAD_KINDS.RECURRING) {
-    if (isRecurringLargestIntent(message)) out.continuationAction = 'recurring_largest';
-    else if (income) out.continuationAction = 'switch_scope_income';
-    else if (expenseOnly) out.continuationAction = 'switch_scope_expense';
-    return out;
-  }
-  if (kind === THREAD_KINDS.UPCOMING) {
-    if (isWeekAfterFollowUp(message)) out.continuationAction = 'upcoming_week_after';
-    else if (income) out.continuationAction = 'switch_scope_income';
-    else if (expenseOnly) out.continuationAction = 'switch_scope_expense';
-    else if (isUpcomingFollowUp(message)) {
-      out.continuationAction = 'request_total';
-      out.responseMode = 'total';
-    }
-    return out;
-  }
-  if (kind === THREAD_KINDS.INCOME_HORIZON) {
-    if (isAfterPaydayFollowUp(message)) {
-      out.continuationAction = 'horizon_after_payday_unsupported';
-    } else if (/\bwill i go negative\b/i.test(message)) {
-      out.continuationAction = 'horizon_negative_check';
-      out.responseMode = 'negative_check';
-    } else if (/\bbefore then\b/i.test(message)) {
-      out.continuationAction = 'horizon_expenses_before';
-    } else if (isIncomeHorizonFollowUp(message) || /how much total|the total/i.test(message)) {
-      out.continuationAction = 'request_total';
-      out.responseMode = 'total';
-    }
-    return out;
-  }
-  if (kind === THREAD_KINDS.TREND && income) {
-    out.continuationAction = 'switch_scope_income';
-  }
-  return out;
+function isHardSwitchFresh(freshCap, message) {
+  if (HARD_SWITCH_CAPS.has(freshCap)) return true;
+  if (freshCap === 'unknown' && isSettingsHardSwitch(message)) return true;
+  return false;
+}
+
+function continuationMeta(kind, message) {
+  return parseContinuationAction(message, kind ? { kind } : null);
 }
 
 function emptyResult(extra = {}) {
@@ -190,7 +167,7 @@ function resolveConversationState(input = {}) {
   if (accountMismatch && shaped && (freshCap === 'unknown' || freshCandidate.intentStrength === 'none')) {
     return emptyResult({
       resolution: RESOLUTION.CLARIFY,
-      effectiveCapability: 'unknown',
+      effectiveCapability: 'conversation_clarify',
       continuationUsed: false,
       transition: TRANSITION.CLEARED_ACCOUNT_CHANGE,
       activeThreadKind: null,
@@ -201,12 +178,30 @@ function resolveConversationState(input = {}) {
   }
 
   const threadEligible = !!(threadKind && threadCap && !accountMismatch);
+
+  if (threadEligible && isHardSwitchFresh(freshCap, message)) {
+    return emptyResult({
+      resolution: freshCap === 'unknown' ? RESOLUTION.NONE : RESOLUTION.FRESH,
+      effectiveCapability: freshCap,
+      continuationUsed: false,
+      transition: TRANSITION.CLEARED_HARD_SWITCH,
+      activeThreadKind: null,
+      accountMatch: accountMatch || currentAccountId == null || currentAccountId === '',
+      reason: 'hard_switch',
+      confidence: freshConfidence,
+    });
+  }
+
   const followUp = threadEligible && matchesActiveThreadFollowUp(threadKind, message);
   const strongTakeover = threadEligible && wouldBreakContinuation(message, threadCap, clientDate);
 
   if (threadEligible && followUp && !strongTakeover) {
     const meta = continuationMeta(threadKind, message);
-    const refined = !!(meta.continuationAction && meta.continuationAction !== 'request_total');
+    const refined = !!(meta.continuationAction
+      && meta.continuationAction !== 'request_total'
+      && meta.continuationAction !== 'horizon_expenses_before'
+      && meta.continuationAction !== 'horizon_negative_check'
+      && meta.continuationAction !== 'horizon_after_payday_unsupported');
     return {
       resolution: RESOLUTION.CONTINUATION,
       effectiveCapability: threadCap,
@@ -237,9 +232,9 @@ function resolveConversationState(input = {}) {
   if (!threadEligible && shaped && (freshCap === 'unknown' || freshCandidate.intentStrength === 'none')) {
     return emptyResult({
       resolution: RESOLUTION.CLARIFY,
-      effectiveCapability: 'unknown',
+      effectiveCapability: 'conversation_clarify',
       continuationUsed: false,
-      transition: threadKind && !followUp ? TRANSITION.UNSUPPORTED_FOLLOWUP : null,
+      transition: threadKind && !followUp ? TRANSITION.UNSUPPORTED_FOLLOWUP : TRANSITION.NONE,
       activeThreadKind: null,
       accountMatch: accountMismatch ? false : (currentAccountId == null ? null : true),
       reason: capsuleValid ? 'no_active_thread' : 'invalid_capsule',
@@ -261,13 +256,20 @@ function resolveConversationState(input = {}) {
   }
 
   const soft = isCasual(message);
+  let transition = null;
+  if (soft && threadEligible) {
+    transition = TRANSITION.UNCHANGED;
+  } else if (threadEligible && FINANCIAL_CAPABILITIES.has(freshCap) && freshCap !== threadCap) {
+    transition = TRANSITION.REPLACED_BY_FRESH_INTENT;
+  } else if (!threadEligible && freshCap !== 'unknown' && freshCandidate.intentStrength === 'strong_fresh') {
+    transition = TRANSITION.CREATED;
+  }
+
   return emptyResult({
     resolution: freshCap === 'unknown' ? RESOLUTION.NONE : RESOLUTION.FRESH,
     effectiveCapability: freshCap,
     continuationUsed: false,
-    transition: (!threadEligible && freshCap !== 'unknown' && freshCandidate.intentStrength === 'strong_fresh')
-      ? TRANSITION.CREATED
-      : null,
+    transition,
     activeThreadKind: threadEligible ? threadKind : null,
     accountMatch: accountMismatch ? false : (threadEligible ? (accountMatch || currentAccountId == null || currentAccountId === '') : null),
     reason: soft && threadEligible ? 'soft_interjection' : (freshCap === 'unknown' ? 'none' : 'fresh_candidate'),
@@ -282,4 +284,6 @@ module.exports = {
   resolveConversationState,
   capabilityForKind,
   isContinuationShaped,
+  isSettingsHardSwitch,
+  isHardSwitchFresh,
 };

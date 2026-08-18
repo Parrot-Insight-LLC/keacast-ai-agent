@@ -10,6 +10,7 @@ const { deriveConversationCapsule, THREAD_KINDS } = require('../services/keaConv
 const {
   resolveConversationState,
   RESOLUTION,
+  TRANSITION,
 } = require('../services/keaConversationStateResolver');
 
 const DATE = '2026-08-17';
@@ -364,7 +365,7 @@ async function run() {
     freshCandidate: classifyFreshIntentCandidate({ message: 'How much total?', currentDate: DATE }),
   });
   check('unknown version behaves as no thread', bad.resolution === RESOLUTION.CLARIFY
-    && bad.effectiveCapability === 'unknown'
+    && bad.effectiveCapability === 'conversation_clarify'
     && bad.continuationUsed === false);
   assertParity('invalid capsule fresh compare still works', 'Compare July and June.', ds());
 
@@ -377,13 +378,13 @@ async function run() {
     && thanks.resolved.continuationUsed === false);
   assertParity('how much total after thanks-shaped state still upcoming', 'How much total?', ds(UPCOMING));
 
-  assertParity('password help current production unknown', 'How do I change my password?', ds(UPCOMING));
+  assertParity('password help is not continuation', 'How do I change my password?', ds(UPCOMING));
   const pwd = shadow('How do I change my password?', ds(UPCOMING));
-  check('hard-switch NOT implemented (thread still present conceptually)',
+  check('hard-switch clears conceptual thread',
     pwd.resolved.continuationUsed === false
     && pwd.resolved.effectiveCapability === 'unknown'
-    && pwd.resolved.activeThreadKind === THREAD_KINDS.UPCOMING);
-  check('EXPECTED_FUTURE_DIVERGENCE hard-switch would clear thread', true);
+    && pwd.resolved.activeThreadKind == null
+    && pwd.resolved.transition === TRANSITION.CLEARED_HARD_SWITCH);
 
   section('3A.2 responseMode request-local');
 

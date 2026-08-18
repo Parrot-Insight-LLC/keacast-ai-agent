@@ -67,6 +67,7 @@ const BUNDLES = Object.freeze({
   mixed_macro: Object.freeze([]),
   invitation_continuation: Object.freeze([]),
   bare_affirmative_unresolved: Object.freeze([]),
+  conversation_clarify: Object.freeze([]),
   transaction_write: TRANSACTION_WRITE,
   goal_write: GOAL_WRITE,
   simulation: SIMULATION,

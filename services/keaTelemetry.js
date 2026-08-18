@@ -132,6 +132,7 @@ function createKeaTelemetry({ requestId } = {}) {
     capsule_kind: 'none',
     capsule_version: null,
     capsule_account_match: null,
+    capsule_transition: 'none',
   };
 
   let lastStage = null;
@@ -353,6 +354,9 @@ function createKeaTelemetry({ requestId } = {}) {
     if (flags.capsule_account_match === true || flags.capsule_account_match === false || flags.capsule_account_match === null) {
       grounding.capsule_account_match = flags.capsule_account_match;
     }
+    if (typeof flags.capsule_transition === 'string' && flags.capsule_transition) {
+      grounding.capsule_transition = flags.capsule_transition;
+    }
   }
 
   function setResponseCharacterCount(n) {
@@ -548,6 +552,7 @@ function createKeaTelemetry({ requestId } = {}) {
       capsule_kind: grounding.capsule_kind || 'none',
       capsule_version: grounding.capsule_version,
       capsule_account_match: grounding.capsule_account_match,
+      capsule_transition: grounding.capsule_transition || 'none',
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,
