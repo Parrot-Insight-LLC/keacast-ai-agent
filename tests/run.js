@@ -33,6 +33,7 @@ const suites = [
   './keaLookupEvidenceShadow.test.js',
   './keaLookupEvidenceCutover.test.js',
   './keaSnapshotEvidenceAdapter.test.js',
+  './keaSnapshotEvidenceShadow.test.js',
   './keaConversationCapsule.test.js',
   './keaConversationStateResolver.test.js',
   './keaConversationCapsulePersistence.test.js',

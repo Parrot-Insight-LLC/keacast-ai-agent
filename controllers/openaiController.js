@@ -46,6 +46,7 @@ const {
   isEligibleLookupCutover,
 } = require('../services/keaEvidencePromptCutover');
 const { telemetryForNonCutoverTurn, emptyEvidenceTelemetry } = require('../services/keaEvidenceTelemetry');
+const { shadowSnapshotEvidence } = require('../services/keaSnapshotEvidenceShadow');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const {
   azureChatTimeoutMs,
@@ -3639,6 +3640,20 @@ exports.chat = async (req, res) => {
         telemetry.setMacroFailureReason(phase1Evidence.macroFailureReason);
       }
     }
+    try {
+      shadowSnapshotEvidence({
+        evidence: phase1Evidence,
+        selectedAccount: hasAccount ? selectedAccount : null,
+        capability: phase1Policy.effectiveCapability,
+        route: phase1Route,
+        accountContext: {
+          accountId: accountid,
+          accountLabel: hasAccount && selectedAccount
+            ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name || null)
+            : null,
+        },
+      });
+    } catch (e) { /* snapshot shadow must not own control flow */ }
     const phase1FailSoft = isFailSoft(phase1Policy, phase1Evidence);
     applyContinuationPersistenceFromEvidence(dialogueState, phase1Route, phase1Evidence, {
       accountId: accountid,
