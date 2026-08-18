@@ -6,8 +6,8 @@
  * Copies already-compact recents / upcoming / futureNegativeBalances onto a
  * derived evidence object so EvidenceLedgerV1 can represent item-level
  * snapshot facts. Does not mutate production phase1Evidence, does not fetch,
- * and does not recap/sort/recalculate. Production Azure still uses the
- * unadapted legacy snapshot path until 3B.3B.5.
+ * and does not recap/sort/recalculate. Production Azure (3B.3B.5) consumes
+ * this adapter through projectSnapshotEvidence when the snapshot flag is on.
  */
 
 const { cloneJson, deepFreeze } = require('./keaEvidenceLedger');

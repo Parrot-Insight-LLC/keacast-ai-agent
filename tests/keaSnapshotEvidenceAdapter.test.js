@@ -348,8 +348,7 @@ async function run() {
     && !/logger\.(log|debug|info|warn)/.test(adapterSrc));
   check('adapter does not fetch', !/http|redis|fetchPage|getTransactions/i.test(adapterSrc));
   check('buildSnapshotEvidence still omits recents assignment', !/facts\.recents\s*=/.test(prefetchSrc));
-  check('no snapshot production flag', !/USE_SNAPSHOT_EVIDENCE_LEDGER_PROMPT/.test(adapterSrc)
-    && !/USE_SNAPSHOT_EVIDENCE_LEDGER_PROMPT/.test(controllerSrc));
+  check('adapter has no snapshot production flag', !/USE_SNAPSHOT_EVIDENCE_LEDGER_PROMPT/.test(adapterSrc));
   check('version remains 1', built.ledger.version === 1);
 
   section('3B.3B.3 performance');

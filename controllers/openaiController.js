@@ -40,13 +40,16 @@ const { prefetchGrounding, buildEvidenceSystemSection, shouldForceDirectAnswer }
 const {
   projectApprovedMacroEvidence,
   projectLookupEvidence,
+  projectSnapshotEvidence,
   isEvidenceRollbackActive,
   isLookupLedgerPromptEnabled,
   isLookupEvidenceRollbackActive,
   isEligibleLookupCutover,
+  isEligibleSnapshotCutover,
+  isSnapshotLedgerPromptEnabled,
+  isSnapshotEvidenceRollbackActive,
 } = require('../services/keaEvidencePromptCutover');
 const { telemetryForNonCutoverTurn, emptyEvidenceTelemetry } = require('../services/keaEvidenceTelemetry');
-const { shadowSnapshotEvidence } = require('../services/keaSnapshotEvidenceShadow');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const {
   azureChatTimeoutMs,
@@ -659,6 +662,122 @@ function buildMacroSelectedAccountContext(account, firstName, currentDate) {
     `Selected account: ${name}${type ? ` (${type})` : ''}${inst ? ` @ ${inst}` : ''}.`,
     'All financial values in GROUNDED EVIDENCE refer only to this selected account unless the evidence explicitly states otherwise.',
   ].join('\n');
+}
+
+function buildSnapshotAnalysisPrompt({
+  currentDate,
+  firstName,
+  account,
+  evidence,
+  capability,
+  route,
+  accountContext,
+  longTermFacts,
+  rollingSummary,
+  dialogueState,
+  simulationMode,
+  simulationAvailable,
+  simContext,
+  simSnapshot,
+} = {}) {
+  const assembled = assembleBaseSystemPrompt({
+    currentDate,
+    promptProfile: 'macro_analysis',
+  });
+  const accountBrief = account
+    ? buildMacroSelectedAccountContext(account, firstName, currentDate)
+    : '';
+  const projected = projectSnapshotEvidence({
+    capability: capability === 'financial_lookup' ? 'financial_lookup' : 'financial_forecast',
+    evidence,
+    route,
+    accountContext,
+    selectedAccount: account,
+  });
+  if (projected.mode === 'ledger_v1' && (projected.failSoft || !projected.promptable || !projected.block)) {
+    return {
+      ...assembled,
+      accountBrief,
+      groundedEvidenceBlock: '',
+      systemContent: assembled.baseSystem,
+      evidencePromptMode: 'ledger_v1',
+      projectionFailed: true,
+      projectionReason: projected.reason || 'projection_failed',
+      evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+    };
+  }
+  if (projected.mode !== 'ledger_v1' || !projected.block) {
+    return {
+      ...assembled,
+      accountBrief,
+      groundedEvidenceBlock: '',
+      systemContent: assembled.baseSystem,
+      evidencePromptMode: projected.mode || 'legacy',
+      projectionFailed: false,
+      useLegacyAssembly: true,
+      evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+    };
+  }
+  let systemContent = accountBrief
+    ? `${assembled.baseSystem}\n\n---\nCURRENT CONTEXT (background — NOT a message from the user):\n${accountBrief}`
+    : assembled.baseSystem;
+  const dateRefBlock = buildDateReferenceBlock(currentDate);
+  const factsBlock = buildFactsBlock(longTermFacts);
+  const summaryBlock = buildSummaryBlock(rollingSummary);
+  const dialogueBlock = buildDialogueStateBlock(dialogueState, { omitUiReferent: false });
+  systemContent += `\n\n---\n${dateRefBlock}`;
+  if (factsBlock) systemContent += `\n\n---\n${factsBlock}`;
+  if (summaryBlock) systemContent += `\n\n---\n${summaryBlock}`;
+  if (dialogueBlock) systemContent += `\n\n---\n${dialogueBlock}`;
+  systemContent += `\n\n---\n${projected.block}`;
+  if (simulationMode) {
+    let simBlock = `SIMULATION MODE IS ACTIVE. The user is exploring hypothetical "what-if" changes on their calendar. RULES:
+- Use proposeSimulationAdd to stage a new hypothetical income/expense, proposeSimulationModify to change an existing forecasted transaction (find its transactionid via the read tools if needed), and proposeSimulationRemove to drop one. Map intent: "add / what if I had" => add; "change / raise / lower / move" => modify; "cancel / remove / drop / without" => remove.
+- For recurring forecasts set scope: 'group' for every occurrence, 'groupfrom' for this-and-future, 'single' (default) for one occurrence.
+- These tools do NOT write data and need NO confirmation turn — propose immediately with your best estimates, exactly one tool call per distinct change.
+- NEVER call createTransaction, updateTransaction, deleteTransaction, createGoal, updateGoal, or deleteGoal while Simulation Mode is active (they are refused in code). The user commits or discards the simulation from the banner on their calendar.
+- After proposing, briefly narrate the change and its projected impact on the user's balances.
+- If the user asks to "make it real" / permanently save a change, tell them to leave Simulation Mode (or discard the sim) first; do NOT treat a staged sim op as a confirmed real write.`;
+    if (simContext && Number(simContext.opCount) > 0) {
+      simBlock += `\nThe simulation currently holds ${Number(simContext.opCount)} staged change(s).`;
+    }
+    if (simSnapshot) {
+      const parts = [];
+      if (simSnapshot.simLow && simSnapshot.simLow.amount != null) {
+        parts.push(`projected lowest balance ${Number(simSnapshot.simLow.amount)} on ${simSnapshot.simLow.date}`);
+      }
+      if (simSnapshot.baselineLow && simSnapshot.baselineLow.amount != null) {
+        parts.push(`baseline (no simulation) lowest balance ${Number(simSnapshot.baselineLow.amount)} on ${simSnapshot.baselineLow.date}`);
+      }
+      if (simSnapshot.firstNegativeDate) {
+        parts.push(`the simulated balance first goes NEGATIVE on ${simSnapshot.firstNegativeDate}`);
+      }
+      if (simSnapshot.horizonEndDiff != null) {
+        parts.push(`net effect at the forecast horizon ${Number(simSnapshot.horizonEndDiff)}`);
+      }
+      if (parts.length) {
+        simBlock += `\nCURRENT SIMULATION IMPACT (use these exact numbers when narrating impact; format them as dollar amounts): ${parts.join('; ')}.`;
+      }
+    }
+    systemContent += `\n\n---\n${simBlock}`;
+  } else if (simulationAvailable) {
+    systemContent += `\n\n---\nWHAT-IF SIMULATIONS: When the user asks a hypothetical "what if" question about adding, changing, or removing a transaction (rather than asking you to actually do it), use the proposeSimulation* tools (proposeSimulationAdd / proposeSimulationModify / proposeSimulationRemove). They stage the change on the user's calendar as a reviewable simulation without writing data and need no confirmation turn. Only use createTransaction/updateTransaction/deleteTransaction when the user wants the REAL change made (propose→confirm→write). A prior simulation op is NOT confirmation for a real write — if they later ask to make it permanent, start a fresh propose→confirm cycle.`;
+  } else {
+    systemContent += `\n\n---\nDo not use the proposeSimulation* tools — this user's plan does not include Simulation Mode. For hypothetical questions, explain the impact in prose instead.`;
+  }
+  return {
+    ...assembled,
+    accountBrief,
+    dateRefBlock,
+    factsBlock,
+    summaryBlock,
+    dialogueBlock,
+    groundedEvidenceBlock: projected.block,
+    systemContent,
+    evidencePromptMode: 'ledger_v1',
+    projectionFailed: false,
+    evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+  };
 }
 
 function buildLookupAnalysisPrompt({
@@ -3640,20 +3759,6 @@ exports.chat = async (req, res) => {
         telemetry.setMacroFailureReason(phase1Evidence.macroFailureReason);
       }
     }
-    try {
-      shadowSnapshotEvidence({
-        evidence: phase1Evidence,
-        selectedAccount: hasAccount ? selectedAccount : null,
-        capability: phase1Policy.effectiveCapability,
-        route: phase1Route,
-        accountContext: {
-          accountId: accountid,
-          accountLabel: hasAccount && selectedAccount
-            ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name || null)
-            : null,
-        },
-      });
-    } catch (e) { /* snapshot shadow must not own control flow */ }
     const phase1FailSoft = isFailSoft(phase1Policy, phase1Evidence);
     applyContinuationPersistenceFromEvidence(dialogueState, phase1Route, phase1Evidence, {
       accountId: accountid,
@@ -3973,6 +4078,56 @@ exports.chat = async (req, res) => {
         systemContent = lookupPrompt.systemContent;
         console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source: lookup_ledger_v1)');
       }
+    } else if (
+      isEligibleSnapshotCutover({ capability: effectiveCap, evidence: phase1Evidence })
+      && isSnapshotLedgerPromptEnabled()
+    ) {
+      const snapshotPrompt = buildSnapshotAnalysisPrompt({
+        currentDate,
+        firstName,
+        account: hasAccount ? selectedAccount : null,
+        evidence: phase1Evidence,
+        capability: effectiveCap,
+        route: phase1Route,
+        accountContext: {
+          accountId: accountid,
+          accountLabel: hasAccount && selectedAccount
+            ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name || null)
+            : null,
+        },
+        longTermFacts,
+        rollingSummary,
+        dialogueState,
+        simulationMode,
+        simulationAvailable,
+        simContext,
+        simSnapshot,
+      });
+      try {
+        telemetry.recordEvidence(snapshotPrompt.evidenceTelemetry);
+      } catch (e) { /* telemetry must not own control flow */ }
+      if (snapshotPrompt.projectionFailed || snapshotPrompt.useLegacyAssembly) {
+        projectionFailSoft = true;
+        identityBlock = '';
+        writePolicyBlock = '';
+        productHelpPlaybookBlock = '';
+        planningPlaybookBlock = '';
+        baseSystem = '';
+        completeContext = '';
+        groundedEvidenceBlock = '';
+        systemContent = '';
+        console.warn('Chat endpoint: context block size: 0 chars (source: snapshot_prompt_fail_soft)');
+      } else {
+        identityBlock = snapshotPrompt.identityBlock;
+        writePolicyBlock = snapshotPrompt.writePolicyBlock;
+        productHelpPlaybookBlock = snapshotPrompt.productHelpPlaybookBlock;
+        planningPlaybookBlock = snapshotPrompt.planningPlaybookBlock;
+        baseSystem = snapshotPrompt.baseSystem;
+        completeContext = snapshotPrompt.accountBrief || '';
+        groundedEvidenceBlock = snapshotPrompt.groundedEvidenceBlock || '';
+        systemContent = snapshotPrompt.systemContent;
+        console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source: snapshot_ledger_v1)');
+      }
     } else {
       completeContext = hasAccount
         ? buildChatAccountContext(selectedAccount, firstName, currentDate)
@@ -3989,7 +4144,9 @@ exports.chat = async (req, res) => {
           evidence: phase1Evidence,
           rollbackActive: isEligibleLookupCutover({ capability: effectiveCap, evidence: phase1Evidence })
             ? isLookupEvidenceRollbackActive()
-            : false,
+            : (isEligibleSnapshotCutover({ capability: effectiveCap, evidence: phase1Evidence })
+              ? isSnapshotEvidenceRollbackActive()
+              : false),
         }));
       } catch (e) { /* telemetry must not own control flow */ }
 
@@ -6375,6 +6532,7 @@ exports.__testables = {
   buildMacroSelectedAccountContext,
   buildMacroAnalysisPrompt,
   buildLookupAnalysisPrompt,
+  buildSnapshotAnalysisPrompt,
   redactChatBodyForLog,
   injectTrustedIdentity,
   buildSessionKey,

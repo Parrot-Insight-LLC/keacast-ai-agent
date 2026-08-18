@@ -416,7 +416,7 @@ async function run() {
   check('snapshot-backed lookup', isSnapshotBackedLookup({ capability: 'financial_lookup', evidence: balEv }) === true);
   check('not eligible cutover', isEligibleLookupCutover({ capability: 'financial_lookup', evidence: balEv }) === false);
   const balProj = projectLookupEvidence({ capability: 'financial_lookup', evidence: balEv, route: balRoute });
-  check('balance lookup stays legacy', balProj.mode === 'legacy' && balProj.telemetry.evidence_rollback_active === false);
+  check('projectLookupEvidence still legacy for snapshot', balProj.mode === 'legacy' && balProj.telemetry.evidence_rollback_active === false);
   check('balance source kind kea_snapshot', balProj.telemetry.evidence_source_kind === 'kea_snapshot');
 
   const forecastRoute = route('What do I have upcoming in the next two weeks?');

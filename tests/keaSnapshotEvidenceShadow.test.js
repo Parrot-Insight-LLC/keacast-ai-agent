@@ -460,9 +460,9 @@ async function run() {
   check('controller still uses CURRENT CONTEXT chat builder', /buildChatAccountContext\(selectedAccount/.test(controllerSrc));
   check('controller still uses legacy evidence section', /groundedEvidenceBlock = buildEvidenceSystemSection\(phase1Evidence\)/.test(controllerSrc));
   check('shadow result not assigned to groundedEvidenceBlock', !/groundedEvidenceBlock = shadowSnapshotEvidence/.test(controllerSrc));
-  check('shadow is invoked request-local', /shadowSnapshotEvidence\(\{/.test(controllerSrc));
-  check('no snapshot cutover flag', !/USE_SNAPSHOT_EVIDENCE_LEDGER_PROMPT/.test(controllerSrc)
-    && !/USE_SNAPSHOT_EVIDENCE_LEDGER_PROMPT/.test(shadowSrc));
+  check('shadow not invoked in production request flow', !/shadowSnapshotEvidence\(\{/.test(controllerSrc)
+    && !/keaSnapshotEvidenceShadow/.test(controllerSrc));
+  check('shadow module has no snapshot cutover flag', !/USE_SNAPSHOT_EVIDENCE_LEDGER_PROMPT/.test(shadowSrc));
   check('lookup shadow still not in controller', !/keaLookupEvidenceShadow/.test(controllerSrc));
 
   section('3B.3B.4 1000-run performance');

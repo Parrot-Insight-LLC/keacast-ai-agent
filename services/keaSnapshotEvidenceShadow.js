@@ -4,20 +4,20 @@
  * Phase 3B.3B.4 — request-local snapshot Ledger / Prompt View shadow parity.
  *
  * Compares structured compact selectedAccount + phase1 snapshot facts with the
- * future adapted Ledger / Prompt View. Production Azure still uses CURRENT
- * CONTEXT + legacy buildEvidenceSystemSection. This module must not fetch,
- * must not call Azure, and must not own the prompt.
+ * adapted Ledger / Prompt View. Production Azure uses projectSnapshotEvidence
+ * (3B.3B.5). This harness remains request-local parity coverage and must not
+ * fetch, must not call Azure, and must not own the prompt.
  */
 
-const { cloneJson } = require('./keaEvidenceLedger');
-const { adaptSnapshotEvidenceForLedger } = require('./keaSnapshotEvidenceAdapter');
-const { buildEvidenceLedger } = require('./keaEvidenceLedgerBuilders');
 const {
-  toPromptEvidence,
   collectBannedKeys,
   LIMITATION_TEXT_BY_CODE,
 } = require('./keaEvidencePromptView');
-const { isEligibleLookupCutover } = require('./keaEvidencePromptCutover');
+const {
+  isEligibleLookupCutover,
+  isEligibleSnapshotCutover,
+  projectSnapshotLedgerView,
+} = require('./keaEvidencePromptCutover');
 
 const PRODUCTION_MODE = 'legacy';
 
@@ -103,14 +103,9 @@ function fingerprint(value) {
   }
 }
 
-function firstSource(evidence) {
-  return evidence && Array.isArray(evidence.source) ? evidence.source[0] : null;
-}
-
 function isSnapshotShadowEligible({ capability, evidence } = {}) {
   if (isEligibleLookupCutover({ capability, evidence })) return false;
-  if (firstSource(evidence) !== 'kea_snapshot') return false;
-  return capability === 'financial_forecast' || capability === 'financial_lookup';
+  return isEligibleSnapshotCutover({ capability, evidence });
 }
 
 function sameValue(actual, expected) {
@@ -671,25 +666,20 @@ function logShadowFailure(result) {
 }
 
 function buildSnapshotShadowArtifacts(input = {}) {
-  const adapted = adaptSnapshotEvidenceForLedger({
+  const projected = projectSnapshotLedgerView({
     evidence: input.evidence,
     selectedAccount: input.selectedAccount,
-  });
-  const built = buildEvidenceLedger({
     capability: input.capability,
-    evidence: adapted,
     route: input.route || null,
     accountContext: input.accountContext || null,
+    responseMode: input.responseMode || null,
   });
-  const view = built.ok && built.ledger
-    ? toPromptEvidence(built.ledger)
-    : { ok: false, promptable: false, promptEvidence: null };
   return {
-    adapted,
-    ledger: built.ledger || null,
-    ledgerOk: !!built.ok,
-    view,
-    promptEvidence: view.promptEvidence || null,
+    adapted: projected.adapted || null,
+    ledger: projected.ledger || null,
+    ledgerOk: !!projected.ok,
+    view: projected.view || { ok: false, promptable: false, promptEvidence: null },
+    promptEvidence: projected.view && projected.view.promptEvidence ? projected.view.promptEvidence : null,
   };
 }
 

@@ -10,6 +10,7 @@
 
 const { buildEvidenceLedger } = require('./keaEvidenceLedgerBuilders');
 const { toPromptEvidence } = require('./keaEvidencePromptView');
+const { adaptSnapshotEvidenceForLedger } = require('./keaSnapshotEvidenceAdapter');
 const {
   deriveFromLedgerProjection,
   emptyEvidenceTelemetry,
@@ -17,6 +18,7 @@ const {
 
 const LEDGER_PROMPT_ENV_KEY = 'USE_EVIDENCE_LEDGER_PROMPT';
 const LOOKUP_PROMPT_ENV_KEY = 'USE_LOOKUP_EVIDENCE_LEDGER_PROMPT';
+const SNAPSHOT_PROMPT_ENV_KEY = 'USE_SNAPSHOT_EVIDENCE_LEDGER_PROMPT';
 const FLAG_OFF = /^(0|false|off|no)$/i;
 const FLAG_ON = /^(1|true|on|yes)$/i;
 
@@ -58,6 +60,14 @@ function isLookupEvidenceRollbackActive() {
   return parseLedgerPromptFlag(process.env[LOOKUP_PROMPT_ENV_KEY]).rollbackActive;
 }
 
+function isSnapshotLedgerPromptEnabled() {
+  return parseLedgerPromptFlag(process.env[SNAPSHOT_PROMPT_ENV_KEY]).enabled;
+}
+
+function isSnapshotEvidenceRollbackActive() {
+  return parseLedgerPromptFlag(process.env[SNAPSHOT_PROMPT_ENV_KEY]).rollbackActive;
+}
+
 function firstEvidenceSource(evidence) {
   return evidence && Array.isArray(evidence.source) ? evidence.source[0] : null;
 }
@@ -70,6 +80,11 @@ function isSnapshotBackedLookup({ capability, evidence } = {}) {
   return capability === 'financial_lookup' && firstEvidenceSource(evidence) === 'kea_snapshot';
 }
 
+function isEligibleSnapshotCutover({ capability, evidence } = {}) {
+  if (firstEvidenceSource(evidence) !== 'kea_snapshot') return false;
+  return capability === 'financial_forecast' || capability === 'financial_lookup';
+}
+
 function isApprovedMacroCapability(capability) {
   return APPROVED_SET.has(capability);
 }
@@ -80,6 +95,10 @@ function shouldUseLedgerPrompt(capability) {
 
 function shouldUseLookupLedgerPrompt({ capability, evidence } = {}) {
   return isLookupLedgerPromptEnabled() && isEligibleLookupCutover({ capability, evidence });
+}
+
+function shouldUseSnapshotLedgerPrompt({ capability, evidence } = {}) {
+  return isSnapshotLedgerPromptEnabled() && isEligibleSnapshotCutover({ capability, evidence });
 }
 
 function resolveCutoverCapability({ capability, route, evidence } = {}) {
@@ -147,6 +166,185 @@ function withTelemetry(result, extra = {}) {
   }
   result.telemetry = telemetry;
   return result;
+}
+
+function projectSnapshotLedgerView(input = {}) {
+  const evidence = input.evidence;
+  if (!evidence || typeof evidence !== 'object') {
+    return { ok: false, reason: 'missing_evidence', ledger: null, view: null, promptable: false, adapted: null };
+  }
+  const adapted = adaptSnapshotEvidenceForLedger({
+    evidence,
+    selectedAccount: input.selectedAccount,
+  });
+  const capability = input.capability === 'financial_lookup' ? 'financial_lookup' : 'financial_forecast';
+  const built = buildEvidenceLedger({
+    capability,
+    evidence: adapted,
+    route: input.route || null,
+    accountContext: input.accountContext || null,
+    responseMode: input.responseMode || null,
+  });
+  if (!built.ok || !built.ledger) {
+    return {
+      ok: false,
+      reason: built.reason === 'validation_failed' ? 'ledger_invalid' : (built.reason || 'ledger_failed'),
+      ledger: null,
+      view: null,
+      promptable: false,
+      adapted,
+    };
+  }
+  if (built.ledger.status === 'unavailable' || built.ledger.status === 'unsupported') {
+    return {
+      ok: true,
+      reason: built.ledger.status,
+      ledger: built.ledger,
+      view: null,
+      promptable: false,
+      adapted,
+    };
+  }
+  const view = toPromptEvidence(built.ledger, { responseMode: input.responseMode || null });
+  if (!view.ok || !view.promptable || !view.promptEvidence) {
+    const mapped = view.reason === 'validation_failed' || view.reason === 'invalid_ledger'
+      ? 'prompt_view_invalid'
+      : (view.reason || 'prompt_view_failed');
+    return {
+      ok: false,
+      reason: mapped,
+      ledger: built.ledger,
+      view,
+      promptable: false,
+      adapted,
+    };
+  }
+  return {
+    ok: true,
+    reason: null,
+    ledger: built.ledger,
+    view,
+    promptable: true,
+    adapted,
+  };
+}
+
+function projectSnapshotEvidenceUnsafe(input = {}) {
+  const capability = input.capability === 'financial_lookup' ? 'financial_lookup' : 'financial_forecast';
+  const evidence = input.evidence;
+  const sourceKind = firstEvidenceSource(evidence) || 'kea_snapshot';
+
+  if (!isEligibleSnapshotCutover({ capability, evidence })) {
+    return withTelemetry({
+      ok: true,
+      mode: 'legacy',
+      promptable: true,
+      failSoft: false,
+      block: null,
+      reason: 'legacy',
+      capability,
+    }, {
+      rollbackActive: false,
+      sourceKind: sourceKind || 'none',
+    });
+  }
+
+  if (!isSnapshotLedgerPromptEnabled()) {
+    return withTelemetry({
+      ok: true,
+      mode: 'legacy',
+      promptable: true,
+      failSoft: false,
+      block: null,
+      reason: 'legacy',
+      capability,
+    }, {
+      rollbackActive: true,
+      sourceKind: 'kea_snapshot',
+    });
+  }
+
+  if (!evidence || typeof evidence !== 'object') {
+    logProjectionFailure('missing_evidence', capability);
+    return withTelemetry({
+      ok: false,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: 'missing_evidence',
+      capability,
+    }, { rollbackActive: false, sourceKind: 'kea_snapshot' });
+  }
+  if (evidence.status === 'unavailable') {
+    return withTelemetry({
+      ok: true,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: 'unavailable',
+      capability,
+    }, { rollbackActive: false, sourceKind: 'kea_snapshot' });
+  }
+
+  const projected = projectSnapshotLedgerView(input);
+  if (!projected.ok) {
+    logProjectionFailure(projected.reason, capability);
+    return withTelemetry({
+      ok: false,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: projected.reason || 'projection_failed',
+      capability,
+    }, { ledger: projected.ledger, rollbackActive: false, sourceKind: 'kea_snapshot' });
+  }
+  if (!projected.promptable) {
+    return withTelemetry({
+      ok: true,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: projected.reason || 'unavailable',
+      capability,
+    }, { ledger: projected.ledger, rollbackActive: false, sourceKind: 'kea_snapshot' });
+  }
+
+  return withTelemetry({
+    ok: true,
+    mode: 'ledger_v1',
+    promptable: true,
+    failSoft: false,
+    block: buildLedgerEvidenceSystemSection(projected.view.promptEvidence),
+    promptEvidence: projected.view.promptEvidence,
+    reason: null,
+    capability,
+  }, {
+    ledger: projected.ledger,
+    promptEvidence: projected.view.promptEvidence,
+    rollbackActive: false,
+    sourceKind: 'kea_snapshot',
+  });
+}
+
+function projectSnapshotEvidence(input) {
+  try {
+    return projectSnapshotEvidenceUnsafe(input);
+  } catch (err) {
+    logProjectionFailure('projection_exception', input && input.capability);
+    return withTelemetry({
+      ok: false,
+      mode: 'ledger_v1',
+      promptable: false,
+      failSoft: true,
+      block: null,
+      reason: 'projection_exception',
+      capability: input && input.capability ? input.capability : 'financial_forecast',
+    }, { rollbackActive: false, sourceKind: 'kea_snapshot' });
+  }
 }
 
 function projectLookupLedgerView(input = {}) {
@@ -440,16 +638,21 @@ function projectApprovedMacroEvidence(input) {
 module.exports = {
   LEDGER_PROMPT_ENV_KEY,
   LOOKUP_PROMPT_ENV_KEY,
+  SNAPSHOT_PROMPT_ENV_KEY,
   APPROVED_MACRO_CAPABILITIES,
   isLedgerPromptEnabled,
   isEvidenceRollbackActive,
   isLookupLedgerPromptEnabled,
   isLookupEvidenceRollbackActive,
+  isSnapshotLedgerPromptEnabled,
+  isSnapshotEvidenceRollbackActive,
   parseLedgerPromptFlag,
   isApprovedMacroCapability,
   shouldUseLedgerPrompt,
   shouldUseLookupLedgerPrompt,
+  shouldUseSnapshotLedgerPrompt,
   isEligibleLookupCutover,
+  isEligibleSnapshotCutover,
   isSnapshotBackedLookup,
   firstEvidenceSource,
   resolveCutoverCapability,
@@ -458,4 +661,6 @@ module.exports = {
   projectApprovedMacroEvidence,
   projectLookupLedgerView,
   projectLookupEvidence,
+  projectSnapshotLedgerView,
+  projectSnapshotEvidence,
 };
