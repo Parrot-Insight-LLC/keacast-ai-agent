@@ -6,8 +6,8 @@
  * Request-local typed contract for deterministic financial evidence.
  * Builders copy/normalize/classify. They MUST NOT calculate.
  *
- * Production Azure still uses azureFacingEvidence / buildEvidenceSystemSection.
- * This module is not wired into the chat path in 3B.1.
+ * Approved Phase 2 macros serialize Prompt View in production (3B.3A).
+ * Snapshot / lookup / rollback still use azureFacingEvidence.
  */
 
 const EVIDENCE_LEDGER_VERSION = 1;

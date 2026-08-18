@@ -37,6 +37,7 @@ const {
   failSoftTextFor,
 } = require('../services/keaGroundingPolicy');
 const { prefetchGrounding, buildEvidenceSystemSection, shouldForceDirectAnswer } = require('../services/keaGroundingPrefetch');
+const { projectApprovedMacroEvidence } = require('../services/keaEvidencePromptCutover');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const {
   azureChatTimeoutMs,
@@ -651,7 +652,16 @@ function buildMacroSelectedAccountContext(account, firstName, currentDate) {
   ].join('\n');
 }
 
-function buildMacroAnalysisPrompt({ currentDate, firstName, account, evidence } = {}) {
+function buildMacroAnalysisPrompt({
+  currentDate,
+  firstName,
+  account,
+  evidence,
+  capability,
+  responseMode,
+  route,
+  accountContext,
+} = {}) {
   const assembled = assembleBaseSystemPrompt({
     currentDate,
     promptProfile: 'macro_analysis',
@@ -662,13 +672,39 @@ function buildMacroAnalysisPrompt({ currentDate, firstName, account, evidence } 
   let systemContent = accountBrief
     ? `${assembled.baseSystem}\n\n---\nCURRENT CONTEXT (background — NOT a message from the user):\n${accountBrief}`
     : assembled.baseSystem;
-  const groundedEvidenceBlock = buildEvidenceSystemSection(evidence);
+  const ctx = accountContext || (account ? {
+    accountId: account.accountid || account.accountId || account.id || null,
+    accountLabel: account.accountname || account.bank_account_name || account.institution_name || null,
+  } : null);
+  const projected = projectApprovedMacroEvidence({
+    capability,
+    responseMode,
+    evidence,
+    route,
+    accountContext: ctx,
+  });
+  if (projected.mode === 'ledger_v1' && (projected.failSoft || !projected.promptable || !projected.block)) {
+    return {
+      ...assembled,
+      accountBrief,
+      groundedEvidenceBlock: '',
+      systemContent,
+      evidencePromptMode: 'ledger_v1',
+      projectionFailed: true,
+      projectionReason: projected.reason || 'projection_failed',
+    };
+  }
+  const groundedEvidenceBlock = projected.mode === 'ledger_v1'
+    ? projected.block
+    : buildEvidenceSystemSection(evidence);
   if (groundedEvidenceBlock) systemContent += `\n\n---\n${groundedEvidenceBlock}`;
   return {
     ...assembled,
     accountBrief,
     groundedEvidenceBlock,
     systemContent,
+    evidencePromptMode: projected.mode || 'legacy',
+    projectionFailed: false,
   };
 }
 
@@ -3687,6 +3723,7 @@ exports.chat = async (req, res) => {
     let dialogueBlock = '';
     let groundedEvidenceBlock = '';
     let systemContent;
+    let projectionFailSoft = false;
 
     if (skipAzureAffirmative) {
       identityBlock = '';
@@ -3703,16 +3740,39 @@ exports.chat = async (req, res) => {
         firstName,
         account: hasAccount ? selectedAccount : null,
         evidence: phase1Evidence,
+        capability: effectiveCap,
+        responseMode: phase1Route.responseMode
+          || (phase1Route.slots && phase1Route.slots.rankingMode === 'largest' ? 'largest' : null),
+        route: phase1Route,
+        accountContext: {
+          accountId: accountid,
+          accountLabel: hasAccount && selectedAccount
+            ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name || null)
+            : null,
+        },
       });
-      identityBlock = macroPrompt.identityBlock;
-      writePolicyBlock = macroPrompt.writePolicyBlock;
-      productHelpPlaybookBlock = macroPrompt.productHelpPlaybookBlock;
-      planningPlaybookBlock = macroPrompt.planningPlaybookBlock;
-      baseSystem = macroPrompt.baseSystem;
-      completeContext = macroPrompt.accountBrief || '';
-      groundedEvidenceBlock = macroPrompt.groundedEvidenceBlock || '';
-      systemContent = macroPrompt.systemContent;
-      console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source: macro_analysis)');
+      if (macroPrompt.projectionFailed) {
+        projectionFailSoft = true;
+        identityBlock = '';
+        writePolicyBlock = '';
+        productHelpPlaybookBlock = '';
+        planningPlaybookBlock = '';
+        baseSystem = '';
+        completeContext = '';
+        groundedEvidenceBlock = '';
+        systemContent = '';
+        console.warn('Chat endpoint: context block size: 0 chars (source: ledger_prompt_fail_soft)');
+      } else {
+        identityBlock = macroPrompt.identityBlock;
+        writePolicyBlock = macroPrompt.writePolicyBlock;
+        productHelpPlaybookBlock = macroPrompt.productHelpPlaybookBlock;
+        planningPlaybookBlock = macroPrompt.planningPlaybookBlock;
+        baseSystem = macroPrompt.baseSystem;
+        completeContext = macroPrompt.accountBrief || '';
+        groundedEvidenceBlock = macroPrompt.groundedEvidenceBlock || '';
+        systemContent = macroPrompt.systemContent;
+        console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source: macro_analysis)');
+      }
     } else {
       completeContext = hasAccount
         ? buildChatAccountContext(selectedAccount, firstName, currentDate)
@@ -3972,7 +4032,10 @@ exports.chat = async (req, res) => {
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
     let error;
-    if (phase1FailSoft) {
+    if (phase1FailSoft || projectionFailSoft) {
+      if (projectionFailSoft && !phase1FailSoft) {
+        telemetry.recordGrounding({ response_mode: 'fail_soft', grounding_strategy: 'failed' });
+      }
       result = { content: failSoftTextFor(phase1Evidence) || FAIL_SOFT_TEXT };
     } else if (skipAzureAffirmative) {
       requestSize = 0;

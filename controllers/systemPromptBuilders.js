@@ -154,7 +154,7 @@ Default: answer the question, explain the deterministic facts, and stop. You may
 
 All financial values refer only to the currently selected account unless GROUNDED EVIDENCE explicitly states otherwise. Do not say "across your accounts", "all accounts", or "complete financial picture".
 
-Narrate only facts and observation codes supplied in GROUNDED EVIDENCE. Do not invent a new financial judgment.`;
+Narrate only facts supplied in GROUNDED EVIDENCE. Do not invent a new financial judgment.`;
 }
 
 function buildMacroWriteSafetyBlock() {

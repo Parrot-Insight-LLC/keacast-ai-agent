@@ -79,6 +79,7 @@ function accountIdFrom(accountContext) {
 
 function responseModeFrom({ responseMode, route } = {}) {
   if (responseMode) return responseMode;
+  if (route && route.responseMode) return route.responseMode;
   const slots = route && route.slots;
   if (slots && slots.rankingMode === 'largest') return 'largest';
   return null;
@@ -254,6 +255,28 @@ function streamByLabel(list, label) {
   return null;
 }
 
+const LARGEST_STREAM_KEYS = Object.freeze([
+  'itemId',
+  'label',
+  'amount',
+  'monthlyEquivalent',
+  'nextDate',
+  'frequency',
+  'frequencyLabel',
+  'category',
+  'variableAmount',
+]);
+
+function copyLargestStream(provided, observation, indexedItems) {
+  if (provided && typeof provided === 'object' && !Array.isArray(provided)) {
+    return copyDefined(provided, LARGEST_STREAM_KEYS);
+  }
+  if (!observation) return null;
+  const fromList = streamByLabel(indexedItems, observation.label);
+  if (fromList) return copyDefined(fromList, LARGEST_STREAM_KEYS);
+  return null;
+}
+
 function buildRecurringEvidenceLedger(input) {
   const { evidence, accountContext } = input;
   const factsIn = (evidence && evidence.facts) || {};
@@ -298,8 +321,8 @@ function buildRecurringEvidenceLedger(input) {
 
   const largestExpObs = findObservation(observations, 'largest_recurring_expense');
   const largestIncObs = findObservation(observations, 'largest_recurring_income');
-  const largestExp = largestExpObs ? streamByLabel(expenses.items, largestExpObs.label) : null;
-  const largestInc = largestIncObs ? streamByLabel(income.items, largestIncObs.label) : null;
+  const largestExp = copyLargestStream(factsIn.largestExpense, largestExpObs, expenses.items);
+  const largestInc = copyLargestStream(factsIn.largestIncome, largestIncObs, income.items);
   if (largestExp) {
     claims.add('LABEL', 'facts.largestExpense.label', largestExp.label, CLAIM_UNITS.NONE);
     if (largestExp.amount !== undefined) {
@@ -347,8 +370,8 @@ function buildRecurringEvidenceLedger(input) {
     incomeCount: incomeIn.length,
   };
   if (factsIn.namedFilter !== undefined) facts.namedFilter = factsIn.namedFilter;
-  if (largestExp) facts.largestExpense = copyDefined(largestExp, ['itemId', 'label', 'amount', 'monthlyEquivalent', 'nextDate', 'frequencyLabel', 'category', 'variableAmount']);
-  if (largestInc) facts.largestIncome = copyDefined(largestInc, ['itemId', 'label', 'amount', 'monthlyEquivalent', 'nextDate', 'frequencyLabel', 'category', 'variableAmount']);
+  if (largestExp) facts.largestExpense = copyDefined(largestExp, LARGEST_STREAM_KEYS);
+  if (largestInc) facts.largestIncome = copyDefined(largestInc, LARGEST_STREAM_KEYS);
 
   const allowedNarration = [];
   if (empty) {
@@ -959,6 +982,7 @@ function buildSnapshotEvidenceLedger(input) {
     'negativePreviewCount', 'hasNegativePreview',
     'negativesInRequestedPeriodCount', 'hasNegativeInRequestedPeriod',
     'matchedCompactItem', 'goalCount', 'requestedAmount', 'requestedPeriod',
+    'recents', 'upcoming', 'futureNegativeBalances',
   ]);
   factsIn.signConvention = SIGN_CONVENTION.SIGNED_LEDGER;
   const claims = new ClaimIndex();

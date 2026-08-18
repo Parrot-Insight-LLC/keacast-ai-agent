@@ -521,10 +521,10 @@ async function run() {
   check('macro does not include ui availableAccounts', T.buildAvailableAccountsBlock(otherAccountsUi).includes('Savings Vault')
     && !macroPrompt.includes('Savings Vault'));
 
-  check('September prompt authorizes scoped no-negative', /does not show a negative balance during \{scope month\/year\}/.test(macroPrompt));
   check('September Azure JSON has no horizonDays', !/"horizonDays"/.test(macroPrompt));
   check('September prompt does not say next 90 days', !/next 90 days/.test(macroPrompt));
   check('September prompt does not authorize comfortable buffer', !/comfortable buffer/.test(macroPrompt));
+  check('September prompt forbids comfortable/safe/affordable', /Do not say comfortable, healthy, safe, enough, or affordable/.test(macroPrompt));
 
   const monthPrompt = T.buildMacroAnalysisPrompt({
     currentDate: '2026-08-16',
@@ -532,9 +532,8 @@ async function run() {
     account: selectedAccount,
     evidence: thisMonthEv,
   }).systemContent;
-  check('this-month prompt may describe posted net', /posted income, posted spending, posted net/.test(monthPrompt));
-  check('this-month prompt forbids healthy\/managing well', /Do not conclude the user is doing well or poorly/.test(monthPrompt));
-  check('this-month prompt forbids safe cash flow', /healthy\/unhealthy\/comfortable\/safe cash flow/.test(monthPrompt));
+  check('this-month prompt includes postedNet fact', /"postedNet"/.test(monthPrompt));
+  check('this-month prompt forbids comfortable/healthy/safe', /Do not say comfortable, healthy, safe, enough, or affordable/.test(monthPrompt));
   check('this-month prompt has remaining forecast fields', /"remainingForecastIncome":500/.test(monthPrompt));
 
   const julyPrompt = T.buildMacroAnalysisPrompt({
@@ -555,11 +554,8 @@ async function run() {
     account: selectedAccount,
     evidence: affordOkEv,
   }).systemContent;
-  check('affordability prompt allows evaluation-horizon conclusion', /would not create a negative projected balance within the evaluation horizon/.test(affordPrompt)
-    || /would or would not create a negative projected balance within the evaluation horizon/.test(affordPrompt));
-  check('affordability prompt forbids you can afford it as conclusion', /Do not conclude "you can afford it"/.test(affordPrompt));
-  check('affordability prompt forbids safe\/comfortable\/healthy\/disposable', /comfortable cushion/.test(affordPrompt));
-  check('affordability keeps invitation wording', /If you want, I can help add that expense to your forecast/.test(affordPrompt));
+  check('affordability prompt forbids can-afford classification', /Do not say affordable, safe, comfortable, or that the user can or cannot afford the purchase/.test(affordPrompt));
+  check('affordability prompt forbids write authorization', /Do not treat this analysis as authorization to add a transaction/.test(affordPrompt));
   check('affordability may keep horizonDays as evaluation window', /"horizonDays":90/.test(affordPrompt));
   check('recommendation routing for how can I improve is unchanged', route('How can I improve my cash flow?').capability !== 'undefined');
 
@@ -768,7 +764,7 @@ async function run() {
   }).systemContent;
   check('July prompt JSON omits availableBalance field', !/"availableBalance"/.test(julyHistPrompt));
   check('July prompt JSON omits currentBalance field', !/"currentBalance"/.test(julyHistPrompt));
-  check('July prompt forbids as-of-now current balances', /Do not mention availableBalance, currentBalance, reconciledBalance, or current balances as of now/.test(julyHistPrompt));
+  check('July prompt forbids comfortable/safe/affordable', /Do not say comfortable, healthy, safe, enough, or affordable/.test(julyHistPrompt));
 
   const augustWithBalances = {
     status: 'ok',
