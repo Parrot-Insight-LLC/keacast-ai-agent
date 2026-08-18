@@ -165,6 +165,7 @@ function withTelemetry(result, extra = {}) {
     telemetry = emptyEvidenceTelemetry();
   }
   result.telemetry = telemetry;
+  if (extra.ledger) result.ledger = extra.ledger;
   return result;
 }
 

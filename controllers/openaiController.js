@@ -50,6 +50,7 @@ const {
   isSnapshotEvidenceRollbackActive,
 } = require('../services/keaEvidencePromptCutover');
 const { telemetryForNonCutoverTurn, emptyEvidenceTelemetry } = require('../services/keaEvidenceTelemetry');
+const { applyShadowResponseValidation } = require('../services/keaResponseValidationShadow');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const {
   azureChatTimeoutMs,
@@ -704,6 +705,7 @@ function buildSnapshotAnalysisPrompt({
       projectionFailed: true,
       projectionReason: projected.reason || 'projection_failed',
       evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+      evidenceLedger: projected.ledger || null,
     };
   }
   if (projected.mode !== 'ledger_v1' || !projected.block) {
@@ -716,6 +718,7 @@ function buildSnapshotAnalysisPrompt({
       projectionFailed: false,
       useLegacyAssembly: true,
       evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+      evidenceLedger: projected.ledger || null,
     };
   }
   let systemContent = accountBrief
@@ -777,6 +780,7 @@ function buildSnapshotAnalysisPrompt({
     evidencePromptMode: 'ledger_v1',
     projectionFailed: false,
     evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+    evidenceLedger: projected.ledger || null,
   };
 }
 
@@ -820,6 +824,7 @@ function buildLookupAnalysisPrompt({
       projectionFailed: true,
       projectionReason: projected.reason || 'projection_failed',
       evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+      evidenceLedger: projected.ledger || null,
     };
   }
   if (projected.mode !== 'ledger_v1' || !projected.block) {
@@ -832,6 +837,7 @@ function buildLookupAnalysisPrompt({
       projectionFailed: false,
       useLegacyAssembly: true,
       evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+      evidenceLedger: projected.ledger || null,
     };
   }
   let systemContent = accountBrief
@@ -893,6 +899,7 @@ function buildLookupAnalysisPrompt({
     evidencePromptMode: 'ledger_v1',
     projectionFailed: false,
     evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+    evidenceLedger: projected.ledger || null,
   };
 }
 
@@ -937,6 +944,7 @@ function buildMacroAnalysisPrompt({
       projectionFailed: true,
       projectionReason: projected.reason || 'projection_failed',
       evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+      evidenceLedger: projected.ledger || null,
     };
   }
   const groundedEvidenceBlock = projected.mode === 'ledger_v1'
@@ -951,6 +959,7 @@ function buildMacroAnalysisPrompt({
     evidencePromptMode: projected.mode || 'legacy',
     projectionFailed: false,
     evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
+    evidenceLedger: projected.ledger || null,
   };
 }
 
@@ -3970,6 +3979,7 @@ exports.chat = async (req, res) => {
     let groundedEvidenceBlock = '';
     let systemContent;
     let projectionFailSoft = false;
+    let requestLedger = null;
 
     if (skipAzureAffirmative) {
       identityBlock = '';
@@ -4005,6 +4015,7 @@ exports.chat = async (req, res) => {
       try {
         telemetry.recordEvidence(macroPrompt.evidenceTelemetry);
       } catch (e) { /* telemetry must not own control flow */ }
+      requestLedger = macroPrompt.evidenceLedger || null;
       if (macroPrompt.projectionFailed) {
         projectionFailSoft = true;
         identityBlock = '';
@@ -4056,6 +4067,7 @@ exports.chat = async (req, res) => {
       try {
         telemetry.recordEvidence(lookupPrompt.evidenceTelemetry);
       } catch (e) { /* telemetry must not own control flow */ }
+      requestLedger = lookupPrompt.evidenceLedger || null;
       if (lookupPrompt.projectionFailed || lookupPrompt.useLegacyAssembly) {
         projectionFailSoft = true;
         identityBlock = '';
@@ -4106,6 +4118,7 @@ exports.chat = async (req, res) => {
       try {
         telemetry.recordEvidence(snapshotPrompt.evidenceTelemetry);
       } catch (e) { /* telemetry must not own control flow */ }
+      requestLedger = snapshotPrompt.evidenceLedger || null;
       if (snapshotPrompt.projectionFailed || snapshotPrompt.useLegacyAssembly) {
         projectionFailSoft = true;
         identityBlock = '';
@@ -4403,14 +4416,17 @@ exports.chat = async (req, res) => {
     // Always try with tools first for data requests, but handle tool calls properly
     let result;
     let error;
+    let responseSource = 'azure';
     if (phase1FailSoft || projectionFailSoft) {
       if (projectionFailSoft && !phase1FailSoft) {
         telemetry.recordGrounding({ response_mode: 'fail_soft', grounding_strategy: 'failed' });
       }
+      responseSource = 'fail_soft';
       result = { content: failSoftTextFor(phase1Evidence) || FAIL_SOFT_TEXT };
     } else if (skipAzureAffirmative) {
       requestSize = 0;
       console.log('Chat endpoint: deterministic affirmative, skipping Azure:', phase1Route.affirmativeResolution);
+      responseSource = 'deterministic';
       result = { content: buildDeterministicAffirmativeText(phase1Route, dialogueState, {
         accountName: hasAccount && selectedAccount
           ? (selectedAccount.accountname || selectedAccount.bank_account_name || selectedAccount.institution_name)
@@ -4439,7 +4455,9 @@ exports.chat = async (req, res) => {
       }
       if (azureTurn.fallback || azureTurn.failSoft) {
         result = { content: azureTurn.content };
+        if (azureTurn.fallback) responseSource = 'macro_fallback';
         if (azureTurn.failSoft) {
+          responseSource = 'fail_soft';
           telemetry.recordGrounding({ response_mode: 'fail_soft' });
         }
       } else if (azureTurn.ok && azureTurn.data) {
@@ -4482,6 +4500,36 @@ exports.chat = async (req, res) => {
           dialogueState
         );
     const finalText = stripCurrencyCommas(guardedContent);
+    // Phase 3C.2: observe Azure finalText against the same-request Ledger.
+    // Never mutates finalText. Never retries Azure. Never fail-softs.
+    try {
+      const shadow = applyShadowResponseValidation({
+        text: finalText,
+        ledger: requestLedger,
+        capability: effectiveCap,
+        responseMode: responseModeFor({
+          policy: phase1Policy,
+          evidence: phase1Evidence,
+          capability: phase1Route.capability,
+          failSoft: phase1FailSoft,
+        }),
+        responseSource,
+        writeResponseMode: (result && result.writeResponseMode) || 'none',
+        simulationMode: !!simulationMode,
+        invitationWriteHandoff: !!(phase1Route && phase1Route.invitationWriteHandoff),
+        repeatWriteHandoff: !!(phase1Route && phase1Route.repeatWriteHandoff),
+      });
+      try { telemetry.recordResponseValidation(shadow.telemetry); } catch (e) { /* telemetry must not own control flow */ }
+    } catch (e) {
+      try {
+        telemetry.recordResponseValidation({
+          response_validation_performed: true,
+          response_validation_shadow: true,
+          response_validation_status: 'exception',
+          response_validation_exception_reason: 'validation_exception',
+        });
+      } catch (ignored) { /* never own control flow */ }
+    }
     maybeSetAffordabilityInvitation(dialogueState, {
       route: phase1Route,
       accountId: accountid,

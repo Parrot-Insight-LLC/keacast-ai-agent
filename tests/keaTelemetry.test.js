@@ -342,6 +342,44 @@ async function run() {
   threw.recordEvidence(undefined);
   check('recordEvidence null is safe', threw.toPayload().evidence_prompt_mode === 'none');
 
+  section('keaTelemetry response validation shadow defaults');
+  check('response_validation_performed defaults false', pDefault.response_validation_performed === false);
+  check('response_validation_status defaults not_applicable', pDefault.response_validation_status === 'not_applicable');
+  check('response_validation_contract_status defaults not_applicable', pDefault.response_validation_contract_status === 'not_applicable');
+  check('response_validation_primary_violation defaults none', pDefault.response_validation_primary_violation === 'none');
+  check('response_validation_ms defaults 0', pDefault.response_validation_ms === 0);
+  check('response_validation_exception_reason defaults none', pDefault.response_validation_exception_reason === 'none');
+
+  const tRv = createKeaTelemetry({ requestId: 'req-rv' });
+  tRv.recordResponseValidation({
+    response_validation_performed: true,
+    response_validation_shadow: true,
+    response_validation_status: 'invalid',
+    response_validation_contract_status: 'ok',
+    response_validation_primary_violation: 'UNSUPPORTED_AMOUNT',
+    response_validation_primary_severity: 'critical',
+    response_validation_violation_count_bucket: '1',
+    response_validation_indeterminate_count_bucket: '0',
+    response_validation_material_claim_count_bucket: '2-3',
+    response_validation_ms: 1,
+    response_validation_exception_reason: 'none',
+    response_validation_flag_enabled: true,
+    amount: 279.58,
+    merchant: 'Target',
+    text: 'You spent $280 at Target.',
+  });
+  const pRv = tRv.toPayload();
+  check('response validation recorded', pRv.response_validation_status === 'invalid' && pRv.response_validation_shadow === true);
+  check('response validation amount rejected', pRv.amount === undefined);
+  check('response validation merchant rejected', pRv.merchant === undefined);
+  check('response validation text rejected', pRv.text === undefined && pRv.response === undefined);
+  const rvBlob = JSON.stringify(pRv);
+  check('response validation json has no $ or Target', rvBlob.indexOf('$') === -1 && rvBlob.indexOf('Target') === -1);
+
+  const rvThrew = createKeaTelemetry({ requestId: 'req-rv-throw' });
+  rvThrew.recordResponseValidation(undefined);
+  check('recordResponseValidation null is safe', rvThrew.toPayload().response_validation_status === 'not_applicable');
+
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;
 }

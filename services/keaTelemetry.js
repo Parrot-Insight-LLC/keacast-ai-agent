@@ -2,6 +2,10 @@
 
 const crypto = require('crypto');
 const { sanitizeEvidenceTelemetry } = require('./keaEvidenceTelemetry');
+const {
+  emptyShadowTelemetry,
+  sanitizeResponseValidationTelemetry,
+} = require('./keaResponseValidationShadow');
 
 /**
  * Per-turn Kea chat telemetry. One JSON line, no PII / amounts / JWT / message text.
@@ -150,6 +154,7 @@ function createKeaTelemetry({ requestId } = {}) {
     evidence_rollback_active: false,
     evidence_projection_failure_reason: 'none',
   };
+  const responseValidation = emptyShadowTelemetry();
 
   let lastStage = null;
   let clientAborted = false;
@@ -383,6 +388,14 @@ function createKeaTelemetry({ requestId } = {}) {
     }
   }
 
+  function recordResponseValidation(flags) {
+    try {
+      Object.assign(responseValidation, sanitizeResponseValidationTelemetry(flags));
+    } catch (err) {
+      // Telemetry must never change chat control flow.
+    }
+  }
+
   function setResponseCharacterCount(n) {
     response_character_count = Number(n) || 0;
   }
@@ -590,6 +603,18 @@ function createKeaTelemetry({ requestId } = {}) {
       evidence_internal_stripped: !!evidence.evidence_internal_stripped,
       evidence_rollback_active: !!evidence.evidence_rollback_active,
       evidence_projection_failure_reason: evidence.evidence_projection_failure_reason || 'none',
+      response_validation_performed: !!responseValidation.response_validation_performed,
+      response_validation_shadow: !!responseValidation.response_validation_shadow,
+      response_validation_status: responseValidation.response_validation_status || 'not_applicable',
+      response_validation_contract_status: responseValidation.response_validation_contract_status || 'not_applicable',
+      response_validation_primary_violation: responseValidation.response_validation_primary_violation || 'none',
+      response_validation_primary_severity: responseValidation.response_validation_primary_severity || 'none',
+      response_validation_violation_count_bucket: responseValidation.response_validation_violation_count_bucket || '0',
+      response_validation_indeterminate_count_bucket: responseValidation.response_validation_indeterminate_count_bucket || '0',
+      response_validation_material_claim_count_bucket: responseValidation.response_validation_material_claim_count_bucket || '0',
+      response_validation_ms: Number(responseValidation.response_validation_ms) || 0,
+      response_validation_exception_reason: responseValidation.response_validation_exception_reason || 'none',
+      response_validation_flag_enabled: !!responseValidation.response_validation_flag_enabled,
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,
@@ -654,6 +679,7 @@ function createKeaTelemetry({ requestId } = {}) {
     recordWriteFlags,
     recordGrounding,
     recordEvidence,
+    recordResponseValidation,
     setResponseCharacterCount,
     setIdentity,
     setSelectedAccountMeta,

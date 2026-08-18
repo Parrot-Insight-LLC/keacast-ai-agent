@@ -1,0 +1,392 @@
+'use strict';
+
+/**
+ * Phase 3C.1 — deterministic assistant-text claim extractor.
+ *
+ * Arabic-numeral USD, counts, dates, and colocated tuples only.
+ * No Ledger dependency. No network. No logging.
+ */
+
+const MONTH_INDEX = Object.freeze({
+  january: 1, jan: 1,
+  february: 2, feb: 2,
+  march: 3, mar: 3,
+  april: 4, apr: 4,
+  may: 5,
+  june: 6, jun: 6,
+  july: 7, jul: 7,
+  august: 8, aug: 8,
+  september: 9, sep: 9, sept: 9,
+  october: 10, oct: 10,
+  november: 11, nov: 11,
+  december: 12, dec: 12,
+});
+
+const CLAIM_KIND = Object.freeze({
+  AMOUNT: 'amount',
+  COUNT: 'count',
+  DATE: 'date',
+  PERIOD: 'period',
+  RELATIVE_PERIOD: 'relative_period',
+  DURATION: 'duration',
+  YEAR: 'year',
+  ENTITY_AMOUNT: 'entity_amount',
+  ENTITY_AMOUNT_DATE: 'entity_amount_date',
+  UNKNOWN_NUMERIC: 'unknown_numeric',
+  DIRECTION: 'direction',
+  RANKING_CANDIDATE: 'ranking_candidate',
+});
+
+const MONEY_HINT = /\b(dollar|dollars|usd|expense|expenses|income|balance|amount|total|totals|totaling|totalling|spent|spend|spending|cost|net|cash|paid)\b/i;
+const EXPENSE_HINT = /\b(expense|expenses|spent|spend|spending|bill|bills|cost|costs)\b/i;
+const INCOME_HINT = /\b(income|paycheck|deposit|earned|revenue)\b/i;
+const FUTURE_HINT = /\b(next month|end of next month|forecasted|forecasting|projected|will be|expected to|increase by|decrease by|next week)\b/i;
+const PREVIEW_TOTAL_HINT = /\b(listed above|transactions listed|transactions above|above total|listed transactions)\b/i;
+const APPROX_HINT = /\b(approximately|approx(?:imately)?|about|roughly|around)\b/i;
+const INCREASE_HINT = /\b(increase by|net (?:positive )?cash flow|results in a net|net of)\b/i;
+const RANKING_HINT = /\b(largest|smallest|highest|lowest|biggest)\s+(expense|income|bill|transaction|amount|category|merchant)\b/i;
+const DIRECTION_HINT = /\b(will increase|will decrease|will rise|will fall|expected to increase|expected to decrease)\b/i;
+const MONTH_NAME = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec';
+
+function overlaps(a, b) {
+  return a.start < b.end && b.start < a.end;
+}
+
+function used(consumed, start, end) {
+  for (let i = 0; i < consumed.length; i += 1) {
+    if (overlaps(consumed[i], { start, end })) return true;
+  }
+  return false;
+}
+
+function mark(consumed, start, end) {
+  consumed.push({ start, end });
+}
+
+function windowText(text, start, end, radius) {
+  const from = Math.max(0, start - radius);
+  const to = Math.min(text.length, end + radius);
+  return text.slice(from, to);
+}
+
+function nearbyHints(text, start, end) {
+  const nearby = windowText(text, start, end, 96);
+  const wide = windowText(text, start, end, 140);
+  const hints = [];
+  if (MONEY_HINT.test(nearby)) hints.push('money');
+  if (EXPENSE_HINT.test(nearby)) hints.push('expense');
+  if (INCOME_HINT.test(nearby)) hints.push('income');
+  if (FUTURE_HINT.test(nearby)) hints.push('future');
+  if (/\b(september|october|november|december)\b/i.test(nearby) && /\b(projected|forecasted|next month)\b/i.test(wide)) {
+    if (hints.indexOf('future') === -1) hints.push('future');
+    hints.push('named_future_month');
+  }
+  if (PREVIEW_TOTAL_HINT.test(wide)) hints.push('preview_total');
+  if (APPROX_HINT.test(nearby)) hints.push('approximate');
+  if (INCREASE_HINT.test(nearby)) hints.push('derivation');
+  return hints;
+}
+
+function parseGroupedNumber(raw) {
+  const signed = /^-/.test(String(raw).replace(/^\$/, ''));
+  const cleaned = String(raw).replace(/[$,]/g, '');
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return null;
+  return { value: n, negative: signed || n < 0 };
+}
+
+function monthNum(name) {
+  const key = String(name || '').toLowerCase();
+  return MONTH_INDEX[key] || null;
+}
+
+function isoFromParts(year, month, day) {
+  const y = String(year).padStart(4, '0');
+  const m = String(month).padStart(2, '0');
+  const d = String(day).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function extractResponseClaims(text, options) {
+  void options;
+  const src = typeof text === 'string' ? text : '';
+  const consumed = [];
+  const claims = [];
+  let n = 0;
+
+  function add(partial) {
+    n += 1;
+    const row = Object.assign({ id: `e${n}`, position: partial.start }, partial);
+    claims.push(row);
+  }
+
+  const isoRe = /\b(\d{4}-\d{2}-\d{2})\b/g;
+  let m;
+  while ((m = isoRe.exec(src))) {
+    add({
+      kind: CLAIM_KIND.DATE,
+      rawSpan: m[1],
+      iso: m[1],
+      year: Number(m[1].slice(0, 4)),
+      month: Number(m[1].slice(5, 7)),
+      day: Number(m[1].slice(8, 10)),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const monthDayYear = new RegExp(
+    `\\b(${MONTH_NAME})\\s+(\\d{1,2})(?:,)?\\s+(\\d{4})\\b`,
+    'gi'
+  );
+  while ((m = monthDayYear.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    const month = monthNum(m[1]);
+    const day = Number(m[2]);
+    const year = Number(m[3]);
+    if (!month || day < 1 || day > 31) continue;
+    add({
+      kind: CLAIM_KIND.DATE,
+      rawSpan: m[0],
+      iso: isoFromParts(year, month, day),
+      year,
+      month,
+      day,
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const monthYear = new RegExp(`\\b(${MONTH_NAME})\\s+(\\d{4})\\b`, 'gi');
+  while ((m = monthYear.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    const month = monthNum(m[1]);
+    const year = Number(m[2]);
+    if (!month) continue;
+    add({
+      kind: CLAIM_KIND.PERIOD,
+      rawSpan: m[0],
+      year,
+      month,
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const monthDay = new RegExp(`\\b(${MONTH_NAME})\\s+(\\d{1,2})\\b`, 'gi');
+  while ((m = monthDay.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    const month = monthNum(m[1]);
+    const day = Number(m[2]);
+    if (!month || day < 1 || day > 31) continue;
+    add({
+      kind: CLAIM_KIND.DATE,
+      rawSpan: m[0],
+      iso: null,
+      month,
+      day,
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const durationRe = /\b(\d+)\s+(days?|weeks?)\b/gi;
+  while ((m = durationRe.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    add({
+      kind: CLAIM_KIND.DURATION,
+      rawSpan: m[0],
+      normalizedValue: Number(m[1]),
+      unit: /week/i.test(m[2]) ? 'weeks' : 'days',
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const countRe = /\b(\d+)\s+(?:[A-Za-z][A-Za-z'-]+\s+)?(transactions?|bills?|matches?|items?)\b/gi;
+  while ((m = countRe.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    add({
+      kind: CLAIM_KIND.COUNT,
+      rawSpan: m[0],
+      normalizedValue: Number(m[1]),
+      unit: 'count',
+      nearbyTerms: windowText(src, m.index, m.index + m[0].length, 32),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const dollarRe = /(?:-\$|\$\-?)(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?/g;
+  while ((m = dollarRe.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    const parsed = parseGroupedNumber(m[0]);
+    if (!parsed) continue;
+    const hints = nearbyHints(src, m.index, m.index + m[0].length);
+    add({
+      kind: CLAIM_KIND.AMOUNT,
+      rawSpan: m[0],
+      normalizedValue: parsed.value,
+      currency: 'USD',
+      sign: parsed.value < 0 ? 'negative' : 'positive',
+      semanticHints: hints,
+      nearbyTerms: windowText(src, m.index, m.index + m[0].length, 48),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const dollarsWord = /(\-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)\s+dollars\b/gi;
+  while ((m = dollarsWord.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    const parsed = parseGroupedNumber(m[1]);
+    if (!parsed) continue;
+    add({
+      kind: CLAIM_KIND.AMOUNT,
+      rawSpan: m[0],
+      normalizedValue: parsed.value,
+      currency: 'USD',
+      sign: parsed.value < 0 ? 'negative' : 'positive',
+      semanticHints: nearbyHints(src, m.index, m.index + m[0].length).concat(['money']),
+      nearbyTerms: windowText(src, m.index, m.index + m[0].length, 48),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const yearRe = /\b((?:19|20)\d{2})\b/g;
+  while ((m = yearRe.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    add({
+      kind: CLAIM_KIND.YEAR,
+      rawSpan: m[1],
+      normalizedValue: Number(m[1]),
+      year: Number(m[1]),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  const relativeRe = /\b(next month|last month|next week|last week|next two weeks|this month)\b/gi;
+  while ((m = relativeRe.exec(src))) {
+    add({
+      kind: CLAIM_KIND.RELATIVE_PERIOD,
+      rawSpan: m[0],
+      token: m[0].toLowerCase().replace(/\s+/g, '_'),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+  }
+
+  const bareDecimal = /\b\d+\.\d{2}\b/g;
+  while ((m = bareDecimal.exec(src))) {
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    const nearby = windowText(src, m.index, m.index + m[0].length, 32);
+    const nVal = Number(m[0]);
+    if (!Number.isFinite(nVal)) continue;
+    if (MONEY_HINT.test(nearby)) {
+      add({
+        kind: CLAIM_KIND.AMOUNT,
+        rawSpan: m[0],
+        normalizedValue: nVal,
+        currency: 'USD',
+        sign: 'positive',
+        semanticHints: nearbyHints(src, m.index, m.index + m[0].length),
+        nearbyTerms: nearby,
+        start: m.index,
+        end: m.index + m[0].length,
+      });
+    } else {
+      add({
+        kind: CLAIM_KIND.UNKNOWN_NUMERIC,
+        rawSpan: m[0],
+        normalizedValue: nVal,
+        semanticHints: ['ambiguous'],
+        nearbyTerms: nearby,
+        start: m.index,
+        end: m.index + m[0].length,
+      });
+    }
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
+  if (DIRECTION_HINT.test(src)) {
+    const dm = src.match(DIRECTION_HINT);
+    if (dm) {
+      add({
+        kind: CLAIM_KIND.DIRECTION,
+        rawSpan: dm[0],
+        token: dm[0].toLowerCase(),
+        semanticHints: ['future', 'direction'],
+        start: src.indexOf(dm[0]),
+        end: src.indexOf(dm[0]) + dm[0].length,
+      });
+    }
+  }
+
+  if (RANKING_HINT.test(src)) {
+    const rm = src.match(RANKING_HINT);
+    if (rm) {
+      add({
+        kind: CLAIM_KIND.RANKING_CANDIDATE,
+        rawSpan: rm[0],
+        token: rm[0].toLowerCase(),
+        start: src.indexOf(rm[0]),
+        end: src.indexOf(rm[0]) + rm[0].length,
+      });
+    }
+  }
+
+  const amounts = claims.filter((c) => c.kind === CLAIM_KIND.AMOUNT);
+  const dates = claims.filter((c) => c.kind === CLAIM_KIND.DATE);
+  for (let i = 0; i < amounts.length; i += 1) {
+    const amount = amounts[i];
+    const local = windowText(src, amount.start, amount.end, 64);
+    const entityMatch = local.match(/\b([A-Z][A-Za-z]{2,})\b/);
+    const monthNames = Object.keys(MONTH_INDEX);
+    let entity = null;
+    if (entityMatch && monthNames.indexOf(entityMatch[1].toLowerCase()) === -1) {
+      entity = entityMatch[1];
+    }
+    let nearDate = null;
+    for (let d = 0; d < dates.length; d += 1) {
+      const dist = dates[d].start > amount.start
+        ? dates[d].start - amount.start
+        : amount.start - dates[d].start;
+      if (dist <= 72) {
+        nearDate = dates[d];
+        break;
+      }
+    }
+    if (entity && nearDate) {
+      amount.kind = CLAIM_KIND.ENTITY_AMOUNT_DATE;
+      amount.entity = entity;
+      amount.dateIso = nearDate.iso || null;
+      amount.dateMonth = nearDate.month;
+      amount.dateDay = nearDate.day;
+    } else if (entity) {
+      amount.kind = CLAIM_KIND.ENTITY_AMOUNT;
+      amount.entity = entity;
+    }
+  }
+
+  claims.sort((a, b) => {
+    if (a.position !== b.position) return a.position - b.position;
+    return String(a.kind).localeCompare(String(b.kind));
+  });
+  return claims;
+}
+
+module.exports = {
+  CLAIM_KIND,
+  extractResponseClaims,
+};
