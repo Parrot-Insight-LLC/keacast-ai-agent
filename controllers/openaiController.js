@@ -37,7 +37,8 @@ const {
   failSoftTextFor,
 } = require('../services/keaGroundingPolicy');
 const { prefetchGrounding, buildEvidenceSystemSection, shouldForceDirectAnswer } = require('../services/keaGroundingPrefetch');
-const { projectApprovedMacroEvidence } = require('../services/keaEvidencePromptCutover');
+const { projectApprovedMacroEvidence, isEvidenceRollbackActive } = require('../services/keaEvidencePromptCutover');
+const { telemetryForNonCutoverTurn, emptyEvidenceTelemetry } = require('../services/keaEvidenceTelemetry');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const {
   azureChatTimeoutMs,
@@ -692,6 +693,7 @@ function buildMacroAnalysisPrompt({
       evidencePromptMode: 'ledger_v1',
       projectionFailed: true,
       projectionReason: projected.reason || 'projection_failed',
+      evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
     };
   }
   const groundedEvidenceBlock = projected.mode === 'ledger_v1'
@@ -705,6 +707,7 @@ function buildMacroAnalysisPrompt({
     systemContent,
     evidencePromptMode: projected.mode || 'legacy',
     projectionFailed: false,
+    evidenceTelemetry: projected.telemetry || emptyEvidenceTelemetry(),
   };
 }
 
@@ -3734,6 +3737,11 @@ exports.chat = async (req, res) => {
       completeContext = '';
       systemContent = '';
       console.log('Chat endpoint: context block size: 0 chars (source: deterministic_affirmative)');
+      try {
+        telemetry.recordEvidence(Object.assign(emptyEvidenceTelemetry(), {
+          evidence_rollback_active: isEvidenceRollbackActive(),
+        }));
+      } catch (e) { /* telemetry must not own control flow */ }
     } else if (macroOwnsTurn) {
       const macroPrompt = buildMacroAnalysisPrompt({
         currentDate,
@@ -3751,6 +3759,9 @@ exports.chat = async (req, res) => {
             : null,
         },
       });
+      try {
+        telemetry.recordEvidence(macroPrompt.evidenceTelemetry);
+      } catch (e) { /* telemetry must not own control flow */ }
       if (macroPrompt.projectionFailed) {
         projectionFailSoft = true;
         identityBlock = '';
@@ -3778,6 +3789,18 @@ exports.chat = async (req, res) => {
         ? buildChatAccountContext(selectedAccount, firstName, currentDate)
         : buildChatNoAccountContext(firstName);
       console.log('Chat endpoint: context block size:', completeContext.length, 'chars (source:', selectedAccountSource + ')');
+      try {
+        telemetry.recordEvidence(telemetryForNonCutoverTurn({
+          capability: effectiveCap,
+          groundingStrategy: groundingStrategyFor({
+            policy: phase1Policy,
+            evidence: phase1Evidence,
+            failSoft: phase1FailSoft,
+          }),
+          evidence: phase1Evidence,
+          rollbackActive: isEvidenceRollbackActive(),
+        }));
+      } catch (e) { /* telemetry must not own control flow */ }
 
       ({
         identityBlock,

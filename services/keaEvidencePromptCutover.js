@@ -10,8 +10,14 @@
 
 const { buildEvidenceLedger } = require('./keaEvidenceLedgerBuilders');
 const { toPromptEvidence } = require('./keaEvidencePromptView');
+const {
+  deriveFromLedgerProjection,
+  emptyEvidenceTelemetry,
+} = require('./keaEvidenceTelemetry');
 
 const LEDGER_PROMPT_ENV_KEY = 'USE_EVIDENCE_LEDGER_PROMPT';
+const FLAG_OFF = /^(0|false|off|no)$/i;
+const FLAG_ON = /^(1|true|on|yes)$/i;
 
 const APPROVED_MACRO_CAPABILITIES = Object.freeze([
   'cashflow_upcoming',
@@ -25,10 +31,22 @@ const APPROVED_MACRO_CAPABILITIES = Object.freeze([
 
 const APPROVED_SET = new Set(APPROVED_MACRO_CAPABILITIES);
 
+function parseLedgerPromptFlag(raw) {
+  if (raw == null || String(raw).trim() === '') {
+    return { enabled: true, rollbackActive: false };
+  }
+  const value = String(raw).trim();
+  if (FLAG_OFF.test(value)) return { enabled: false, rollbackActive: true };
+  if (FLAG_ON.test(value) || value !== '') return { enabled: true, rollbackActive: false };
+  return { enabled: true, rollbackActive: false };
+}
+
 function isLedgerPromptEnabled() {
-  const raw = process.env[LEDGER_PROMPT_ENV_KEY];
-  if (raw == null || String(raw).trim() === '') return true;
-  return !/^(0|false|off|no)$/i.test(String(raw).trim());
+  return parseLedgerPromptFlag(process.env[LEDGER_PROMPT_ENV_KEY]).enabled;
+}
+
+function isEvidenceRollbackActive() {
+  return parseLedgerPromptFlag(process.env[LEDGER_PROMPT_ENV_KEY]).rollbackActive;
 }
 
 function isApprovedMacroCapability(capability) {
@@ -82,10 +100,31 @@ function logProjectionFailure(reason, capability) {
   });
 }
 
+function withTelemetry(result, extra = {}) {
+  let telemetry;
+  try {
+    telemetry = deriveFromLedgerProjection({
+      mode: result.mode,
+      ok: result.ok,
+      promptable: result.promptable,
+      failSoft: result.failSoft,
+      reason: extra.reason != null ? extra.reason : result.reason,
+      ledger: extra.ledger || null,
+      promptEvidence: result.promptEvidence || extra.promptEvidence || null,
+      sourceKind: extra.sourceKind || null,
+      rollbackActive: isEvidenceRollbackActive(),
+    });
+  } catch (err) {
+    telemetry = emptyEvidenceTelemetry();
+  }
+  result.telemetry = telemetry;
+  return result;
+}
+
 function projectApprovedMacroEvidenceUnsafe(input = {}) {
   const capability = resolveCutoverCapability(input);
   if (!shouldUseLedgerPrompt(capability)) {
-    return {
+    return withTelemetry({
       ok: true,
       mode: 'legacy',
       promptable: true,
@@ -93,13 +132,13 @@ function projectApprovedMacroEvidenceUnsafe(input = {}) {
       block: null,
       reason: 'legacy',
       capability,
-    };
+    });
   }
 
   const evidence = input.evidence;
   if (!evidence || typeof evidence !== 'object') {
     logProjectionFailure('missing_evidence', capability);
-    return {
+    return withTelemetry({
       ok: false,
       mode: 'ledger_v1',
       promptable: false,
@@ -107,10 +146,10 @@ function projectApprovedMacroEvidenceUnsafe(input = {}) {
       block: null,
       reason: 'missing_evidence',
       capability,
-    };
+    });
   }
   if (evidence.status === 'unavailable') {
-    return {
+    return withTelemetry({
       ok: true,
       mode: 'ledger_v1',
       promptable: false,
@@ -118,7 +157,7 @@ function projectApprovedMacroEvidenceUnsafe(input = {}) {
       block: null,
       reason: 'unavailable',
       capability,
-    };
+    });
   }
 
   const responseMode = resolveCutoverResponseMode(input);
@@ -130,19 +169,20 @@ function projectApprovedMacroEvidenceUnsafe(input = {}) {
     accountContext: input.accountContext || null,
   });
   if (!built.ok || !built.ledger) {
-    logProjectionFailure(built.reason || 'ledger_failed', capability);
-    return {
+    const mapped = built.reason === 'validation_failed' ? 'ledger_invalid' : (built.reason || 'ledger_failed');
+    logProjectionFailure(mapped, capability);
+    return withTelemetry({
       ok: false,
       mode: 'ledger_v1',
       promptable: false,
       failSoft: true,
       block: null,
-      reason: built.reason || 'ledger_failed',
+      reason: mapped,
       capability,
-    };
+    });
   }
   if (built.ledger.status === 'unavailable' || built.ledger.status === 'unsupported') {
-    return {
+    return withTelemetry({
       ok: true,
       mode: 'ledger_v1',
       promptable: false,
@@ -150,24 +190,27 @@ function projectApprovedMacroEvidenceUnsafe(input = {}) {
       block: null,
       reason: built.ledger.status,
       capability,
-    };
+    }, { ledger: built.ledger });
   }
 
   const view = toPromptEvidence(built.ledger, { responseMode });
   if (!view.ok || !view.promptable || !view.promptEvidence) {
-    logProjectionFailure(view.reason || 'prompt_view_failed', capability);
-    return {
+    const mapped = view.reason === 'validation_failed' || view.reason === 'invalid_ledger'
+      ? 'prompt_view_invalid'
+      : (view.reason || 'prompt_view_failed');
+    logProjectionFailure(mapped, capability);
+    return withTelemetry({
       ok: false,
       mode: 'ledger_v1',
       promptable: false,
       failSoft: true,
       block: null,
-      reason: view.reason || 'prompt_view_failed',
+      reason: mapped,
       capability,
-    };
+    }, { ledger: built.ledger });
   }
 
-  return {
+  return withTelemetry({
     ok: true,
     mode: 'ledger_v1',
     promptable: true,
@@ -176,7 +219,7 @@ function projectApprovedMacroEvidenceUnsafe(input = {}) {
     promptEvidence: view.promptEvidence,
     reason: null,
     capability,
-  };
+  }, { ledger: built.ledger, promptEvidence: view.promptEvidence });
 }
 
 function projectApprovedMacroEvidence(input) {
@@ -184,7 +227,7 @@ function projectApprovedMacroEvidence(input) {
     return projectApprovedMacroEvidenceUnsafe(input);
   } catch (err) {
     logProjectionFailure('projection_exception', input && input.capability);
-    return {
+    return withTelemetry({
       ok: false,
       mode: 'ledger_v1',
       promptable: false,
@@ -192,7 +235,7 @@ function projectApprovedMacroEvidence(input) {
       block: null,
       reason: 'projection_exception',
       capability: input && input.capability ? input.capability : null,
-    };
+    });
   }
 }
 
@@ -200,6 +243,8 @@ module.exports = {
   LEDGER_PROMPT_ENV_KEY,
   APPROVED_MACRO_CAPABILITIES,
   isLedgerPromptEnabled,
+  isEvidenceRollbackActive,
+  parseLedgerPromptFlag,
   isApprovedMacroCapability,
   shouldUseLedgerPrompt,
   resolveCutoverCapability,

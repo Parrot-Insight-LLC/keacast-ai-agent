@@ -290,6 +290,58 @@ async function run() {
   check('capsule_transition defaults none', pDefault.capsule_transition === 'none');
   check('capsule_transition recorded', pCap.capsule_transition === 'continued');
 
+  section('keaTelemetry 3B.4 evidence defaults');
+  check('evidence_ledger_present defaults false', pDefault.evidence_ledger_present === false);
+  check('evidence_prompt_mode defaults none', pDefault.evidence_prompt_mode === 'none');
+  check('evidence_source_kind defaults none', pDefault.evidence_source_kind === 'none');
+  check('evidence_status defaults none', pDefault.evidence_status === 'none');
+  check('evidence_projection_status defaults not_applicable', pDefault.evidence_projection_status === 'not_applicable');
+  check('evidence_promptable defaults false', pDefault.evidence_promptable === false);
+  check('evidence_claim_count_bucket defaults 0', pDefault.evidence_claim_count_bucket === '0');
+  check('evidence_list_truncated defaults false', pDefault.evidence_list_truncated === false);
+  check('evidence_prompt_chars_bucket defaults 0', pDefault.evidence_prompt_chars_bucket === '0');
+  check('evidence_ledger_chars_bucket defaults 0', pDefault.evidence_ledger_chars_bucket === '0');
+  check('evidence_internal_stripped defaults false', pDefault.evidence_internal_stripped === false);
+  check('evidence_rollback_active defaults false', pDefault.evidence_rollback_active === false);
+  check('evidence_projection_failure_reason defaults none', pDefault.evidence_projection_failure_reason === 'none');
+
+  const tEv = createKeaTelemetry({ requestId: 'req-evidence' });
+  tEv.recordEvidence({
+    evidence_ledger_present: true,
+    evidence_prompt_mode: 'ledger_v1',
+    evidence_source_kind: 'cashflow_upcoming',
+    evidence_status: 'complete_empty',
+    evidence_projection_status: 'ok',
+    evidence_promptable: true,
+    evidence_claim_count_bucket: '4-7',
+    evidence_list_truncated: false,
+    evidence_prompt_chars_bucket: '1025-2048',
+    evidence_ledger_chars_bucket: '2049-4096',
+    evidence_internal_stripped: true,
+    evidence_rollback_active: false,
+    evidence_projection_failure_reason: 'none',
+    amount: 705,
+    merchant: 'Daycare',
+    ledger: { secrets: true },
+  });
+  const pEv = tEv.toPayload();
+  check('evidence mode recorded', pEv.evidence_prompt_mode === 'ledger_v1');
+  check('complete_empty status recorded', pEv.evidence_status === 'complete_empty');
+  check('internal_stripped recorded', pEv.evidence_internal_stripped === true);
+  check('arbitrary amount rejected', pEv.amount === undefined);
+  check('merchant rejected', pEv.merchant === undefined);
+  check('raw ledger rejected', pEv.ledger === undefined);
+  check('no observation code field', pEv.observations === undefined && pEv.evidence_observation_code === undefined);
+
+  tEv.recordEvidence({ evidence_prompt_mode: 'not-a-mode', evidence_source_kind: 'http://evil.example' });
+  const pBad = tEv.toPayload();
+  check('invalid mode falls back', pBad.evidence_prompt_mode === 'none');
+  check('arbitrary source kind unknown', pBad.evidence_source_kind === 'unknown');
+
+  const threw = createKeaTelemetry({ requestId: 'req-ev-throw' });
+  threw.recordEvidence(undefined);
+  check('recordEvidence null is safe', threw.toPayload().evidence_prompt_mode === 'none');
+
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;
 }

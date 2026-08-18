@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { sanitizeEvidenceTelemetry } = require('./keaEvidenceTelemetry');
 
 /**
  * Per-turn Kea chat telemetry. One JSON line, no PII / amounts / JWT / message text.
@@ -133,6 +134,21 @@ function createKeaTelemetry({ requestId } = {}) {
     capsule_version: null,
     capsule_account_match: null,
     capsule_transition: 'none',
+  };
+  const evidence = {
+    evidence_ledger_present: false,
+    evidence_prompt_mode: 'none',
+    evidence_source_kind: 'none',
+    evidence_status: 'none',
+    evidence_projection_status: 'not_applicable',
+    evidence_promptable: false,
+    evidence_claim_count_bucket: '0',
+    evidence_list_truncated: false,
+    evidence_prompt_chars_bucket: '0',
+    evidence_ledger_chars_bucket: '0',
+    evidence_internal_stripped: false,
+    evidence_rollback_active: false,
+    evidence_projection_failure_reason: 'none',
   };
 
   let lastStage = null;
@@ -359,6 +375,14 @@ function createKeaTelemetry({ requestId } = {}) {
     }
   }
 
+  function recordEvidence(flags) {
+    try {
+      Object.assign(evidence, sanitizeEvidenceTelemetry(flags));
+    } catch (err) {
+      // Telemetry must never change chat control flow.
+    }
+  }
+
   function setResponseCharacterCount(n) {
     response_character_count = Number(n) || 0;
   }
@@ -553,6 +577,19 @@ function createKeaTelemetry({ requestId } = {}) {
       capsule_version: grounding.capsule_version,
       capsule_account_match: grounding.capsule_account_match,
       capsule_transition: grounding.capsule_transition || 'none',
+      evidence_ledger_present: !!evidence.evidence_ledger_present,
+      evidence_prompt_mode: evidence.evidence_prompt_mode || 'none',
+      evidence_source_kind: evidence.evidence_source_kind || 'none',
+      evidence_status: evidence.evidence_status || 'none',
+      evidence_projection_status: evidence.evidence_projection_status || 'not_applicable',
+      evidence_promptable: !!evidence.evidence_promptable,
+      evidence_claim_count_bucket: evidence.evidence_claim_count_bucket || '0',
+      evidence_list_truncated: !!evidence.evidence_list_truncated,
+      evidence_prompt_chars_bucket: evidence.evidence_prompt_chars_bucket || '0',
+      evidence_ledger_chars_bucket: evidence.evidence_ledger_chars_bucket || '0',
+      evidence_internal_stripped: !!evidence.evidence_internal_stripped,
+      evidence_rollback_active: !!evidence.evidence_rollback_active,
+      evidence_projection_failure_reason: evidence.evidence_projection_failure_reason || 'none',
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,
@@ -616,6 +653,7 @@ function createKeaTelemetry({ requestId } = {}) {
     recordBlock,
     recordWriteFlags,
     recordGrounding,
+    recordEvidence,
     setResponseCharacterCount,
     setIdentity,
     setSelectedAccountMeta,

@@ -13,6 +13,8 @@ const {
   LEDGER_PROMPT_ENV_KEY,
   APPROVED_MACRO_CAPABILITIES,
   isLedgerPromptEnabled,
+  isEvidenceRollbackActive,
+  parseLedgerPromptFlag,
   isApprovedMacroCapability,
   shouldUseLedgerPrompt,
   projectApprovedMacroEvidence,
@@ -257,6 +259,14 @@ function assertMacroPrompt(name, prompt, extra = {}) {
   check(`${name} no observation codes`, obs.length === 0, obs.join(','));
   const banned = bannedHitsInText(prompt.systemContent);
   check(`${name} no banned keys`, banned.length === 0, banned.join(','));
+  check(`${name} has evidence telemetry`, !!(prompt && prompt.evidenceTelemetry));
+  check(`${name} telemetry mode ledger_v1`, prompt.evidenceTelemetry.evidence_prompt_mode === 'ledger_v1');
+  check(`${name} telemetry ledger present`, prompt.evidenceTelemetry.evidence_ledger_present === true);
+  check(`${name} telemetry projection ok`, prompt.evidenceTelemetry.evidence_projection_status === 'ok');
+  check(`${name} telemetry promptable`, prompt.evidenceTelemetry.evidence_promptable === true);
+  check(`${name} telemetry stripped`, prompt.evidenceTelemetry.evidence_internal_stripped === true);
+  check(`${name} telemetry rollback false`, prompt.evidenceTelemetry.evidence_rollback_active === false);
+  check(`${name} telemetry no failure`, prompt.evidenceTelemetry.evidence_projection_failure_reason === 'none');
   if (extra.must) {
     extra.must.forEach((re, i) => check(`${name} must[${i}]`, re.test(prompt.systemContent)));
   }
@@ -270,6 +280,16 @@ async function run() {
   check('default flag on when unset', withEnv(undefined, () => isLedgerPromptEnabled() === true));
   check('flag off for 0', withEnv('0', () => isLedgerPromptEnabled() === false));
   check('flag off for false', withEnv('false', () => isLedgerPromptEnabled() === false));
+  check('flag off for FALSE', withEnv('FALSE', () => isLedgerPromptEnabled() === false));
+  check('flag off for off', withEnv('off', () => isLedgerPromptEnabled() === false));
+  check('flag off for no', withEnv('NO', () => isLedgerPromptEnabled() === false));
+  check('flag on for true', withEnv('true', () => isLedgerPromptEnabled() === true));
+  check('flag on for 1', withEnv('1', () => isLedgerPromptEnabled() === true));
+  check('flag on for on', withEnv('ON', () => isLedgerPromptEnabled() === true));
+  check('flag on for yes', withEnv('yes', () => isLedgerPromptEnabled() === true));
+  check('rollback active when off', withEnv('false', () => isEvidenceRollbackActive() === true));
+  check('rollback inactive when unset', withEnv(undefined, () => isEvidenceRollbackActive() === false));
+  check('parse unknown enables', parseLedgerPromptFlag('maybe').enabled === true && parseLedgerPromptFlag('maybe').rollbackActive === false);
   check('approved count 7', APPROVED_MACRO_CAPABILITIES.length === 7);
   check('upcoming approved', isApprovedMacroCapability('cashflow_upcoming') === true);
   check('snapshot not approved', isApprovedMacroCapability('financial_forecast') === false);
@@ -493,6 +513,10 @@ async function run() {
     check('rollback mode legacy', legacy.evidencePromptMode === 'legacy');
     check('rollback still has Narrate observation codes', /Narrate observation codes/.test(legacy.systemContent));
     check('rollback still has azureFacing JSON source array', /"source":\["cashflow_upcoming"\]/.test(legacy.systemContent.replace(/\s+/g, '')));
+    check('rollback telemetry mode legacy', legacy.evidenceTelemetry.evidence_prompt_mode === 'legacy');
+    check('rollback telemetry rollback true', legacy.evidenceTelemetry.evidence_rollback_active === true);
+    check('rollback telemetry ledger absent', legacy.evidenceTelemetry.evidence_ledger_present === false);
+    check('rollback telemetry projection legacy', legacy.evidenceTelemetry.evidence_projection_status === 'legacy');
   });
 
   const snapProjected = projectApprovedMacroEvidence({
@@ -538,6 +562,31 @@ async function run() {
   const failedPrompt = assemble(bad, { capability: 'cashflow_upcoming' });
   check('projection failure does not send raw evidence', failedPrompt.projectionFailed === true && failedPrompt.groundedEvidenceBlock === '');
   check('projection failure does not include raw facts dump', !/"amount":/.test(failedPrompt.systemContent));
+  check('projection failure telemetry not ok', failed.telemetry.evidence_projection_status !== 'ok');
+  check('projection failure telemetry not promptable', failed.telemetry.evidence_promptable === false);
+  check('projection failure telemetry reason controlled', failed.telemetry.evidence_projection_failure_reason === 'projection_exception');
+  check('projection failure telemetry no amount', JSON.stringify(failed.telemetry).indexOf('amount') === -1);
+
+  section('3B.4 capability telemetry goldens');
+  check('upcoming empty status complete_empty', emptyPrompt.evidenceTelemetry.evidence_status === 'complete_empty');
+  check('upcoming empty not truncated', emptyPrompt.evidenceTelemetry.evidence_list_truncated === false);
+  check('upcoming empty source', emptyPrompt.evidenceTelemetry.evidence_source_kind === 'cashflow_upcoming');
+  check('upcoming normal source', upPrompt.evidenceTelemetry.evidence_source_kind === 'cashflow_upcoming');
+  check('upcoming normal status complete', upPrompt.evidenceTelemetry.evidence_status === 'complete' || upPrompt.evidenceTelemetry.evidence_status === 'complete_empty');
+  check('recurring mode ledger_v1', recPrompt.evidenceTelemetry.evidence_prompt_mode === 'ledger_v1' && recPrompt.evidenceTelemetry.evidence_source_kind === 'cashflow_recurring');
+  check('horizon source', hzPrompt.evidenceTelemetry.evidence_source_kind === 'cashflow_income_horizon');
+  check('comparison source', cmpPrompt.evidenceTelemetry.evidence_source_kind === 'cashflow_period_comparison');
+  check('trend source', trendPrompt.evidenceTelemetry.evidence_source_kind === 'cashflow_trend');
+  check('cashflow source', cfPrompt.evidenceTelemetry.evidence_source_kind === 'cashflow_analysis');
+  check('affordability source', affPrompt.evidenceTelemetry.evidence_source_kind === 'affordability_analysis');
+  check('snapshot telemetry rollback false', snapProjected.telemetry.evidence_rollback_active === false);
+  check('snapshot telemetry mode legacy', snapProjected.telemetry.evidence_prompt_mode === 'legacy');
+  check('lookup telemetry mode legacy', lookupProjected.telemetry.evidence_prompt_mode === 'legacy');
+
+  const cutoverSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'keaEvidencePromptCutover.js'), 'utf8');
+  const telSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'keaEvidenceTelemetry.js'), 'utf8');
+  check('cutover logger has no ledger dump', !/console\.(log|info|debug)\(.*ledger/.test(cutoverSrc) && !/JSON\.stringify\(built\.ledger\)/.test(cutoverSrc));
+  check('telemetry module has no financial math', !/Math\.max|\.reduce\s*\(|percentage/.test(telSrc));
 
   section('3B.3A size and performance');
   Object.keys(sizes).forEach((name) => {
