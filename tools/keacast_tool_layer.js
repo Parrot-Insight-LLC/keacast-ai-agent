@@ -142,6 +142,13 @@ async function getKeaUpcomingAnalysis({ accountId, token, body, timeoutMs, reque
   return response.data;
 }
 
+async function getKeaIncomeHorizonAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const url = `${BASE_URL}/account/kea-income-horizon/${accountId}`;
+  const config = buildSelectedAccountAxiosConfig({ token, timeoutMs, requestId });
+  const response = await axios.post(url, body || {}, config);
+  return response.data;
+}
+
 async function getBalances({ accountId, userId, token, body }) {
   const url = `${BASE_URL}/balances/getall/${accountId}/${moment().format('YYYY-MM-DD')}`;
   const response = await axios.get(url, AUTH_HEADER(token));
@@ -289,6 +296,7 @@ module.exports = {
   getKeaTrendAnalysis,
   getKeaRecurringAnalysis,
   getKeaUpcomingAnalysis,
+  getKeaIncomeHorizonAnalysis,
   getBalances,
   createTransaction,
   deleteTransaction,

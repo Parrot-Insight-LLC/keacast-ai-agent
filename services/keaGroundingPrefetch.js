@@ -298,6 +298,7 @@ function shouldForceDirectAnswer({ route, policy, evidence } = {}) {
     || cap === 'cashflow_trend'
     || cap === 'cashflow_recurring'
     || cap === 'cashflow_upcoming'
+    || cap === 'cashflow_income_horizon'
     || cap === 'affordability_or_planning';
   if (!directCaps) return false;
   if (!evidence || evidence.status !== 'ok') return false;
@@ -525,7 +526,12 @@ function horizonEnd(currentDate, days = 90) {
 function macroFactsFromResult(result, source) {
   if (!result || typeof result !== 'object') return {};
   const facts = {};
-  const copyKeys = source === 'cashflow_upcoming'
+  const copyKeys = source === 'cashflow_income_horizon'
+    ? [
+      'accountScope', 'incomeHorizonDefinition', 'nextIncome',
+      'combinedScheduledIncomeAmount', 'window', 'expensesBeforeIncome', 'forecast',
+    ]
+    : source === 'cashflow_upcoming'
     ? [
       'accountScope', 'period', 'metricScope', 'items', 'totals',
     ]
@@ -623,6 +629,11 @@ async function defaultFetchRecurringAnalysis({ accountId, token, body, timeoutMs
 async function defaultFetchUpcomingAnalysis({ accountId, token, body, timeoutMs, requestId }) {
   const { getKeaUpcomingAnalysis } = require('../tools/keacast_tool_layer');
   return getKeaUpcomingAnalysis({ accountId, token, body, timeoutMs, requestId });
+}
+
+async function defaultFetchIncomeHorizonAnalysis({ accountId, token, body, timeoutMs, requestId }) {
+  const { getKeaIncomeHorizonAnalysis } = require('../tools/keacast_tool_layer');
+  return getKeaIncomeHorizonAnalysis({ accountId, token, body, timeoutMs, requestId });
 }
 
 function streamMatchesLabel(stream, subjectValue) {
@@ -813,6 +824,78 @@ async function prefetchCashflowUpcomingMacro({
     return evidence;
   } catch (err) {
     return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null, period });
+  }
+}
+
+function candidateCountBucket(count) {
+  const n = Number(count) || 0;
+  if (n <= 0) return '0';
+  if (n === 1) return '1';
+  if (n === 2) return '2';
+  return '3+';
+}
+
+function horizonDaysBucket(days) {
+  if (days == null || !Number.isFinite(Number(days))) return null;
+  const n = Number(days);
+  if (n <= 0) return '0';
+  if (n <= 7) return '1-7';
+  if (n <= 14) return '8-14';
+  if (n <= 30) return '15-30';
+  return '31+';
+}
+
+async function prefetchCashflowIncomeHorizonMacro({
+  accountId,
+  token,
+  requestId,
+  currentDate,
+  slots,
+  fetchIncomeHorizonAnalysis,
+}) {
+  if (slots && slots.incomeHorizonError) {
+    return emptyEvidence({
+      limitations: [slots.incomeHorizonError],
+      dataAsOf: currentDate || null,
+    });
+  }
+  if (accountId == null || accountId === '') {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+  if (!token) {
+    return emptyEvidence({ limitations: ['access_unverified'], dataAsOf: currentDate || null });
+  }
+  const fetch = fetchIncomeHorizonAnalysis || defaultFetchIncomeHorizonAnalysis;
+  try {
+    const result = await fetch({
+      accountId,
+      token,
+      requestId,
+      timeoutMs: macroTimeoutMs(),
+      body: { clientDate: currentDate },
+    });
+    const evidence = evidenceFromMacroResult(result, {
+      source: 'cashflow_income_horizon',
+      currentDate,
+      assumptions: [],
+    });
+    const nextCount = Array.isArray(result && result.nextIncome) ? result.nextIncome.length : 0;
+    const expenseCount = result && result.expensesBeforeIncome && result.expensesBeforeIncome.count;
+    const days = result && result.forecast && result.forecast.daysUntilNextIncome;
+    const negative = !!(result && result.forecast && result.forecast.firstNegativeDate);
+    evidence.prefetchMeta = {
+      ...(evidence.prefetchMeta || {}),
+      candidateCount: nextCount,
+      candidateCountBucket: candidateCountBucket(nextCount),
+      expenseCount: Number(expenseCount) || 0,
+      expenseCountBucket: itemCountBucket(expenseCount),
+      horizonDaysBucket: horizonDaysBucket(days),
+      negativeBefore: negative,
+      incomeHorizonDefinition: (result && result.incomeHorizonDefinition) || 'kea_scheduled_recurring_income',
+    };
+    return evidence;
+  } catch (err) {
+    return evidenceFromMacroCatch(err, { dataAsOf: currentDate || null });
   }
 }
 
@@ -1079,6 +1162,7 @@ async function prefetchGrounding({
   fetchTrendAnalysis,
   fetchRecurringAnalysis,
   fetchUpcomingAnalysis,
+  fetchIncomeHorizonAnalysis,
 } = {}) {
   const effective = policy?.effectiveCapability || route?.capability;
   const slots = route?.slots || {};
@@ -1149,6 +1233,17 @@ async function prefetchGrounding({
       currentDate,
       slots,
       fetchUpcomingAnalysis,
+    });
+  }
+
+  if (policy.prefetchKind === 'cashflow_income_horizon_macro' || effective === 'cashflow_income_horizon') {
+    return prefetchCashflowIncomeHorizonMacro({
+      accountId,
+      token,
+      requestId,
+      currentDate,
+      slots,
+      fetchIncomeHorizonAnalysis,
     });
   }
 
@@ -1270,7 +1365,8 @@ function azureFacingEvidence(evidence) {
       || compact.source.includes('cashflow_period_comparison')
       || compact.source.includes('cashflow_trend')
       || compact.source.includes('cashflow_recurring')
-      || compact.source.includes('cashflow_upcoming'));
+      || compact.source.includes('cashflow_upcoming')
+      || compact.source.includes('cashflow_income_horizon'));
   if (isMacro) {
     compact.accountScope = evidence.accountScope || 'selected_account';
   }
@@ -1499,13 +1595,22 @@ function buildEvidenceSystemSection(evidence) {
   const isTrend = compact.source.includes('cashflow_trend');
   const isRecurring = compact.source.includes('cashflow_recurring');
   const isUpcoming = compact.source.includes('cashflow_upcoming');
+  const isIncomeHorizon = compact.source.includes('cashflow_income_horizon');
   const isMacro = compact.source.includes('cashflow_analysis')
     || compact.source.includes('affordability_analysis')
     || isComparison
     || isTrend
     || isRecurring
-    || isUpcoming;
-  const macroInstruction = isUpcoming
+    || isUpcoming
+    || isIncomeHorizon;
+  const macroInstruction = isIncomeHorizon
+    ? [
+      'GROUNDED EVIDENCE is authoritative for this requested income-horizon analysis.',
+      'accountScope=selected_account: all financial values refer only to the currently selected account unless the evidence explicitly states otherwise. Do not say across your accounts, all accounts, or complete financial picture.',
+      'These are deterministic Keacast calculations. Do not recalculate them. Do not contradict them. Do not sum expenses. Do not calculate dates, days until income, balances, or shortfall.',
+      'Narrate observation codes and supplied facts only. Do not invent a new financial judgment.',
+    ].join(' ')
+    : isUpcoming
     ? [
       'GROUNDED EVIDENCE is authoritative for this requested upcoming scheduled-item list.',
       'accountScope=selected_account: all financial values refer only to the currently selected account unless the evidence explicitly states otherwise. Do not say across your accounts, all accounts, or complete financial picture.',
@@ -1634,6 +1739,22 @@ function buildEvidenceSystemSection(evidence) {
       'If observations include no_upcoming_in_period, say you do not see any scheduled items in the Keacast forecast for the supplied dates. Do not say the user has no bills.',
     ].join(' ')
     : '';
+  const incomeHorizonInstruction = compact.source.includes('cashflow_income_horizon')
+    ? [
+      'These values are scheduled in this selected Keacast account. Prefer "the next scheduled recurring income in this selected Keacast account".',
+      'Do not call the income a confirmed paycheck, employer-confirmed paycheck, or guaranteed payroll deposit. Do not infer payroll from a title. If the user said paycheck or payday, answer with the supported scheduled-income terminology without scolding.',
+      'Use the supplied nextIncome date, occurrence amount, and frequencyLabel. amount is the next scheduled occurrence, not a monthly equivalent. Do not average or replace it.',
+      'If multiple nextIncome rows share a date, report all of them. Do not choose a primary stream. combinedScheduledIncomeAmount is already calculated when present.',
+      'Use forecast.daysUntilNextIncome, expensesBeforeIncome.total, forecast.lowestBalanceBeforeIncome, forecast.firstNegativeDate, forecast.firstNegativeAmount, forecast.projectedShortfallBeforeIncome, and forecast.projectedBalanceDayBeforeIncome exactly as supplied.',
+      'Do not sum expenses. Do not calculate dates, shortfall, or balances. Do not infer same-day order. Do not say the income covers same-day expenses or arrives before/after a same-day bill.',
+      'If observations include same_day_order_unknown, say Keacast projects all scheduled items on that date together at the end-of-day level, so their intraday order is not established.',
+      'If observations include no_negative_before_income, say the current Keacast forecast does not drop below $0 before that scheduled income date.',
+      'If observations include forecast_goes_negative_before_income, report the supplied first negative date/amount, lowest projected balance, and projected shortfall. Do not use risk adjectives.',
+      'Do not call a balance safe to spend. Do not recommend skipping bills. Do not say healthy, comfortable, safe, or you will be fine.',
+      'If category is Salary, you may say it is categorized as Salary. That is not employer confirmation.',
+      'Do not mention groupid, transfer_id, transfer_pair_id, account ids, or raw forecast series.',
+    ].join(' ')
+    : '';
   const affordabilityInstruction = compact.source.includes('affordability_analysis')
     ? [
       'Preferred conclusion: based on the current Keacast forecast, adding the requested expense would or would not create a negative projected balance within the evaluation horizon.',
@@ -1657,6 +1778,8 @@ function buildEvidenceSystemSection(evidence) {
         ? 'Field glossary: periods[] are chronological posted-actual windows. income and spending are positive magnitudes. net is signed. trend.direction is the deterministic classification. firstToLast is the last window minus the first. Use supplied labels, not internal field names.'
       : isUpcoming
         ? 'Field glossary: items[] are scheduled Keacast forecast rows in the supplied period. amount is a positive magnitude. totals.scheduledExpenseTotal / scheduledIncomeTotal / scheduledNet are deterministic Keacast totals for all matching rows, including any items omitted by list_capped. Do not mention availableBalance, currentBalance, reconciledBalance, futureNegativeBalances, or savingsPotential.'
+      : isIncomeHorizon
+        ? 'Field glossary: nextIncome[] are qualifying scheduled recurring income occurrences on the earliest eligible date. amount is the next occurrence amount, not a monthly equivalent. expensesBeforeIncome.items are scheduled expenses between tomorrow and the day before that income date. forecast.* values are canonical Keacast end-of-day projections. Do not mention a paycheck, safe spend, or raw forecast series.'
       : isRecurring
         ? 'Field glossary: Use only the stream lists, totals, and observations present in this evidence. expenses[] and income[] are scheduled Keacast recurring series when present. amount is the next scheduled occurrence magnitude. monthlyEquivalent is a cadence-normalized monthly equivalent. totals.recurringExpenseMonthlyEquivalent is the default cost metric when present. nextOccurrenceExpenseSum is not a monthly total. sourceKinds kea_scheduled_series means scheduled in Keacast, not bank-detected. Do not mention a missing income or expense side.'
       : isComparison
@@ -1671,6 +1794,7 @@ function buildEvidenceSystemSection(evidence) {
     trendInstruction,
     recurringInstruction,
     upcomingInstruction,
+    incomeHorizonInstruction,
     affordabilityInstruction,
     partialInstruction,
   ].filter(Boolean).join('\n');

@@ -120,6 +120,14 @@ function createKeaTelemetry({ requestId } = {}) {
     upcoming_period_relation: null,
     upcoming_metric_scope: null,
     upcoming_item_count_bucket: null,
+    income_horizon_performed: false,
+    income_horizon_status: 'skipped',
+    income_horizon_ms: 0,
+    income_horizon_definition: null,
+    income_horizon_candidate_count_bucket: null,
+    income_horizon_horizon_days_bucket: null,
+    income_horizon_negative_before: null,
+    income_horizon_expense_count_bucket: null,
   };
 
   let lastStage = null;
@@ -305,6 +313,30 @@ function createKeaTelemetry({ requestId } = {}) {
     if (flags.upcoming_item_count_bucket === null || typeof flags.upcoming_item_count_bucket === 'string') {
       grounding.upcoming_item_count_bucket = flags.upcoming_item_count_bucket || null;
     }
+    if (flags.income_horizon_performed === true || flags.income_horizon_performed === false) {
+      grounding.income_horizon_performed = flags.income_horizon_performed;
+    }
+    if (flags.income_horizon_status === null || typeof flags.income_horizon_status === 'string') {
+      grounding.income_horizon_status = flags.income_horizon_status || 'skipped';
+    }
+    if (flags.income_horizon_ms != null) {
+      grounding.income_horizon_ms = Number(flags.income_horizon_ms) || 0;
+    }
+    if (flags.income_horizon_definition === null || typeof flags.income_horizon_definition === 'string') {
+      grounding.income_horizon_definition = flags.income_horizon_definition || null;
+    }
+    if (flags.income_horizon_candidate_count_bucket === null || typeof flags.income_horizon_candidate_count_bucket === 'string') {
+      grounding.income_horizon_candidate_count_bucket = flags.income_horizon_candidate_count_bucket || null;
+    }
+    if (flags.income_horizon_horizon_days_bucket === null || typeof flags.income_horizon_horizon_days_bucket === 'string') {
+      grounding.income_horizon_horizon_days_bucket = flags.income_horizon_horizon_days_bucket || null;
+    }
+    if (flags.income_horizon_negative_before === true || flags.income_horizon_negative_before === false || flags.income_horizon_negative_before === null) {
+      grounding.income_horizon_negative_before = flags.income_horizon_negative_before;
+    }
+    if (flags.income_horizon_expense_count_bucket === null || typeof flags.income_horizon_expense_count_bucket === 'string') {
+      grounding.income_horizon_expense_count_bucket = flags.income_horizon_expense_count_bucket || null;
+    }
   }
 
   function setResponseCharacterCount(n) {
@@ -488,6 +520,14 @@ function createKeaTelemetry({ requestId } = {}) {
       upcoming_period_relation: grounding.upcoming_period_relation || null,
       upcoming_metric_scope: grounding.upcoming_metric_scope || null,
       upcoming_item_count_bucket: grounding.upcoming_item_count_bucket || null,
+      income_horizon_performed: !!grounding.income_horizon_performed,
+      income_horizon_status: grounding.income_horizon_status || 'skipped',
+      income_horizon_ms: grounding.income_horizon_ms || 0,
+      income_horizon_definition: grounding.income_horizon_definition || null,
+      income_horizon_candidate_count_bucket: grounding.income_horizon_candidate_count_bucket || null,
+      income_horizon_horizon_days_bucket: grounding.income_horizon_horizon_days_bucket || null,
+      income_horizon_negative_before: grounding.income_horizon_negative_before,
+      income_horizon_expense_count_bucket: grounding.income_horizon_expense_count_bucket || null,
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,

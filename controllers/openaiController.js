@@ -1159,6 +1159,7 @@ function emptyDialogueState() {
     lastTrend: null,
     lastRecurring: null,
     lastUpcoming: null,
+    lastIncomeHorizon: null,
     pendingInvitation: null,
     updatedAt: null,
   };
@@ -3487,6 +3488,7 @@ exports.chat = async (req, res) => {
     if (effectiveCap === 'cashflow_trend') financialMacro = 'trend_periods';
     if (effectiveCap === 'cashflow_recurring') financialMacro = 'recurring_analysis';
     if (effectiveCap === 'cashflow_upcoming') financialMacro = 'upcoming_period';
+    if (effectiveCap === 'cashflow_income_horizon') financialMacro = 'income_horizon';
     if (effectiveCap === 'affordability_or_planning') financialMacro = 'assess_affordability';
     const macroAttempted = financialMacro !== 'none' || effectiveCap === 'mixed_macro';
     let macroInputKind = 'none';
@@ -3505,6 +3507,8 @@ exports.chat = async (req, res) => {
       macroInputKind = 'recurring_series';
     } else if (financialMacro === 'upcoming_period') {
       macroInputKind = 'upcoming_period';
+    } else if (financialMacro === 'income_horizon') {
+      macroInputKind = 'income_horizon';
     }
     telemetry.recordGrounding({
       conversation_intent: phase1Route.capability,
@@ -3602,6 +3606,28 @@ exports.chat = async (req, res) => {
       upcoming_item_count_bucket: financialMacro === 'upcoming_period'
         ? ((phase1Evidence && phase1Evidence.prefetchMeta && phase1Evidence.prefetchMeta.itemCountBucket) || null)
         : null,
+      income_horizon_performed: financialMacro === 'income_horizon' && phase1Performed && !phase1FailSoft,
+      income_horizon_status: financialMacro === 'income_horizon'
+        ? (phase1Evidence && phase1Evidence.status ? phase1Evidence.status : 'unavailable')
+        : 'skipped',
+      income_horizon_ms: financialMacro === 'income_horizon' ? groundingPrefetchMs : 0,
+      income_horizon_definition: financialMacro === 'income_horizon'
+        ? ((phase1Evidence && phase1Evidence.prefetchMeta && phase1Evidence.prefetchMeta.incomeHorizonDefinition)
+          || (phase1Evidence && phase1Evidence.facts && phase1Evidence.facts.incomeHorizonDefinition)
+          || null)
+        : null,
+      income_horizon_candidate_count_bucket: financialMacro === 'income_horizon'
+        ? ((phase1Evidence && phase1Evidence.prefetchMeta && phase1Evidence.prefetchMeta.candidateCountBucket) || null)
+        : null,
+      income_horizon_horizon_days_bucket: financialMacro === 'income_horizon'
+        ? ((phase1Evidence && phase1Evidence.prefetchMeta && phase1Evidence.prefetchMeta.horizonDaysBucket) || null)
+        : null,
+      income_horizon_negative_before: financialMacro === 'income_horizon'
+        ? !!(phase1Evidence && phase1Evidence.prefetchMeta && phase1Evidence.prefetchMeta.negativeBefore)
+        : null,
+      income_horizon_expense_count_bucket: financialMacro === 'income_horizon'
+        ? ((phase1Evidence && phase1Evidence.prefetchMeta && phase1Evidence.prefetchMeta.expenseCountBucket) || null)
+        : null,
     });
 
     // ── Build a compact, token-minimal context block ─────────────────────
@@ -3615,6 +3641,7 @@ exports.chat = async (req, res) => {
         || effectiveCap === 'cashflow_trend'
         || effectiveCap === 'cashflow_recurring'
         || effectiveCap === 'cashflow_upcoming'
+        || effectiveCap === 'cashflow_income_horizon'
         || effectiveCap === 'affordability_or_planning')
       && phase1Evidence
       && phase1Evidence.status === 'ok'
@@ -3624,6 +3651,7 @@ exports.chat = async (req, res) => {
         || phase1Evidence.source.includes('cashflow_trend')
         || phase1Evidence.source.includes('cashflow_recurring')
         || phase1Evidence.source.includes('cashflow_upcoming')
+        || phase1Evidence.source.includes('cashflow_income_horizon')
         || phase1Evidence.source.includes('affordability_analysis'));
 
     let identityBlock;

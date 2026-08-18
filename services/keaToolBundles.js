@@ -62,6 +62,7 @@ const BUNDLES = Object.freeze({
   cashflow_trend: Object.freeze([]),
   cashflow_recurring: Object.freeze([]),
   cashflow_upcoming: Object.freeze([]),
+  cashflow_income_horizon: Object.freeze([]),
   affordability_or_planning: AFFORDABILITY,
   mixed_macro: Object.freeze([]),
   invitation_continuation: Object.freeze([]),

@@ -21,6 +21,7 @@ const MATRIX = Object.freeze({
   cashflow_trend: GROUNDING_REQUIRED,
   cashflow_recurring: GROUNDING_REQUIRED,
   cashflow_upcoming: GROUNDING_REQUIRED,
+  cashflow_income_horizon: GROUNDING_REQUIRED,
   affordability_or_planning: GROUNDING_REQUIRED,
   mixed_macro: GROUNDING_REQUIRED,
   invitation_continuation: GROUNDING_NONE,
@@ -59,6 +60,12 @@ const FAIL_SOFT_BY_LIMITATION = Object.freeze({
   upcoming_historical_period: 'That period is in the past. Upcoming scheduled items are for today or future dates in your Keacast forecast.',
   upcoming_horizon_unsupported: 'I can look up scheduled items up to 90 days out. Try a shorter window such as the next 7 days or next week.',
   upcoming_unavailable: FAIL_SOFT_TEXT,
+  no_scheduled_recurring_income: 'I don\'t see a qualifying future scheduled recurring income in this selected Keacast account. I can still show scheduled income for a specific future period.',
+  income_horizon_unavailable: FAIL_SOFT_TEXT,
+  income_horizon_unsupported: 'That next scheduled income is outside the current Keacast forecast window, so I cannot evaluate the days before it.',
+  payday_affordability_unsupported: 'I can look at scheduled recurring income and the Keacast forecast before that date, but I cannot combine a specific purchase amount with payday yet. Try the amount on a calendar date, or ask about the days before your next scheduled income.',
+  safe_spend_unsupported: 'I can\'t calculate a safe-to-spend amount before that income date. Keacast does not have a cushion or unmodeled-spending contract for that.',
+  after_income_intraday_unsupported: 'I can\'t say what your balance will be immediately after that income. Keacast projects the calendar date as a whole at end of day and does not establish same-day order.',
   macro_error: FAIL_SOFT_TEXT,
   macro_timeout: FAIL_SOFT_TEXT,
 });
@@ -115,6 +122,7 @@ function prefetchKindFor(capability, route) {
   if (capability === 'cashflow_trend') return 'cashflow_trend_macro';
   if (capability === 'cashflow_recurring') return 'cashflow_recurring_macro';
   if (capability === 'cashflow_upcoming') return 'cashflow_upcoming_macro';
+  if (capability === 'cashflow_income_horizon') return 'cashflow_income_horizon_macro';
   if (capability === 'affordability_or_planning') return 'affordability_macro';
   if (capability === 'mixed_macro') return 'none';
   if (capability === 'financial_forecast') return 'snapshot';
@@ -146,6 +154,7 @@ function groundingStrategyFor({ policy, evidence, failSoft }) {
   if (evidence.source.includes('cashflow_trend')) return 'cashflow_trend_macro';
   if (evidence.source.includes('cashflow_recurring')) return 'cashflow_recurring_macro';
   if (evidence.source.includes('cashflow_upcoming')) return 'cashflow_upcoming_macro';
+  if (evidence.source.includes('cashflow_income_horizon')) return 'cashflow_income_horizon_macro';
   if (evidence.source.includes('affordability_analysis')) return 'affordability_macro';
   if (evidence.source.includes('user_transactions')) return 'prefetch_read';
   if (evidence.source.includes('kea_snapshot')) return 'snapshot';

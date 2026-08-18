@@ -22,6 +22,7 @@ const CAPABILITIES = Object.freeze([
   'cashflow_trend',
   'cashflow_recurring',
   'cashflow_upcoming',
+  'cashflow_income_horizon',
   'affordability_or_planning',
   'mixed_macro',
   'transaction_write',
@@ -39,6 +40,7 @@ const FINANCIAL_CAPABILITIES = new Set([
   'cashflow_trend',
   'cashflow_recurring',
   'cashflow_upcoming',
+  'cashflow_income_horizon',
   'affordability_or_planning',
 ]);
 
@@ -890,6 +892,8 @@ function isCashflowUpcoming(text, currentDate) {
   if (!isUpcomingListIntent(text)) return false;
   if (isCashflowRecurring(text) || isAffordability(text) || isBalanceImpactQuestion(text)) return false;
   if (isCashflowTrend(text) || isCashflowComparison(text)) return false;
+  if (isCashflowIncomeHorizon(text, currentDate)) return false;
+  if (/\bbefore then\b/i.test(String(text || ''))) return false;
   if (isUpcomingComingShorthand(text) && !hasUpcomingFinancialNoun(text)) {
     const resolved = resolveUpcomingPeriod(text, currentDate);
     if (!resolved) return false;
@@ -912,6 +916,74 @@ function isWeekAfterFollowUp(text) {
 
 function isCalendarWeekRelation(relation) {
   return relation === 'this_week' || relation === 'next_week' || relation === 'week_after';
+}
+
+function hasPaydayHorizonPhrase(text) {
+  const m = String(text || '').toLowerCase();
+  return /\b(paycheck|paychecks|payday|pay day)\b/.test(m)
+    || /\b(get paid|getting paid)\b/.test(m)
+    || /\bnext scheduled income\b/.test(m);
+}
+
+function hasUntilBeforePayday(text) {
+  const m = String(text || '').toLowerCase();
+  return /\b(before|until|till|'til)\s+(payday|pay day|my paycheck|the paycheck|i get paid)\b/.test(m)
+    || /\bday before (payday|pay day|my paycheck)\b/.test(m);
+}
+
+function hasExplicitUpcomingCalendarWindow(text, currentDate) {
+  const m = String(text || '').toLowerCase();
+  if (!/\b(this week|next week|the week after|this month|next month|tomorrow|today|next \d+\s+days)\b/.test(m)) {
+    return false;
+  }
+  const resolved = resolveUpcomingPeriod(text, currentDate);
+  return !!(resolved && resolved.start && resolved.end && !resolved.error);
+}
+
+function isPaydayAffordabilityMix(text) {
+  if (!isAffordability(text)) return false;
+  if (parseAmount(text) == null) return false;
+  return hasUntilBeforePayday(text);
+}
+
+function isSafeSpendBeforePayday(text) {
+  const m = String(text || '').toLowerCase();
+  if (!/\b(safely spend|safe to spend|safe spend|how much can i spend)\b/.test(m)) return false;
+  return hasPaydayHorizonPhrase(text) || hasUntilBeforePayday(text);
+}
+
+function isAfterPaydayFollowUp(text) {
+  const m = String(text || '').toLowerCase();
+  return /\bafter payday\b/.test(m) || /\bafter (i get paid|my paycheck)\b/.test(m);
+}
+
+function isCashflowIncomeHorizon(text, currentDate) {
+  const m = String(text || '').toLowerCase();
+  if (!m) return false;
+  if (isCashflowRecurring(text) || isCashflowTrend(text) || isCashflowComparison(text)) return false;
+  if (isPaydayAffordabilityMix(text) || isSafeSpendBeforePayday(text)) return true;
+  if (hasExplicitUpcomingCalendarWindow(text, currentDate) && !hasUntilBeforePayday(text)) return false;
+  if (/\bwhen (is|are|'s)\b/.test(m) && hasPaydayHorizonPhrase(m)) return true;
+  if (/\bwhen(?:'|’)?s\b/.test(m) && hasPaydayHorizonPhrase(m)) return true;
+  if (/\bwhen do i get paid\b/.test(m)) return true;
+  if (/\bnext scheduled income\b/.test(m)) return true;
+  if (hasUntilBeforePayday(m)) return true;
+  if (/\b(bills?|expenses?).{0,48}\b(payday|paycheck|get paid)\b/.test(m)) return true;
+  if (/\b(go negative|have enough|how much (do i |will i )?need|balance).{0,48}\b(payday|paycheck|get paid)\b/.test(m)) return true;
+  return false;
+}
+
+function isIncomeHorizonFollowUp(text) {
+  const m = String(text || '').trim();
+  if (!m || m.length > 90) return false;
+  return /^(what expenses are due before then|what(?:'|’)?s due before then|how much total|what(?:'|’)?s the total|the total|will i go negative|how much is the shortfall|what about after payday|after payday)\b/i.test(m);
+}
+
+function incomeHorizonErrorFor(text) {
+  if (isPaydayAffordabilityMix(text)) return 'payday_affordability_unsupported';
+  if (isSafeSpendBeforePayday(text)) return 'safe_spend_unsupported';
+  if (isAfterPaydayFollowUp(text)) return 'after_income_intraday_unsupported';
+  return null;
 }
 
 function isMixedMacro(text) {
@@ -1706,7 +1778,8 @@ function routeCapabilityUnwrapped(input = {}) {
     || (isCashflowTrend(message) && lastCap !== 'cashflow_trend')
     || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend')
     || (isCashflowRecurring(message) && lastCap !== 'cashflow_recurring')
-    || (isCashflowUpcoming(message, currentDate) && lastCap !== 'cashflow_upcoming');
+    || (isCashflowUpcoming(message, currentDate) && lastCap !== 'cashflow_upcoming')
+    || (isCashflowIncomeHorizon(message, currentDate) && lastCap !== 'cashflow_income_horizon');
   const recurringFollowUp = lastCap === 'cashflow_recurring'
     && isRecurringFollowUp(message)
     && !accountChanged
@@ -1715,8 +1788,12 @@ function routeCapabilityUnwrapped(input = {}) {
     && isUpcomingFollowUp(message)
     && !accountChanged
     && accountsMatch(last.lastAccountId, currentAccountId);
+  const incomeHorizonFollowUp = lastCap === 'cashflow_income_horizon'
+    && isIncomeHorizonFollowUp(message)
+    && !accountChanged
+    && accountsMatch(last.lastAccountId, currentAccountId);
 
-  if ((continuationEligible || recurringFollowUp || upcomingFollowUp) && !breakContinuation) {
+  if ((continuationEligible || recurringFollowUp || upcomingFollowUp || incomeHorizonFollowUp) && !breakContinuation) {
     const parsedPurchase = parsePurchaseDate(message, currentDate);
     const merged = {
       amount: slots.amount != null ? slots.amount : (lastCap === 'affordability_or_planning' && last.lastSubjectKind === 'amount'
@@ -1798,6 +1875,19 @@ function routeCapabilityUnwrapped(input = {}) {
         }
       }
     }
+    if (lastCap === 'cashflow_income_horizon' && last.lastIncomeHorizon) {
+      merged.incomeDate = last.lastIncomeHorizon.incomeDate || null;
+      merged.windowStart = last.lastIncomeHorizon.windowStart || null;
+      merged.windowEnd = last.lastIncomeHorizon.windowEnd || null;
+      merged.incomeAmount = last.lastIncomeHorizon.incomeAmount != null
+        ? last.lastIncomeHorizon.incomeAmount
+        : last.lastIncomeHorizon.combinedIncomeAmount;
+      merged.incomeHorizonDefinition = last.lastIncomeHorizon.definition
+        || 'kea_scheduled_recurring_income';
+      if (isAfterPaydayFollowUp(message)) {
+        merged.incomeHorizonError = 'after_income_intraday_unsupported';
+      }
+    }
     return {
       ...base,
       capability: 'continuation',
@@ -1865,6 +1955,18 @@ function routeCapabilityUnwrapped(input = {}) {
   }
   if (isCasual(message)) {
     return { ...base, capability: 'casual_conversation', confidence: 'high', accountChanged };
+  }
+  if (isPaydayAffordabilityMix(message) || isSafeSpendBeforePayday(message) || isCashflowIncomeHorizon(message, currentDate)) {
+    return {
+      ...base,
+      capability: 'cashflow_income_horizon',
+      confidence: 'high',
+      accountChanged,
+      slots: {
+        ...slots,
+        incomeHorizonError: incomeHorizonErrorFor(message),
+      },
+    };
   }
   if (isMixedMacro(message)) {
     return { ...base, capability: 'mixed_macro', confidence: 'high', accountChanged, slots };
@@ -2164,6 +2266,7 @@ const PERSIST_CAPABILITIES = new Set([
   'cashflow_trend',
   'cashflow_recurring',
   'cashflow_upcoming',
+  'cashflow_income_horizon',
   'affordability_or_planning',
   'continuation',
 ]);
@@ -2255,6 +2358,19 @@ function applyContinuationPersistence(dialogueState, route, { accountId, failSof
       metricScope: slots.metricScope ? String(slots.metricScope).slice(0, 16) : 'all',
     };
   }
+  if (cap === 'cashflow_income_horizon') {
+    const amount = slots.incomeAmount != null ? Number(slots.incomeAmount) : null;
+    dialogueState.lastIncomeHorizon = {
+      incomeDate: slots.incomeDate ? String(slots.incomeDate).slice(0, 10) : null,
+      incomeAmount: Number.isFinite(amount) ? amount : undefined,
+      combinedIncomeAmount: slots.combinedIncomeAmount != null && Number.isFinite(Number(slots.combinedIncomeAmount))
+        ? Number(slots.combinedIncomeAmount)
+        : undefined,
+      windowStart: slots.windowStart ? String(slots.windowStart).slice(0, 10) : null,
+      windowEnd: slots.windowEnd ? String(slots.windowEnd).slice(0, 10) : null,
+      definition: 'kea_scheduled_recurring_income',
+    };
+  }
   return dialogueState;
 }
 
@@ -2328,6 +2444,24 @@ function applyContinuationPersistenceFromEvidence(dialogueState, route, evidence
       },
     }, opts);
   }
+  if ((persistRoute.capability === 'cashflow_income_horizon'
+      || persistRoute.parentCapability === 'cashflow_income_horizon')
+    && facts) {
+    const next = Array.isArray(facts.nextIncome) ? facts.nextIncome : [];
+    const incomeDate = next[0] && next[0].date;
+    const combined = facts.combinedScheduledIncomeAmount;
+    return applyContinuationPersistence(dialogueState, {
+      ...persistRoute,
+      slots: {
+        ...(persistRoute.slots || {}),
+        incomeDate: incomeDate || persistRoute.slots.incomeDate,
+        incomeAmount: next.length === 1 ? next[0].amount : undefined,
+        combinedIncomeAmount: next.length > 1 ? combined : undefined,
+        windowStart: facts.window && facts.window.start,
+        windowEnd: facts.window && facts.window.end,
+      },
+    }, opts);
+  }
   return applyContinuationPersistence(dialogueState, persistRoute, opts);
 }
 
@@ -2358,6 +2492,7 @@ module.exports = {
   isCashflowTrend,
   isCashflowRecurring,
   isCashflowUpcoming,
+  isCashflowIncomeHorizon,
   isAffordability,
   detectWantsUiAction,
   buildOpenSearchAction,

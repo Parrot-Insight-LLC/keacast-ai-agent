@@ -65,6 +65,7 @@ async function run() {
   check('spending lately uses cashflow_trend_macro', policyFor('Am I spending more lately?').policy.prefetchKind === 'cashflow_trend_macro');
   check('recurring expenses uses cashflow_recurring_macro', policyFor('What recurring expenses do I have?').policy.prefetchKind === 'cashflow_recurring_macro');
   check('bills due next week uses cashflow_upcoming_macro', policyFor('What bills are due next week?').policy.prefetchKind === 'cashflow_upcoming_macro');
+  check('next paycheck uses cashflow_income_horizon_macro', policyFor('When is my next paycheck?').policy.prefetchKind === 'cashflow_income_horizon_macro');
   check('future balance wording still snapshot forecast', policyFor('What will my balance be next month?').policy.prefetchKind === 'snapshot');
 
   section('fail-soft policy');

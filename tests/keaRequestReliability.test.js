@@ -341,6 +341,7 @@ async function run() {
     { name: 'analysis', message: 'How am I doing this month?', key: 'fetchCashflowAnalysis' },
     { name: 'affordability', message: 'Can I afford $800 next Friday?', key: 'fetchAffordabilityAnalysis' },
     { name: 'upcoming', message: 'What bills are due next week?', key: 'fetchUpcomingAnalysis' },
+    { name: 'incomeHorizon', message: 'When is my next paycheck?', key: 'fetchIncomeHorizonAnalysis' },
   ];
   for (const row of macros) {
     const r = route(row.message);

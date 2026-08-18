@@ -32,6 +32,7 @@ async function run() {
   check('cashflow_trend has no model tools', bundleForCapability('cashflow_trend').length === 0);
   check('cashflow_recurring has no model tools', bundleForCapability('cashflow_recurring').length === 0);
   check('cashflow_upcoming has no model tools', bundleForCapability('cashflow_upcoming').length === 0);
+  check('cashflow_income_horizon has no model tools', bundleForCapability('cashflow_income_horizon').length === 0);
   check('mixed_macro has no model tools', bundleForCapability('mixed_macro').length === 0);
   check(
     'affordability omits getGoals',
