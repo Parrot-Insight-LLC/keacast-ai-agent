@@ -862,25 +862,41 @@ function upcomingMetricScope(text, fallback) {
   if (hasIncome && !hasExpense) return 'income';
   if (hasExpense && !hasIncome) return 'expense';
   if (hasIncome && hasExpense) return 'all';
-  if (/\btransactions?\b/.test(m) || /\bwhat'?s coming\b/.test(m) || /\bwhat is coming\b/.test(m)) return 'all';
+  if (/\btransactions?\b/.test(m) || isUpcomingComingShorthand(m) || /\bwhat is coming\b/.test(m)) return 'all';
   if (/\bdue\b/.test(m)) return 'expense';
   return fallback || 'all';
+}
+
+function isUpcomingComingShorthand(text) {
+  const m = String(text || '').toLowerCase();
+  return /\bwhat(?:'|’)?s coming\b/.test(m) || /\bwhat is coming\b/.test(m);
+}
+
+function hasUpcomingFinancialNoun(text) {
+  return /\b(bills?|expenses?|payments?|charges?|transactions?|income|paychecks?)\b/.test(String(text || '').toLowerCase());
 }
 
 function isUpcomingListIntent(text) {
   const m = String(text || '').toLowerCase();
   if (!m) return false;
-  if (/\bwhat'?s coming\b/.test(m) || /\bwhat is coming\b/.test(m)) return true;
+  if (isUpcomingComingShorthand(m)) return true;
   if (/\bshow (me )?(my )?upcoming\b/.test(m)) return true;
   const timeish = /\b(due|coming|upcoming|coming up)\b/.test(m);
   const noun = /\b(bills?|expenses?|payments?|charges?|transactions?|income|paychecks?)\b/.test(m);
   return timeish && noun;
 }
 
-function isCashflowUpcoming(text) {
+function isCashflowUpcoming(text, currentDate) {
   if (!isUpcomingListIntent(text)) return false;
   if (isCashflowRecurring(text) || isAffordability(text) || isBalanceImpactQuestion(text)) return false;
   if (isCashflowTrend(text) || isCashflowComparison(text)) return false;
+  if (isUpcomingComingShorthand(text) && !hasUpcomingFinancialNoun(text)) {
+    const resolved = resolveUpcomingPeriod(text, currentDate);
+    if (!resolved) return false;
+    if (resolved.error === 'upcoming_horizon_unsupported') return true;
+    if (resolved.error || !resolved.start || !resolved.end) return false;
+    if (!isUpcomingPeriodCurrentOrFuture(resolved, currentDate)) return false;
+  }
   return true;
 }
 
@@ -1690,7 +1706,7 @@ function routeCapabilityUnwrapped(input = {}) {
     || (isCashflowTrend(message) && lastCap !== 'cashflow_trend')
     || (isCashflowComparison(message) && !isCashflowTrend(message) && lastCap === 'cashflow_trend')
     || (isCashflowRecurring(message) && lastCap !== 'cashflow_recurring')
-    || (isCashflowUpcoming(message) && lastCap !== 'cashflow_upcoming');
+    || (isCashflowUpcoming(message, currentDate) && lastCap !== 'cashflow_upcoming');
   const recurringFollowUp = lastCap === 'cashflow_recurring'
     && isRecurringFollowUp(message)
     && !accountChanged
@@ -1913,7 +1929,7 @@ function routeCapabilityUnwrapped(input = {}) {
       },
     };
   }
-  if (isCashflowUpcoming(message)) {
+  if (isCashflowUpcoming(message, currentDate)) {
     const resolved = resolveUpcomingPeriod(message, currentDate);
     let upcomingError = null;
     let period = null;

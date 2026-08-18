@@ -723,6 +723,34 @@ function itemCountBucket(count) {
   return '21+';
 }
 
+function stampUpcomingPeriodMetadata(evidence, slotsPeriod) {
+  if (!evidence || !slotsPeriod) return evidence;
+  const label = slotsPeriod.label || slotsPeriod.relation || null;
+  const relation = slotsPeriod.relation || slotsPeriod.label || null;
+  const start = (evidence.period && evidence.period.start) || slotsPeriod.start || null;
+  const end = (evidence.period && evidence.period.end) || slotsPeriod.end || null;
+  evidence.period = {
+    ...(evidence.period && typeof evidence.period === 'object' ? evidence.period : {}),
+    start,
+    end,
+    label: (evidence.period && evidence.period.label) || label,
+    relation: (evidence.period && evidence.period.relation) || relation,
+  };
+  if (evidence.facts) {
+    const existing = evidence.facts.period && typeof evidence.facts.period === 'object'
+      ? evidence.facts.period
+      : {};
+    evidence.facts.period = {
+      ...existing,
+      start: existing.start || start,
+      end: existing.end || end,
+      label: existing.label || label,
+      relation: existing.relation || relation,
+    };
+  }
+  return evidence;
+}
+
 async function prefetchCashflowUpcomingMacro({
   accountId,
   token,
@@ -771,9 +799,9 @@ async function prefetchCashflowUpcomingMacro({
       currentDate,
       assumptions: [],
     });
+    stampUpcomingPeriodMetadata(evidence, period);
     if (evidence.facts) {
       evidence.facts.metricScope = (slots && slots.metricScope) || evidence.facts.metricScope || 'all';
-      if (!evidence.facts.period) evidence.facts.period = result && result.period ? result.period : period;
     }
     if (result && result.itemCount != null) {
       evidence.prefetchMeta = {
@@ -1594,11 +1622,15 @@ function buildEvidenceSystemSection(evidence) {
     ? [
       'These items are scheduled in the user\'s Keacast forecast for the supplied period only.',
       'Prefer "scheduled expenses" or "upcoming scheduled expenses". Do not call items formally classified bills. Do not say bank-detected bills or all of your bills.',
-      'Use the supplied period.start and period.end exactly. Do not change the window. next_week is the next Sunday–Saturday calendar week. next_7_days is a rolling window and is not next week.',
+      'Use the supplied period.start, period.end, and period.relation exactly. Do not change the window.',
+      'If period.relation is next_week, say "next week" or name the supplied dates. Do not call next_week "this week".',
+      'If period.relation is next_7_days, say "the next 7 days". next_week is the next Sunday–Saturday calendar week and is not next_7_days.',
       'List only the supplied items. Use supplied dates, amounts, frequencyLabel, and totals. Do not sum items. Do not infer missing items.',
       'If scheduledExpenseTotal / scheduledIncomeTotal / scheduledNet are present, they came from Keacast. Do not recalculate them.',
+      'When displaying supplied monetary values, use two decimal places (for example $1297.30, not $1297.3).',
       'Do not compare totals to available balance. Do not calculate sufficiency. Do not warn about unrelated 90-day negatives. Do not mention availableBalance, currentBalance, reconciledBalance, futureNegativeBalances, or savingsPotential.',
       'Do not assess financial health. Do not give affordability advice.',
+      'If observations include no_upcoming_in_period and metricScope is income, say you do not see any scheduled income in the Keacast forecast for that period. Do not say no incoming funds, nothing planned, or that the user has no income.',
       'If observations include no_upcoming_in_period, say you do not see any scheduled items in the Keacast forecast for the supplied dates. Do not say the user has no bills.',
     ].join(' ')
     : '';

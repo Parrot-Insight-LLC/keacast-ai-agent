@@ -6,6 +6,7 @@ const { check, section } = require('./harness');
 const {
   routeCapability,
   applyContinuationPersistence,
+  applyContinuationPersistenceFromEvidence,
 } = require('../services/keaCapabilityRouter');
 const {
   resolveUpcomingPeriod,
@@ -274,6 +275,155 @@ async function run() {
   });
   check('unresolved does not call cashflow', unresolvedEv.status === 'unavailable'
     && unresolvedEv.limitations.includes('upcoming_period_unresolved'));
+
+  section('upcoming freeze hardening — apostrophe and shorthand');
+  const asciiNext7 = route("What's coming in the next 7 days?");
+  check('ASCII What\'s coming next 7 days → upcoming all next_7_days', asciiNext7.capability === 'cashflow_upcoming'
+    && asciiNext7.slots.metricScope === 'all'
+    && periodEq(asciiNext7.slots.period, '2026-08-18', '2026-08-24', 'next_7_days'));
+
+  const curlyNext7Text = 'What\u2019s coming in the next 7 days?';
+  check('curly fixture is U+2019 not ASCII apostrophe', curlyNext7Text.includes('\u2019') && !curlyNext7Text.includes('\u0027'));
+  const curlyNext7 = route(curlyNext7Text);
+  check('U+2019 What\u2019s coming next 7 days → identical to ASCII', curlyNext7.capability === 'cashflow_upcoming'
+    && curlyNext7.slots.metricScope === 'all'
+    && periodEq(curlyNext7.slots.period, '2026-08-18', '2026-08-24', 'next_7_days'));
+
+  const whatIsNext7 = route('What is coming in the next 7 days?');
+  check('What is coming next 7 days → upcoming all next_7_days', whatIsNext7.capability === 'cashflow_upcoming'
+    && whatIsNext7.slots.metricScope === 'all'
+    && periodEq(whatIsNext7.slots.period, '2026-08-18', '2026-08-24', 'next_7_days'));
+
+  const whatsNext7 = route('Whats coming in the next 7 days?');
+  check('Whats coming next 7 days → upcoming all next_7_days', whatsNext7.capability === 'cashflow_upcoming'
+    && whatsNext7.slots.metricScope === 'all'
+    && periodEq(whatsNext7.slots.period, '2026-08-18', '2026-08-24', 'next_7_days'));
+
+  const curlyNextWeekText = 'What\u2019s coming next week?';
+  check('curly next-week fixture is U+2019', curlyNextWeekText.includes('\u2019'));
+  const curlyNextWeek = route(curlyNextWeekText);
+  check('U+2019 What\u2019s coming next week → all next_week Aug 23-29', curlyNextWeek.capability === 'cashflow_upcoming'
+    && curlyNextWeek.slots.metricScope === 'all'
+    && periodEq(curlyNextWeek.slots.period, '2026-08-23', '2026-08-29', 'next_week'));
+
+  check('ASCII What\'s coming? is not upcoming', route("What's coming?").capability !== 'cashflow_upcoming');
+  check('U+2019 What\u2019s coming? is not upcoming', route('What\u2019s coming?').capability !== 'cashflow_upcoming');
+  check('What is coming? is not upcoming', route('What is coming?').capability !== 'cashflow_upcoming');
+  check('What\'s coming next in Keacast? is not upcoming', route("What's coming next in Keacast?").capability !== 'cashflow_upcoming');
+  check('What features are coming next? is not upcoming', route('What features are coming next?').capability !== 'cashflow_upcoming');
+
+  check('transactions coming next 7 days → all', route('What transactions are coming in the next 7 days?').capability === 'cashflow_upcoming'
+    && route('What transactions are coming in the next 7 days?').slots.metricScope === 'all');
+  check('expenses coming next 7 days → expense', route('What expenses are coming in the next 7 days?').capability === 'cashflow_upcoming'
+    && route('What expenses are coming in the next 7 days?').slots.metricScope === 'expense');
+  check('income coming next 7 days → income', route('What income is coming in the next 7 days?').capability === 'cashflow_upcoming'
+    && route('What income is coming in the next 7 days?').slots.metricScope === 'income');
+  check('bills due tomorrow still upcoming', route('What bills are due tomorrow?').capability === 'cashflow_upcoming'
+    && route('What bills are due tomorrow?').slots.metricScope === 'expense');
+
+  const curlyNext14 = route('What\u2019s coming in the next 14 days?');
+  check('U+2019 next 14 days → all next_n_days Aug 18-31', curlyNext14.capability === 'cashflow_upcoming'
+    && curlyNext14.slots.metricScope === 'all'
+    && periodEq(curlyNext14.slots.period, '2026-08-18', '2026-08-31', 'next_n_days'));
+  check('next 30 days relation next_n_days', route("What's coming in the next 30 days?").capability === 'cashflow_upcoming'
+    && route("What's coming in the next 30 days?").slots.period.relation === 'next_n_days');
+  check('next 90 days relation next_n_days', route("What's coming in the next 90 days?").capability === 'cashflow_upcoming'
+    && route("What's coming in the next 90 days?").slots.period.relation === 'next_n_days');
+  check('next 91 days shorthand fail-soft', route("What's coming in the next 91 days?").capability === 'cashflow_upcoming'
+    && route("What's coming in the next 91 days?").slots.upcomingError === 'upcoming_horizon_unsupported');
+  check('next days shorthand is not upcoming', route("What's coming in the next days?").capability !== 'cashflow_upcoming');
+
+  check('afford ASCII what\'s coming next week', route("Can I afford what's coming next week?").capability === 'affordability_or_planning');
+  check('afford U+2019 what\u2019s coming next week', route('Can I afford what\u2019s coming next week?').capability === 'affordability_or_planning');
+  check('recurring expenses coming stays recurring', route('What recurring expenses are coming?').capability === 'cashflow_recurring');
+  check('spending changed stays trend', route('How has spending changed?').capability === 'cashflow_trend');
+  check('compare July and June stays comparison', route('Compare July and June').capability === 'cashflow_comparison');
+
+  section('upcoming freeze hardening — continuation relation stamp');
+  const cashflowDatesOnly = {
+    start: '2026-08-23',
+    end: '2026-08-29',
+    label: null,
+    relation: null,
+  };
+  const stampedEv = await prefetchGrounding({
+    accountId: '10',
+    token: 't',
+    currentDate: '2026-08-17',
+    policy,
+    route: bills,
+    fetchUpcomingAnalysis: async () => sampleUpcomingResult({
+      period: cashflowDatesOnly,
+      totals: { scheduledExpenseTotal: 1297.3 },
+    }),
+  });
+  check('stamp keeps cashflow dates', stampedEv.period.start === '2026-08-23' && stampedEv.period.end === '2026-08-29');
+  check('stamp copies next_week onto evidence.period', stampedEv.period.relation === 'next_week'
+    && stampedEv.period.label === 'next_week');
+  check('stamp copies next_week onto facts.period', stampedEv.facts.period.relation === 'next_week'
+    && stampedEv.facts.period.label === 'next_week');
+
+  const persistDs = T.emptyDialogueState();
+  applyContinuationPersistence(persistDs, bills, { accountId: '10' });
+  applyContinuationPersistenceFromEvidence(persistDs, bills, stampedEv, { accountId: '10' });
+  check('lastUpcoming keeps next_week after cashflow-null relation', persistDs.lastUpcoming
+    && persistDs.lastUpcoming.period.relation === 'next_week'
+    && persistDs.lastUpcoming.period.start === '2026-08-23'
+    && persistDs.lastUpcoming.period.end === '2026-08-29');
+
+  const howMuch = route('How much total?', { dialogueState: persistDs });
+  check('How much total keeps next_week dates and relation', howMuch.capability === 'continuation'
+    && howMuch.parentCapability === 'cashflow_upcoming'
+    && periodEq(howMuch.slots.period, '2026-08-23', '2026-08-29', 'next_week')
+    && howMuch.slots.metricScope === 'expense');
+  const howMuchEv = await prefetchGrounding({
+    accountId: '10',
+    token: 't',
+    currentDate: '2026-08-17',
+    policy: resolveGroundingPolicy(howMuch, { message: 'How much total?' }),
+    route: howMuch,
+    fetchUpcomingAnalysis: async () => sampleUpcomingResult({
+      period: cashflowDatesOnly,
+      totals: { scheduledExpenseTotal: 1297.3 },
+    }),
+  });
+  check('How much total evidence relation next_week', howMuchEv.period.relation === 'next_week'
+    && howMuchEv.facts.period.relation === 'next_week');
+  applyContinuationPersistenceFromEvidence(persistDs, howMuch, howMuchEv, { accountId: '10' });
+
+  const aboutIncome2 = route('What about income?', { dialogueState: persistDs });
+  check('What about income keeps next_week and income scope', aboutIncome2.capability === 'continuation'
+    && aboutIncome2.parentCapability === 'cashflow_upcoming'
+    && periodEq(aboutIncome2.slots.period, '2026-08-23', '2026-08-29', 'next_week')
+    && aboutIncome2.slots.metricScope === 'income');
+  const aboutIncomeEv = await prefetchGrounding({
+    accountId: '10',
+    token: 't',
+    currentDate: '2026-08-17',
+    policy: resolveGroundingPolicy(aboutIncome2, { message: 'What about income?' }),
+    route: aboutIncome2,
+    fetchUpcomingAnalysis: async () => sampleUpcomingResult({
+      period: cashflowDatesOnly,
+      metricScope: 'income',
+      items: [],
+      totals: { scheduledIncomeTotal: 0 },
+      observations: [{ code: 'no_upcoming_in_period' }],
+      itemCount: 0,
+    }),
+  });
+  check('What about income evidence relation next_week', aboutIncomeEv.period.relation === 'next_week'
+    && aboutIncomeEv.facts.period.relation === 'next_week'
+    && aboutIncomeEv.facts.metricScope === 'income');
+
+  const compactStamped = azureFacingEvidence(stampedEv);
+  check('compact period relation next_week', compactStamped.period.relation === 'next_week');
+
+  check('prompt does not call next_week this week', /Do not call next_week "this week"/i.test(prompt));
+  check('prompt uses supplied period.relation', /period\.relation/i.test(prompt));
+  check('prompt next_7_days wording', /the next 7 days/i.test(prompt));
+  check('prompt two decimal places', /two decimal places/i.test(prompt) && /\$1297\.30/.test(prompt));
+  check('prompt empty income is scheduled Keacast forecast', /scheduled income in the Keacast forecast/i.test(prompt));
+  check('prompt empty income forbids no incoming funds', /Do not say no incoming funds/i.test(prompt));
 
   section('DATE REFERENCE defense-in-depth');
   const dateRef = T.buildDateReferenceBlock('2026-08-17');
