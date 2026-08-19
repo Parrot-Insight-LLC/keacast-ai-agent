@@ -5,6 +5,7 @@ const path = require('path');
 const { check, section } = require('./harness');
 const {
   buildSnapshotEvidenceLedger,
+  buildUpcomingEvidenceLedger,
 } = require('../services/keaEvidenceLedgerBuilders');
 const {
   VALIDATION_STATUS,
@@ -68,6 +69,127 @@ function signedExpenseContract() {
     accountContext: { accountId: '10', accountLabel: 'Main Account' },
   }).ledger;
   return buildResponseValidationContract(ledger).contract;
+}
+
+const LIVE_E_TEXT = [
+  'Next week, from August 23 to August 29, 2026:',
+  '- Mira Pest Control: $79.99 on August 23',
+  '- Weekly Gas: $120 on August 24',
+  '- Google purchase: $19.99 on August 26',
+  '- The Litt: $105 on August 26',
+  '- Mercury Insurance: $267.32 on August 27',
+  '- Daycare: $705 on August 28',
+  'Total scheduled expenses for the week: $1297.30',
+].join('\n');
+
+const LIVE_A_TEXT = [
+  'Here is what you have upcoming in the next 15 days.',
+  'Total upcoming expenses are -$2558.47.',
+  '- Services payment: -$162.24 on 2026-08-20',
+  '- Apps subscription: -$63.90 on 2026-08-20',
+  '- Child Care (Daycare): -$705 on 2026-08-21',
+  '- Household (Pest Control): -$79.99 on 2026-08-23',
+  '- Weekly Gas: -$120 on 2026-08-24',
+  '- Google purchase: -$19.99 on 2026-08-26',
+  '- The Litt: -$105 on 2026-08-26',
+  '- Household (Mercury Insurance): -$267.32 on 2026-08-27',
+  '- Child Care (Daycare): -$705 on 2026-08-28',
+  '- Salary: +$4626.36 on 2026-08-31',
+].join('\n');
+
+function buildLiveEMacro() {
+  return buildUpcomingEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_upcoming'],
+      facts: {
+        metricScope: 'expense',
+        accountScope: 'selected_account',
+        period: { start: '2026-08-23', end: '2026-08-29', relation: 'next_week' },
+        items: [
+          { label: 'Mira Pest Control', date: '2026-08-23', amount: 79.99 },
+          { label: 'Weekly Gas', date: '2026-08-24', amount: 120 },
+          { label: 'Google purchase', date: '2026-08-26', amount: 19.99 },
+          { label: 'The Litt', date: '2026-08-26', amount: 105 },
+          { label: 'Mercury Insurance', date: '2026-08-27', amount: 267.32 },
+          { label: 'Daycare', date: '2026-08-28', amount: 705 },
+        ],
+        totals: { scheduledExpenseTotal: 1297.30 },
+        itemCount: 6,
+      },
+      period: { start: '2026-08-23', end: '2026-08-29', relation: 'next_week', label: 'next_week' },
+      observations: [],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+}
+
+function buildLiveASnapshot() {
+  return buildSnapshotEvidenceLedger({
+    capability: 'financial_forecast',
+    evidence: {
+      status: 'ok',
+      source: ['kea_snapshot'],
+      facts: {
+        availableBalance: 3739.38,
+        currentBalance: 3739.38,
+        reconciledBalance: 3739.38,
+        monthIncome: 4626.36,
+        monthExpenses: 3432.43,
+        upcomingExpenseTotal: 2558.47,
+        upcomingIncomeTotal: 4626.36,
+        upcomingWindowDays: 15,
+        recents: [],
+        upcoming: [
+          { name: 'Northwestern', amount: -162.24, start: '2026-08-20' },
+          { name: 'Spotify', amount: -63.90, start: '2026-08-20' },
+          { name: 'Daycare', amount: -705, start: '2026-08-21' },
+          { name: 'Mira Pest Control', amount: -79.99, start: '2026-08-23' },
+          { name: 'Weekly Gas', amount: -120, start: '2026-08-24' },
+          { name: 'Google purchase', amount: -19.99, start: '2026-08-26' },
+          { name: 'The Litt', amount: -105, start: '2026-08-26' },
+          { name: 'Mercury Insurance', amount: -267.32, start: '2026-08-27' },
+          { name: 'Daycare', amount: -705, start: '2026-08-28' },
+          { name: 'MERIDIAN', amount: 4626.36, start: '2026-08-31' },
+        ],
+      },
+      limitations: ['upcoming_window_15d'],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Main Account' },
+  }).ledger;
+}
+
+function buildAmbiguousDuplicateMacro() {
+  return buildUpcomingEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_upcoming'],
+      facts: {
+        metricScope: 'expense',
+        accountScope: 'selected_account',
+        period: { start: '2026-08-23', end: '2026-08-29', relation: 'next_week' },
+        items: [
+          { label: 'Alpha Bill', date: '2026-08-23', amount: 50 },
+          { label: 'Beta Bill', date: '2026-08-28', amount: 50 },
+        ],
+        totals: { scheduledExpenseTotal: 100 },
+        itemCount: 2,
+      },
+      period: { start: '2026-08-23', end: '2026-08-29', relation: 'next_week' },
+      observations: [],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+}
+
+function liveEContract() {
+  return buildResponseValidationContract(buildLiveEMacro()).contract;
+}
+
+function liveAContract() {
+  return buildResponseValidationContract(buildLiveASnapshot()).contract;
 }
 
 async function run() {
@@ -212,6 +334,150 @@ async function run() {
   check('cross-item mix INVALID', cross.status === VALIDATION_STATUS.INVALID);
   check('cross-item LIST_ITEM_MISMATCH', hasCode(cross, VIOLATION_CODE.LIST_ITEM_MISMATCH));
 
+  section('3C.2 list-item authorization hardening goldens');
+  const liveE = liveEContract();
+  const liveEResult = validateResponseAgainstContract({ contract: liveE, text: LIVE_E_TEXT });
+  console.log(`  live-E status=${liveEResult.status} violations=${codes(liveEResult).join(',') || '(none)'} indeterminate=${(liveEResult.indeterminate || []).map((r) => r.code).join(',') || '(none)'}`);
+  check('live-E VALID', liveEResult.status === VALIDATION_STATUS.VALID);
+  check('live-E no UNSUPPORTED_AMOUNT', !hasCode(liveEResult, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+  check('live-E no UNSUPPORTED_FORECAST', !hasCode(liveEResult, VIOLATION_CODE.UNSUPPORTED_FORECAST));
+  check('live-E no forecast indeterminate', !(liveEResult.indeterminate || []).some((r) => r.code === VIOLATION_CODE.UNSUPPORTED_FORECAST));
+
+  const liveA = liveAContract();
+  const liveAResult = validateResponseAgainstContract({ contract: liveA, text: LIVE_A_TEXT });
+  console.log(`  live-A status=${liveAResult.status} violations=${codes(liveAResult).join(',') || '(none)'} indeterminate=${(liveAResult.indeterminate || []).map((r) => r.code).join(',') || '(none)'}`);
+  check('live-A VALID', liveAResult.status === VALIDATION_STATUS.VALID);
+  check('live-A no UNSUPPORTED_AMOUNT', !hasCode(liveAResult, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+  check('live-A no LIST_ITEM_MISMATCH', !hasCode(liveAResult, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const expenseTotal = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Total upcoming expenses are -$2558.47.',
+  });
+  check('signed expense-total -$2558.47 VALID', expenseTotal.status === VALIDATION_STATUS.VALID);
+
+  const signedRow = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Services payment: -$162.24 on 2026-08-20',
+  });
+  check('signed row exact cents VALID', signedRow.status === VALIDATION_STATUS.VALID);
+
+  const parenthetical = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Child Care (Daycare): -$705 on 2026-08-21',
+  });
+  check('parenthetical Daycare VALID', parenthetical.status === VALIDATION_STATUS.VALID);
+
+  const duplicateDaycare = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Child Care (Daycare): -$705 on 2026-08-21 and Child Care (Daycare): -$705 on 2026-08-28',
+  });
+  check('duplicate Daycare distinct dates VALID', duplicateDaycare.status === VALIDATION_STATUS.VALID);
+
+  const wrongDaycareDate = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Daycare: -$705 on Aug 24',
+  });
+  check('wrong Daycare date INVALID', wrongDaycareDate.status === VALIDATION_STATUS.INVALID);
+  check('wrong Daycare date LIST_ITEM_MISMATCH', hasCode(wrongDaycareDate, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+  check('wrong Daycare date not UNSUPPORTED_AMOUNT', !hasCode(wrongDaycareDate, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+
+  const ambiguousC = buildResponseValidationContract(buildAmbiguousDuplicateMacro()).contract;
+  const ambiguous = validateResponseAgainstContract({
+    contract: ambiguousC,
+    text: 'There is a $50.00 charge upcoming.',
+  });
+  check('ambiguous duplicate no-date INDETERMINATE', ambiguous.status === VALIDATION_STATUS.INDETERMINATE);
+  check('ambiguous not VALID', ambiguous.status !== VALIDATION_STATUS.VALID);
+  check('ambiguous not UNSUPPORTED_AMOUNT', !hasCode(ambiguous, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+
+  const targetGood = validateResponseAgainstContract({
+    contract: lookupC,
+    text: 'You spent $279.58 at Target.',
+  });
+  check('regression Target 279.58 VALID', targetGood.status === VALIDATION_STATUS.VALID);
+  const targetWrong = validateResponseAgainstContract({
+    contract: lookupC,
+    text: 'You spent $280 at Target.',
+  });
+  check('regression Target $280 INVALID', targetWrong.status === VALIDATION_STATUS.INVALID);
+  check('regression Target $280 UNSUPPORTED_AMOUNT CRITICAL', targetWrong.violations.some((v) => v.code === VIOLATION_CODE.UNSUPPORTED_AMOUNT
+    && v.severity === SEVERITY.CRITICAL));
+
+  const balGood = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Your available balance is $3739.38.',
+  });
+  check('regression balance 3739.38 VALID', balGood.status === VALIDATION_STATUS.VALID);
+  const balRounded = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Your available balance is $3739.',
+  });
+  check('regression rounded balance INVALID', balRounded.status === VALIDATION_STATUS.INVALID);
+  const balRoundedZero = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Your available balance is $3739.00.',
+  });
+  check('regression 3739.00 INVALID', balRoundedZero.status === VALIDATION_STATUS.INVALID);
+
+  const derivedLiveA = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Your net cash flow is $1193.93.',
+  });
+  check('regression derived 1193.93 INVALID', derivedLiveA.status === VALIDATION_STATUS.INVALID);
+
+  const nextMonthBal = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Your balance next month will be $3739.38.',
+  });
+  check('regression next-month current balance INVALID', nextMonthBal.status === VALIDATION_STATUS.INVALID);
+  check('regression next-month forecast or period', hasCode(nextMonthBal, VIOLATION_CODE.UNSUPPORTED_FORECAST)
+    || hasCode(nextMonthBal, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION));
+
+  const macroTotal = validateResponseAgainstContract({
+    contract: liveE,
+    text: 'Total scheduled expenses are $1297.30.',
+  });
+  check('regression macro 1297.30 VALID', macroTotal.status === VALIDATION_STATUS.VALID);
+  const macroWrong = validateResponseAgainstContract({
+    contract: liveE,
+    text: 'Total scheduled expenses are $1298.30.',
+  });
+  check('regression macro 1298.30 INVALID', macroWrong.status === VALIDATION_STATUS.INVALID);
+  check('regression macro 1298.30 UNSUPPORTED_AMOUNT', hasCode(macroWrong, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+
+  const incomeWrongSign = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Upcoming income is -$4626.36 income.',
+  });
+  check('income wrong sign INVALID', incomeWrongSign.status === VALIDATION_STATUS.INVALID);
+
+  const balanceWrongSign = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Your available balance is -$3739.38.',
+  });
+  check('balance wrong sign INVALID', balanceWrongSign.status === VALIDATION_STATUS.INVALID);
+
+  const mercuryRow = validateResponseAgainstContract({
+    contract: liveA,
+    text: 'Mercury Insurance $267.32 on Aug 27',
+  });
+  check('forecast scheduled row VALID', mercuryRow.status === VALIDATION_STATUS.VALID);
+
+  const firstTokenMira = validateResponseAgainstContract({
+    contract: liveE,
+    text: 'Mira Pest Control: $79.99 on August 23',
+  });
+  check('first-token Mira still VALID', firstTokenMira.status === VALIDATION_STATUS.VALID);
+
+  const absentAmount = validateResponseAgainstContract({
+    contract: lookupC,
+    text: 'You spent $280 at Target.',
+  });
+  check('value absent UNSUPPORTED_AMOUNT', hasCode(absentAmount, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+  check('incompatible tuple LIST_ITEM_MISMATCH', hasCode(wrongDaycareDate, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+  check('unresolved candidates INDETERMINATE', ambiguous.status === VALIDATION_STATUS.INDETERMINATE);
+
   section('3C.1 validator preview coverage + wording');
   check('snapshot upcoming listCoverage preview', snapC.listCoverage.upcoming === LIST_COVERAGE.PREVIEW);
   const windowOk = validateResponseAgainstContract({
@@ -313,6 +579,7 @@ async function run() {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', files[i]), 'utf8');
     if (/console\.(log|info|warn|error)|logger\./.test(src)) loggerHits += 1;
     if (/\.reduce\(/.test(src)) mathHits += 1;
+    if (files[i] === 'keaResponseClaimValidator.js' && /Math\.abs\(/.test(src)) mathHits += 1;
   }
   check('no logger in 3C.1 modules', loggerHits === 0);
   check('no financial reduce/abs/percent math', mathHits === 0);
@@ -325,6 +592,55 @@ async function run() {
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
   console.log(`  1000 validations: ${ms.toFixed(2)}ms total, ${(ms / 1000).toFixed(3)}ms avg`);
   check('1000 validations completed', Number.isFinite(ms) && ms >= 0);
+
+  section('3C.2 live-A / live-E performance');
+  const liveALedger = buildLiveASnapshot();
+  const tBuild = process.hrtime.bigint();
+  const liveABuilt = buildResponseValidationContract(liveALedger);
+  const liveABuildMs = Number(process.hrtime.bigint() - tBuild) / 1e6;
+  console.log(`  live-A contract build: ${liveABuildMs.toFixed(3)}ms`);
+
+  const tExtract = process.hrtime.bigint();
+  const liveAExtracted = extractResponseClaims(LIVE_A_TEXT);
+  const liveAExtractMs = Number(process.hrtime.bigint() - tExtract) / 1e6;
+  console.log(`  live-A extraction: ${liveAExtractMs.toFixed(3)}ms`);
+
+  const tVal = process.hrtime.bigint();
+  const liveAValidated = validateResponseClaims({
+    contract: liveABuilt.contract,
+    extractedClaims: liveAExtracted,
+  });
+  const liveAValMs = Number(process.hrtime.bigint() - tVal) / 1e6;
+  console.log(`  live-A validation: ${liveAValMs.toFixed(3)}ms`);
+
+  const tSum = process.hrtime.bigint();
+  summarizeValidationResult(liveAValidated);
+  const liveASumMs = Number(process.hrtime.bigint() - tSum) / 1e6;
+  console.log(`  live-A summary: ${liveASumMs.toFixed(3)}ms`);
+
+  const tE = process.hrtime.bigint();
+  validateResponseAgainstContract({ contract: liveE, text: LIVE_E_TEXT });
+  const liveEValMs = Number(process.hrtime.bigint() - tE) / 1e6;
+  console.log(`  live-E validation: ${liveEValMs.toFixed(3)}ms`);
+
+  const t1000 = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    validateResponseAgainstContract({ contract: liveA, text: LIVE_A_TEXT });
+  }
+  const liveA1000Ms = Number(process.hrtime.bigint() - t1000) / 1e6;
+  console.log(`  1000 live-A validations: ${liveA1000Ms.toFixed(2)}ms total, ${(liveA1000Ms / 1000).toFixed(3)}ms avg`);
+  check('live-A/E performance measured', Number.isFinite(liveABuildMs)
+    && Number.isFinite(liveAExtractMs)
+    && Number.isFinite(liveAValMs)
+    && Number.isFinite(liveASumMs)
+    && Number.isFinite(liveEValMs)
+    && Number.isFinite(liveA1000Ms));
 }
 
-module.exports = { run };
+module.exports = {
+  run,
+  buildLiveEMacro,
+  buildLiveASnapshot,
+  LIVE_E_TEXT,
+  LIVE_A_TEXT,
+};

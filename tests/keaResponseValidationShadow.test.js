@@ -23,6 +23,12 @@ const {
   buildSnapshot,
   buildUpcomingMacro,
 } = require('./keaResponseValidationContract.test');
+const {
+  buildLiveEMacro,
+  buildLiveASnapshot,
+  LIVE_E_TEXT,
+  LIVE_A_TEXT,
+} = require('./keaResponseClaimValidator.test');
 
 const LIVE_C_TEXT = [
   'Your projected income for next month (September 2026) is $4626.36.',
@@ -271,6 +277,24 @@ async function run() {
     check('macro wrong-total invalid',
       macroBad.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
     check('macro wrong-total unchanged', macroBad.finalText === MACRO_INVALID);
+
+    const liveE = shadowTurn(LIVE_E_TEXT, {
+      ledger: buildLiveEMacro(),
+      capability: 'cashflow_upcoming',
+    });
+    check('live-E shadow VALID', liveE.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
+    check('live-E finalText unchanged', liveE.finalText === LIVE_E_TEXT);
+    check('live-E no UNSUPPORTED_AMOUNT',
+      liveE.telemetry.response_validation_primary_violation !== VIOLATION_CODE.UNSUPPORTED_AMOUNT);
+
+    const liveA = shadowTurn(LIVE_A_TEXT, {
+      ledger: buildLiveASnapshot(),
+      capability: 'financial_forecast',
+    });
+    check('live-A shadow VALID', liveA.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
+    check('live-A finalText unchanged', liveA.finalText === LIVE_A_TEXT);
+    check('live-A no UNSUPPORTED_AMOUNT',
+      liveA.telemetry.response_validation_primary_violation !== VIOLATION_CODE.UNSUPPORTED_AMOUNT);
   });
 
   section('3C.2 false-positive guards');

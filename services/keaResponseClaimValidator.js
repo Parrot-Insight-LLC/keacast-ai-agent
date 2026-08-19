@@ -42,6 +42,21 @@ function isExpensePath(claim) {
     || /Expense|expense|spending|spentTotal/.test(path);
 }
 
+function isExpenseOutflowTotal(claim) {
+  const role = claim.semanticRole || '';
+  return role === 'upcoming_window_expense_total'
+    || role === 'scheduled_expense_total';
+}
+
+function isScheduledOrUpcomingTotal(claim) {
+  const role = claim.semanticRole || '';
+  return role === 'scheduled_expense_total'
+    || role === 'scheduled_income_total'
+    || role === 'upcoming_window_expense_total'
+    || role === 'upcoming_window_income_total'
+    || role === 'upcoming_item_count';
+}
+
 function isIncomePath(claim) {
   const role = claim.semanticRole || '';
   const path = claim.path || '';
@@ -79,15 +94,18 @@ function authorizedDisplayCents(claim, contract, hints) {
   if (signed && c < 0 && isExpensePath(claim) && hasHint(hints, 'expense') && !hasHint(hints, 'income')) {
     out.push(-c);
   }
+  if (isExpenseOutflowTotal(claim) && c > 0 && !hasHint(hints, 'income')) {
+    out.push(-c);
+  }
   return out;
 }
 
-function itemAuthorizedDisplayCents(item, contract, hints, entityBound) {
+function itemAuthorizedDisplayCents(item, contract, hints) {
   const c = toCents(typeof item.amount === 'number' ? item.amount : Number(item.amount));
   if (c == null) return [];
   const out = [c];
   const signed = contract.signConvention === 'signed_ledger';
-  if (signed && c < 0 && !hasHint(hints, 'income') && (hasHint(hints, 'expense') || entityBound)) {
+  if (signed && c < 0 && !hasHint(hints, 'income')) {
     out.push(-c);
   }
   return out;
@@ -130,6 +148,79 @@ function flattenItems(contract) {
     for (let j = 0; j < rows.length; j += 1) {
       out.push({ listName: names[i], item: rows[j] });
     }
+  }
+  return out;
+}
+
+function hitKey(hit) {
+  return String(hit.listName) + ':' + String(hit.item && hit.item.itemId);
+}
+
+function spanDistance(aStart, bStart) {
+  if (bStart > aStart) return bStart - aStart;
+  return aStart - bStart;
+}
+
+function closestDateForAmount(row, extracted) {
+  let best = null;
+  let bestDist = 73;
+  for (let i = 0; i < extracted.length; i += 1) {
+    const d = extracted[i];
+    if (!d || d.kind !== CLAIM_KIND.DATE) continue;
+    const dist = spanDistance(row.start || 0, d.start || 0);
+    if (dist <= 72 && dist < bestDist) {
+      best = d;
+      bestDist = dist;
+    }
+  }
+  if (best) {
+    return {
+      dateIso: best.iso || null,
+      iso: best.iso || null,
+      dateMonth: best.month,
+      dateDay: best.day,
+      month: best.month,
+      day: best.day,
+      kind: CLAIM_KIND.DATE,
+    };
+  }
+  if (row.dateIso || (row.dateMonth && row.dateDay)) {
+    return {
+      dateIso: row.dateIso || null,
+      iso: row.dateIso || null,
+      dateMonth: row.dateMonth,
+      dateDay: row.dateDay,
+      month: row.dateMonth,
+      day: row.dateDay,
+      kind: CLAIM_KIND.DATE,
+    };
+  }
+  return null;
+}
+
+function extractedHasDate(dateFields) {
+  if (!dateFields) return false;
+  if (dateFields.dateIso || dateFields.iso) return true;
+  if (dateFields.dateMonth && dateFields.dateDay) return true;
+  if (dateFields.month && dateFields.day) return true;
+  return false;
+}
+
+function entityConflictsWithOtherItem(boundHit, entity, items) {
+  if (!entity || !boundHit) return false;
+  if (labelOf(boundHit.item) === entity) return false;
+  for (let i = 0; i < items.length; i += 1) {
+    if (hitKey(items[i]) === hitKey(boundHit)) continue;
+    if (labelOf(items[i].item) === entity) return true;
+  }
+  return false;
+}
+
+function exactEntityHits(hits, entity) {
+  const out = [];
+  if (!entity) return out;
+  for (let i = 0; i < hits.length; i += 1) {
+    if (labelOf(hits[i].item) === entity) out.push(hits[i]);
   }
   return out;
 }
@@ -228,16 +319,11 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
         if (options.indexOf(cents) !== -1) matches.push(claim);
       }
 
-      const listAmountHits = [];
-      const listDateHits = [];
+      const amountCandidates = [];
       for (let k = 0; k < items.length; k += 1) {
         const item = items[k].item;
-        const entityBound = entity && labelOf(item) === entity;
-        const options = itemAuthorizedDisplayCents(item, contract, hints, !!entityBound);
-        if (options.indexOf(cents) !== -1 && (!entity || entityBound)) {
-          listAmountHits.push(items[k]);
-        }
-        if (dateMatches(item, row)) listDateHits.push(items[k]);
+        const options = itemAuthorizedDisplayCents(item, contract, hints);
+        if (options.indexOf(cents) !== -1) amountCandidates.push(items[k]);
       }
 
       if (hasHint(hints, 'income') && !hasHint(hints, 'expense') && matches.length) {
@@ -256,7 +342,76 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
         }
       }
 
-      const authorized = matches.length > 0 || (entity && listAmountHits.length > 0);
+      const dateFields = closestDateForAmount(row, extracted);
+      const hasDate = extractedHasDate(dateFields);
+      if (hasDate) dateCheck = dateCheck === 'skipped' ? 'valid' : dateCheck;
+
+      let listDecision = null;
+      let boundHit = null;
+      if (amountCandidates.length === 0) {
+        listDecision = null;
+      } else if (hasDate) {
+        const tupleCandidates = [];
+        for (let t = 0; t < amountCandidates.length; t += 1) {
+          if (dateMatches(amountCandidates[t].item, dateFields)) tupleCandidates.push(amountCandidates[t]);
+        }
+        if (tupleCandidates.length === 1) {
+          if (entityConflictsWithOtherItem(tupleCandidates[0], entity, items)) {
+            listDecision = 'mismatch';
+          } else {
+            listDecision = 'match';
+            boundHit = tupleCandidates[0];
+          }
+        } else if (tupleCandidates.length > 1) {
+          const entHits = exactEntityHits(tupleCandidates, entity);
+          if (entHits.length === 1) {
+            listDecision = 'match';
+            boundHit = entHits[0];
+          } else {
+            listDecision = 'indeterminate';
+          }
+        } else {
+          listDecision = 'mismatch';
+        }
+      } else if (amountCandidates.length === 1) {
+        if (entityConflictsWithOtherItem(amountCandidates[0], entity, items)) {
+          listDecision = 'mismatch';
+        } else {
+          listDecision = 'match';
+          boundHit = amountCandidates[0];
+        }
+      } else {
+        const entHits = exactEntityHits(amountCandidates, entity);
+        if (entHits.length === 1) {
+          listDecision = 'match';
+          boundHit = entHits[0];
+        } else {
+          listDecision = 'indeterminate';
+        }
+      }
+
+      const listBound = listDecision === 'match' && boundHit != null;
+
+      if (listDecision === 'mismatch' && matches.length === 0) {
+        addViolation(
+          VIOLATION_CODE.LIST_ITEM_MISMATCH,
+          SEVERITY.HIGH,
+          row,
+          null,
+          hasDate ? 'tuple_unmatched' : 'entity_conflict'
+        );
+        bindingCheck = 'invalid';
+        continue;
+      }
+
+      if (listDecision === 'indeterminate' && matches.length === 0) {
+        addIndeterminate(VIOLATION_CODE.LIST_ITEM_MISMATCH, row, MATCH_RESULT.AMBIGUOUS);
+        amountCheck = amountCheck === 'invalid' ? 'invalid' : 'indeterminate';
+        bindingCheck = bindingCheck === 'invalid' ? 'invalid' : 'indeterminate';
+        continue;
+      }
+
+      const authorized = matches.length > 0 || listBound;
 
       if (hasHint(hints, 'derivation') && !authorized) {
         addViolation(
@@ -283,7 +438,9 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
       }
 
       const future = hasHint(hints, 'future') || hasHint(hints, 'named_future_month');
-      if (future && matches.length) {
+      const skipFutureForScheduled = listBound
+        || (matches.length > 0 && matches.every(isScheduledOrUpcomingTotal));
+      if (future && matches.length && !skipFutureForScheduled) {
         const balanceHit = matches.some(isCurrentBalancePath);
         const monthHit = matches.some(isMonthScalarPath);
         if (balanceHit) {
@@ -312,7 +469,7 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
         amountCheck = amountCheck === 'invalid' ? 'invalid' : 'indeterminate';
         continue;
       }
-      if (future && !matches.length) {
+      if (future && !matches.length && !listBound) {
         addIndeterminate(VIOLATION_CODE.UNSUPPORTED_FORECAST, row, 'future_attribution_uncertain');
         amountCheck = amountCheck === 'invalid' ? 'invalid' : 'indeterminate';
         continue;
@@ -330,36 +487,6 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
             'preview_list_does_not_establish_total'
           );
           amountCheck = 'invalid';
-          continue;
-        }
-      }
-
-      if (row.kind === CLAIM_KIND.ENTITY_AMOUNT_DATE && entity) {
-        dateCheck = dateCheck === 'skipped' ? 'valid' : dateCheck;
-        const amountHits = listAmountHits.filter((hit) => labelOf(hit.item) === entity);
-        const sameLabelDateHits = listDateHits.filter((hit) => labelOf(hit.item) === entity);
-        const both = amountHits.filter((hit) => sameLabelDateHits.some((d) => d.item.itemId === hit.item.itemId));
-        if (both.length >= 1) {
-          // item identity + amount + date bind; duplicate same-label rows stay distinct
-        } else if (amountHits.length && listDateHits.length) {
-          addViolation(
-            VIOLATION_CODE.LIST_ITEM_MISMATCH,
-            SEVERITY.HIGH,
-            row,
-            null,
-            'cross_item_mix'
-          );
-          bindingCheck = 'invalid';
-          continue;
-        } else if (row.dateIso || row.dateMonth) {
-          addViolation(
-            VIOLATION_CODE.LIST_ITEM_MISMATCH,
-            SEVERITY.HIGH,
-            row,
-            null,
-            'tuple_unmatched'
-          );
-          bindingCheck = 'invalid';
           continue;
         }
       }
