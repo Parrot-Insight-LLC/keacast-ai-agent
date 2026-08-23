@@ -82,6 +82,87 @@ function isMonthScalarPath(claim) {
     || role === 'current_month_net';
 }
 
+const MONTH_INDEX = Object.freeze({
+  january: 1, jan: 1,
+  february: 2, feb: 2,
+  march: 3, mar: 3,
+  april: 4, apr: 4,
+  may: 5,
+  june: 6, jun: 6,
+  july: 7, jul: 7,
+  august: 8, aug: 8,
+  september: 9, sep: 9, sept: 9,
+  october: 10, oct: 10,
+  november: 11, nov: 11,
+  december: 12, dec: 12,
+});
+
+function claimRole(claim) {
+  return (claim && (claim.semanticRole || claim.semanticRole)) || '';
+}
+
+function isSignedChangeAmountClaim(claim) {
+  if (!isUsdClaim(claim)) return false;
+  const role = claimRole(claim);
+  const path = claim.path || '';
+  return role === 'comparison_absolute' || /\.absolute$/.test(path);
+}
+
+function isSignedChangePercentClaim(claim) {
+  if (!claim || claim.type !== 'PERCENT') return false;
+  const role = claimRole(claim);
+  const path = claim.path || '';
+  return role === 'comparison_percent' || /\.percent$/.test(path);
+}
+
+function allowSignedChangeMagnitude(claim, hints) {
+  if (hasHint(hints, 'balance')) return false;
+  if (isIncomePath(claim)) return hasHint(hints, 'income') && !hasHint(hints, 'expense');
+  if (isExpensePath(claim)) return hasHint(hints, 'expense') && !hasHint(hints, 'income');
+  return hasHint(hints, 'expense') || hasHint(hints, 'income') || hasHint(hints, 'money');
+}
+
+function directionPolarity(token) {
+  const t = String(token || '').toLowerCase();
+  if (!t) return null;
+  if (t === 'decrease' || t === 'decreased' || t === 'decreasing' || t === 'lower'
+    || t === 'dropped' || t === 'falling' || t === 'downward' || t === 'fell'
+    || t === 'will decrease' || t === 'will fall' || t === 'expected to decrease') {
+    return 'down';
+  }
+  if (t === 'increase' || t === 'increased' || t === 'increasing' || t === 'higher'
+    || t === 'rose' || t === 'rising' || t === 'upward' || t === 'improved'
+    || t === 'will increase' || t === 'will rise' || t === 'expected to increase') {
+    return 'up';
+  }
+  return null;
+}
+
+function monthFromEntity(entity) {
+  const key = String(entity || '').toLowerCase();
+  return MONTH_INDEX[key] || null;
+}
+
+function itemMonth(item) {
+  const parts = itemDateParts(item);
+  if (parts) return parts.month;
+  const label = labelOf(item);
+  const names = Object.keys(MONTH_INDEX);
+  for (let i = 0; i < names.length; i += 1) {
+    if (label.indexOf(names[i]) !== -1) return MONTH_INDEX[names[i]];
+  }
+  return null;
+}
+
+function periodMonthMatches(hit, entity) {
+  if (!hit || hit.listName !== 'periods') return true;
+  const month = monthFromEntity(entity);
+  if (!month) return true;
+  const itemM = itemMonth(hit.item);
+  if (itemM == null) return labelOf(hit.item).indexOf(String(entity).toLowerCase()) !== -1;
+  return itemM === month;
+}
+
 function hasHint(hints, name) {
   return Array.isArray(hints) && hints.indexOf(name) !== -1;
 }
@@ -97,17 +178,27 @@ function authorizedDisplayCents(claim, contract, hints) {
   if (isExpenseOutflowTotal(claim) && c > 0 && !hasHint(hints, 'income')) {
     out.push(-c);
   }
+  if (isSignedChangeAmountClaim(claim) && allowSignedChangeMagnitude(claim, hints)) {
+    const flipped = -c;
+    if (out.indexOf(flipped) === -1) out.push(flipped);
+  }
   return out;
 }
 
 function itemAuthorizedDisplayCents(item, contract, hints) {
-  const c = toCents(typeof item.amount === 'number' ? item.amount : Number(item.amount));
-  if (c == null) return [];
-  const out = [c];
-  const signed = contract.signConvention === 'signed_ledger';
-  if (signed && c < 0 && !hasHint(hints, 'income')) {
-    out.push(-c);
+  const amountCents = toCents(typeof item.amount === 'number' ? item.amount : Number(item.amount));
+  const out = [];
+  if (amountCents != null) {
+    out.push(amountCents);
+    const signed = contract.signConvention === 'signed_ledger';
+    if (signed && amountCents < 0 && !hasHint(hints, 'income')) {
+      out.push(-amountCents);
+    }
   }
+  const monthlyCents = toCents(
+    typeof item.monthlyEquivalent === 'number' ? item.monthlyEquivalent : Number(item.monthlyEquivalent)
+  );
+  if (monthlyCents != null && out.indexOf(monthlyCents) === -1) out.push(monthlyCents);
   return out;
 }
 
@@ -374,23 +465,49 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
           listDecision = 'mismatch';
         }
       } else if (amountCandidates.length === 1) {
-        if (entityConflictsWithOtherItem(amountCandidates[0], entity, items)) {
+        if (entityConflictsWithOtherItem(amountCandidates[0], entity, items)
+          || !periodMonthMatches(amountCandidates[0], entity)) {
           listDecision = 'mismatch';
         } else {
           listDecision = 'match';
           boundHit = amountCandidates[0];
         }
       } else {
-        const entHits = exactEntityHits(amountCandidates, entity);
+        const entHits = exactEntityHits(amountCandidates, entity)
+          .filter((hit) => periodMonthMatches(hit, entity));
         if (entHits.length === 1) {
           listDecision = 'match';
           boundHit = entHits[0];
+        } else if (monthFromEntity(entity) && amountCandidates.some((hit) => hit.listName === 'periods')) {
+          listDecision = 'mismatch';
         } else {
           listDecision = 'indeterminate';
         }
       }
 
       const listBound = listDecision === 'match' && boundHit != null;
+
+      let periodIdentityFailed = false;
+      if (monthFromEntity(entity) && items.some((hit) => hit.listName === 'periods')) {
+        if (listBound && !periodMonthMatches(boundHit, entity)) periodIdentityFailed = true;
+        if (!listBound) {
+          const monthHits = amountCandidates.filter((hit) => periodMonthMatches(hit, entity));
+          if (monthHits.length === 0 && amountCandidates.some((hit) => hit.listName === 'periods')) {
+            periodIdentityFailed = true;
+          }
+        }
+      }
+      if (periodIdentityFailed) {
+        addViolation(
+          VIOLATION_CODE.LIST_ITEM_MISMATCH,
+          SEVERITY.HIGH,
+          row,
+          null,
+          'period_identity_mismatch'
+        );
+        bindingCheck = 'invalid';
+        continue;
+      }
 
       if (listDecision === 'mismatch' && matches.length === 0) {
         addViolation(
@@ -513,11 +630,69 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
         );
         countCheck = 'invalid';
       }
+    } else if (row.kind === CLAIM_KIND.PERCENT) {
+      const hints = row.semanticHints || [];
+      const extractedPct = Number(row.normalizedValue);
+      const percentClaims = (contract.allowedClaims || []).filter((c) => c.type === 'PERCENT'
+        && (c.unit === 'percent' || c.unit == null));
+      let percentMatched = false;
+      for (let p = 0; p < percentClaims.length; p += 1) {
+        const claim = percentClaims[p];
+        const authorizedPct = Number(claim.value);
+        if (!Number.isFinite(extractedPct) || !Number.isFinite(authorizedPct)) continue;
+        if (authorizedPct === extractedPct) {
+          percentMatched = true;
+          break;
+        }
+        if (isSignedChangePercentClaim(claim)
+          && allowSignedChangeMagnitude(claim, hints)
+          && authorizedPct === -extractedPct) {
+          percentMatched = true;
+          break;
+        }
+      }
+      if (!percentMatched) {
+        addViolation(
+          VIOLATION_CODE.UNSUPPORTED_COMPARISON,
+          SEVERITY.CRITICAL,
+          row,
+          null,
+          'percent_not_in_ledger'
+        );
+        amountCheck = 'invalid';
+      }
     } else if (row.kind === CLAIM_KIND.UNKNOWN_NUMERIC) {
       addIndeterminate('AMBIGUOUS_NUMERIC', row, 'insufficient_money_context');
     } else if (row.kind === CLAIM_KIND.DIRECTION) {
-      if (!hasDirectionClaim) {
+      const dirClaims = (contract.allowedClaims || []).filter((c) => c.type === 'DIRECTION');
+      if (!dirClaims.length) {
         addIndeterminate(VIOLATION_CODE.UNAUTHORIZED_DIRECTION, row, 'no_direction_claim');
+      } else {
+        const hints = row.semanticHints || [];
+        const extractedPol = directionPolarity(row.token || row.rawSpan);
+        if (!extractedPol) {
+          addIndeterminate(VIOLATION_CODE.UNAUTHORIZED_DIRECTION, row, 'unparsed_direction');
+        } else {
+          let candidates = dirClaims;
+          if (hasHint(hints, 'expense') && !hasHint(hints, 'income')) {
+            const exp = dirClaims.filter(isExpensePath);
+            if (exp.length) candidates = exp;
+          } else if (hasHint(hints, 'income') && !hasHint(hints, 'expense')) {
+            const inc = dirClaims.filter(isIncomePath);
+            if (inc.length) candidates = inc;
+          }
+          const polarMatch = candidates.some((c) => directionPolarity(c.value) === extractedPol);
+          if (!polarMatch) {
+            addViolation(
+              VIOLATION_CODE.UNAUTHORIZED_DIRECTION,
+              SEVERITY.HIGH,
+              row,
+              null,
+              'direction_polarity_mismatch'
+            );
+            bindingCheck = 'invalid';
+          }
+        }
       }
     } else if (row.kind === CLAIM_KIND.RANKING_CANDIDATE) {
       if (!hasRankingClaim) {

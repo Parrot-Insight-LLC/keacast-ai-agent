@@ -154,8 +154,8 @@ function buildRecurring() {
         metricScope: 'expense',
         recurringDefinition: 'kea_scheduled_series',
         expenses: [
-          { label: 'Netflix', amount: 15.99, nextDate: '2026-09-01', category: 'Entertainment' },
-          { label: 'Rent', amount: 1400, nextDate: '2026-09-01', category: 'Housing' },
+          { label: 'Netflix', amount: 15.99, monthlyEquivalent: 15.99, nextDate: '2026-09-01', category: 'Entertainment' },
+          { label: 'Rent', amount: 1400, monthlyEquivalent: 1400, nextDate: '2026-09-01', category: 'Housing' },
         ],
         income: [
           { label: 'Paycheck', amount: 2000, nextDate: '2026-08-21', category: 'Income' },
@@ -403,6 +403,8 @@ async function run() {
   check('recurring do_not_call_paycheck', recC.prohibitedNarrationCodes.indexOf('do_not_call_paycheck') !== -1);
   check('recurring do_not_imply_plaid_recurring', recC.prohibitedNarrationCodes.indexOf('do_not_imply_plaid_recurring') !== -1);
   check('recurring expenses not collapsed', recC.allowedListItems.expenses.length === 2);
+  check('recurring monthlyEquivalent projected', recC.allowedListItems.expenses[0].monthlyEquivalent === 15.99
+    && recC.allowedListItems.expenses[1].monthlyEquivalent === 1400);
 
   section('3C.1 E income horizon contract');
   const hz = buildHorizon();
@@ -430,6 +432,10 @@ async function run() {
     && c.value === 'increasing'));
   check('trend absolute copied', claimByPath(trendC, 'facts.trend.spending.firstToLast.absolute').value === 40);
   check('trend no new percent math', claimByPath(trendC, 'facts.trend.spending.firstToLast.percent').value === 40);
+  check('trend period spending projected as amount', trendC.allowedListItems.periods.length === 3
+    && trendC.allowedListItems.periods[0].amount === 100
+    && trendC.allowedListItems.periods[1].amount === 120
+    && trendC.allowedListItems.periods[2].amount === 140);
 
   section('3C.1 H cashflow analysis contract');
   const cf = buildCashflow();

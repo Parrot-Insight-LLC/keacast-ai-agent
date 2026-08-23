@@ -174,6 +174,8 @@ function projectListItem(row) {
   if (copied.amount !== undefined) item.amount = copied.amount;
   else if (copied.spentTotal !== undefined) item.amount = copied.spentTotal;
   else if (copied.value !== undefined) item.amount = copied.value;
+  else if (copied.spending !== undefined) item.amount = copied.spending;
+  if (copied.monthlyEquivalent !== undefined) item.monthlyEquivalent = copied.monthlyEquivalent;
   const date = copied.date || copied.start || copied.nextDate || null;
   if (date != null) item.date = date;
   if (copied.category != null) item.category = copied.category;

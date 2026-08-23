@@ -6,6 +6,9 @@ const { check, section } = require('./harness');
 const {
   buildSnapshotEvidenceLedger,
   buildUpcomingEvidenceLedger,
+  buildComparisonEvidenceLedger,
+  buildTrendEvidenceLedger,
+  buildRecurringEvidenceLedger,
 } = require('../services/keaEvidenceLedgerBuilders');
 const {
   VALIDATION_STATUS,
@@ -583,6 +586,276 @@ async function run() {
   }
   check('no logger in 3C.1 modules', loggerHits === 0);
   check('no financial reduce/abs/percent math', mathHits === 0);
+
+  section('3C.2 comparison signed-delta goldens');
+  const comparisonLedger = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'matched_elapsed',
+        periodA: {
+          label: 'June 2026',
+          start: '2026-06-01',
+          end: '2026-06-30',
+          income: 0,
+          spending: 15010.46,
+          net: -15010.46,
+        },
+        periodB: {
+          label: 'July 2026',
+          start: '2026-07-01',
+          end: '2026-07-31',
+          income: 0,
+          spending: 12916.99,
+          net: -12916.99,
+        },
+        changes: {
+          income: { absolute: 0, percent: 0, direction: 'unchanged', baselineZero: false },
+          spending: { absolute: -2093.47, percent: -13.95, direction: 'decreased', baselineZero: false },
+          net: { absolute: 2093.47, percent: 13.95, direction: 'improved', baselineZero: false },
+        },
+      },
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const comparisonC = buildResponseValidationContract(comparisonLedger).contract;
+  const comparisonGood = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In July 2026, spending was $12916.99, compared with $15010.46 in June 2026. Spending decreased by $2093.47, or 13.95%.',
+  });
+  check('comparison spoken magnitude and percent VALID', comparisonGood.status === VALIDATION_STATUS.VALID);
+
+  const comparisonWrongDelta = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by $2094.47.',
+  });
+  check('comparison wrong delta INVALID', comparisonWrongDelta.status === VALIDATION_STATUS.INVALID);
+
+  const comparisonWrongPct = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by 14%.',
+  });
+  check('comparison wrong percent INVALID', comparisonWrongPct.status === VALIDATION_STATUS.INVALID
+    && hasCode(comparisonWrongPct, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+
+  const comparisonWrongDir = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending increased by $2093.47.',
+  });
+  check('comparison wrong direction not VALID', comparisonWrongDir.status !== VALIDATION_STATUS.VALID);
+
+  section('3C.2 trend period and first-to-last goldens');
+  const trendLedger = buildTrendEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_trend'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'matched_elapsed',
+        metricScope: 'spending',
+        periods: [
+          { label: 'June 1–23, 2026', start: '2026-06-01', end: '2026-06-23', spending: 12815.73 },
+          { label: 'July 1–23, 2026', start: '2026-07-01', end: '2026-07-23', spending: 11784.96 },
+          { label: 'August 1–23, 2026', start: '2026-08-01', end: '2026-08-23', spending: 10380.54 },
+        ],
+        trend: {
+          spending: {
+            direction: 'decreasing',
+            firstToLast: { absolute: -2435.19, percent: -19, baselineZero: false },
+          },
+        },
+        highest: { metric: 'spending', label: 'June 1–23, 2026', value: 12815.73 },
+        lowest: { metric: 'spending', label: 'August 1–23, 2026', value: 10380.54 },
+      },
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const trendC = buildResponseValidationContract(trendLedger).contract;
+  const trendPeriods = validateResponseAgainstContract({
+    contract: trendC,
+    text: 'June: $12815.73. July: $11784.96. August: $10380.54.',
+  });
+  check('trend three-period spending VALID', trendPeriods.status === VALIDATION_STATUS.VALID);
+
+  const trendWrongMiddle = validateResponseAgainstContract({
+    contract: trendC,
+    text: 'July: $11785.96',
+  });
+  check('trend wrong middle amount INVALID', trendWrongMiddle.status === VALIDATION_STATUS.INVALID);
+
+  const trendCross = validateResponseAgainstContract({
+    contract: trendC,
+    text: 'July: $12815.73',
+  });
+  check('trend June amount as July INVALID', trendCross.status === VALIDATION_STATUS.INVALID);
+
+  const trendDelta = validateResponseAgainstContract({
+    contract: trendC,
+    text: 'Spending decreased by $2435.19.',
+  });
+  check('trend first-to-last spoken magnitude VALID', trendDelta.status === VALIDATION_STATUS.VALID);
+
+  const trendPct = validateResponseAgainstContract({
+    contract: trendC,
+    text: 'Spending decreased by 19%.',
+  });
+  check('trend first-to-last percent VALID', trendPct.status === VALIDATION_STATUS.VALID);
+
+  const trendWrongPct = validateResponseAgainstContract({
+    contract: trendC,
+    text: 'Spending decreased by 20%.',
+  });
+  check('trend wrong percent INVALID', trendWrongPct.status === VALIDATION_STATUS.INVALID);
+
+  const trendDir = validateResponseAgainstContract({
+    contract: trendC,
+    text: 'Spending decreased and is trending downward.',
+  });
+  check('trend direction decreased/downward VALID', trendDir.status === VALIDATION_STATUS.VALID);
+
+  section('3C.2 recurring monthlyEquivalent goldens');
+  const recurringLedger = buildRecurringEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_recurring'],
+      facts: {
+        metricScope: 'all',
+        recurringDefinition: 'kea_scheduled_series',
+        expenses: [
+          { label: 'Daycare', amount: 705, monthlyEquivalent: 3055, nextDate: '2026-08-28', category: 'Child Care' },
+          { label: 'Freedom Mortgage', amount: 2824.83, monthlyEquivalent: 2824.83, nextDate: '2026-09-01', category: 'Housing' },
+          { label: 'Honda', amount: 934.65, monthlyEquivalent: 934.65, nextDate: '2026-08-25', category: 'Auto' },
+          { label: 'Car Note', amount: 934, monthlyEquivalent: 934, nextDate: '2026-08-26', category: 'Auto' },
+          { label: 'Weekly Gas', amount: 120, monthlyEquivalent: 520, nextDate: '2026-08-24', category: 'Gas' },
+          { label: 'Mercury', amount: 229.50, monthlyEquivalent: 229.50, nextDate: '2026-08-27', category: 'Insurance' },
+          { label: 'Cobb', amount: 203, monthlyEquivalent: 203, nextDate: '2026-09-02', category: 'Utilities' },
+          { label: 'Northwestern Mutual', amount: 168.37, monthlyEquivalent: 168.37, nextDate: '2026-09-03', category: 'Insurance' },
+          { label: 'Water', amount: 140.23, monthlyEquivalent: 140.23, nextDate: '2026-09-04', category: 'Utilities' },
+          { label: 'Little Gym', amount: 119, monthlyEquivalent: 105, nextDate: '2026-08-26', category: 'Child Care' },
+          { label: 'Mira', amount: 79.99, monthlyEquivalent: 79.99, nextDate: '2026-08-23', category: 'Services' },
+          { label: 'Banfield', amount: 76.90, monthlyEquivalent: 76.90, nextDate: '2026-09-05', category: 'Pets' },
+          { label: 'ADT', amount: 66.99, monthlyEquivalent: 66.99, nextDate: '2026-09-06', category: 'Home' },
+          { label: 'Zelle', amount: 45, monthlyEquivalent: 45, nextDate: '2026-08-30', category: 'Transfers' },
+        ],
+        income: [
+          {
+            label: 'Paycheck',
+            amount: 4626.37,
+            monthlyEquivalent: 9252.74,
+            nextDate: '2026-09-01',
+            category: 'Income',
+          },
+        ],
+        totals: {
+          recurringExpenseMonthlyEquivalent: 9670.39,
+          recurringIncomeMonthlyEquivalent: 9252.74,
+        },
+      },
+      observations: [
+        { code: 'largest_recurring_expense', label: 'Daycare', monthlyEquivalent: 3055 },
+      ],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const recurringC = buildResponseValidationContract(recurringLedger).contract;
+
+  const weeklyGas = validateResponseAgainstContract({
+    contract: recurringC,
+    text: 'Weekly Gas is $120 weekly, with a monthly equivalent of $520.',
+  });
+  check('Weekly Gas amount and monthlyEquivalent VALID', weeklyGas.status === VALIDATION_STATUS.VALID);
+
+  const weeklyGasWrong = validateResponseAgainstContract({
+    contract: recurringC,
+    text: 'Weekly Gas has a monthly equivalent of $521.',
+  });
+  check('Weekly Gas wrong monthlyEquivalent INVALID', weeklyGasWrong.status === VALIDATION_STATUS.INVALID);
+
+  const daycareMonthly = validateResponseAgainstContract({
+    contract: recurringC,
+    text: 'Daycare has a monthly equivalent of $3055.',
+  });
+  check('Daycare monthlyEquivalent 3055 VALID', daycareMonthly.status === VALIDATION_STATUS.VALID);
+
+  const recurringTotal = validateResponseAgainstContract({
+    contract: recurringC,
+    text: 'Recurring expense monthly equivalent totals $9670.39.',
+  });
+  check('recurring total 9670.39 VALID', recurringTotal.status === VALIDATION_STATUS.VALID);
+
+  const recurringBroad = validateResponseAgainstContract({
+    contract: recurringC,
+    text: [
+      'Daycare $705 monthly equivalent $3055.',
+      'Freedom Mortgage $2824.83.',
+      'Honda $934.65.',
+      'Car Note $934.',
+      'Weekly Gas $120 monthly equivalent $520.',
+      'Mercury $229.50.',
+      'Cobb $203.',
+      'Northwestern Mutual $168.37.',
+      'Water $140.23.',
+      'Little Gym $119 and $105.',
+      'Mira $79.99.',
+      'Banfield $76.90.',
+      'ADT $66.99.',
+      'Zelle $45.',
+      'Total monthly equivalent $9670.39.',
+    ].join(' '),
+  });
+  check('recurring broad live-shape VALID', recurringBroad.status === VALIDATION_STATUS.VALID);
+
+  const incomeControl = validateResponseAgainstContract({
+    contract: recurringC,
+    text: 'Next recurring income is $4626.37 on 2026-09-01, monthly equivalent $9252.74.',
+  });
+  check('recurring income amount and monthlyEquivalent VALID', incomeControl.status === VALIDATION_STATUS.VALID);
+
+  const scheduledSource = validateResponseAgainstContract({
+    contract: recurringC,
+    text: 'These recurring expenses come from Keacast scheduled recurring items. Weekly Gas is $120.',
+  });
+  check('kea scheduled source wording still VALID', scheduledSource.status === VALIDATION_STATUS.VALID);
+
+  section('3C.2 comparison / trend / recurring performance');
+  const tCmp = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims('Spending decreased by $2093.47, or 13.95%.');
+    validateResponseAgainstContract({
+      contract: comparisonC,
+      text: 'In July 2026, spending was $12916.99, compared with $15010.46 in June 2026. Spending decreased by $2093.47, or 13.95%.',
+    });
+  }
+  const cmpMs = Number(process.hrtime.bigint() - tCmp) / 1e6;
+  console.log(`  1000 comparison extract+validate: ${cmpMs.toFixed(2)}ms total, ${(cmpMs / 1000).toFixed(3)}ms avg`);
+
+  const tTr = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims('June: $12815.73. July: $11784.96. August: $10380.54. Spending decreased by $2435.19, or 19%.');
+    validateResponseAgainstContract({
+      contract: trendC,
+      text: 'June: $12815.73. July: $11784.96. August: $10380.54. Spending decreased by $2435.19, or 19%.',
+    });
+  }
+  const trMs = Number(process.hrtime.bigint() - tTr) / 1e6;
+  console.log(`  1000 trend extract+validate: ${trMs.toFixed(2)}ms total, ${(trMs / 1000).toFixed(3)}ms avg`);
+
+  const tRec = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims('Weekly Gas is $120 weekly, with a monthly equivalent of $520. Total $9670.39.');
+    validateResponseAgainstContract({
+      contract: recurringC,
+      text: 'Weekly Gas is $120 weekly, with a monthly equivalent of $520. Total $9670.39.',
+    });
+  }
+  const recMs = Number(process.hrtime.bigint() - tRec) / 1e6;
+  console.log(`  1000 recurring extract+validate: ${recMs.toFixed(2)}ms total, ${(recMs / 1000).toFixed(3)}ms avg`);
+  check('3C.2 1000-run benchmarks completed', Number.isFinite(cmpMs) && Number.isFinite(trMs) && Number.isFinite(recMs));
 
   section('3C.1 validator performance 1000 runs');
   const t0 = process.hrtime.bigint();

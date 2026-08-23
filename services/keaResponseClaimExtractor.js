@@ -33,6 +33,7 @@ const CLAIM_KIND = Object.freeze({
   ENTITY_AMOUNT: 'entity_amount',
   ENTITY_AMOUNT_DATE: 'entity_amount_date',
   UNKNOWN_NUMERIC: 'unknown_numeric',
+  PERCENT: 'percent',
   DIRECTION: 'direction',
   RANKING_CANDIDATE: 'ranking_candidate',
 });
@@ -45,7 +46,7 @@ const PREVIEW_TOTAL_HINT = /\b(listed above|transactions listed|transactions abo
 const APPROX_HINT = /\b(approximately|approx(?:imately)?|about|roughly|around)\b/i;
 const INCREASE_HINT = /\b(increase by|net (?:positive )?cash flow|results in a net|net of)\b/i;
 const RANKING_HINT = /\b(largest|smallest|highest|lowest|biggest)\s+(expense|income|bill|transaction|amount|category|merchant)\b/i;
-const DIRECTION_HINT = /\b(will increase|will decrease|will rise|will fall|expected to increase|expected to decrease)\b/i;
+const DIRECTION_HINT = /\b(will increase|will decrease|will rise|will fall|expected to increase|expected to decrease|increased|increasing|increase|decreased|decreasing|decrease|higher|lower|rose|rising|dropped|falling|upward|downward)\b/gi;
 const MONTH_NAME = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec';
 
 function overlaps(a, b) {
@@ -76,6 +77,7 @@ function nearbyHints(text, start, end) {
   if (MONEY_HINT.test(nearby)) hints.push('money');
   if (EXPENSE_HINT.test(nearby)) hints.push('expense');
   if (INCOME_HINT.test(nearby)) hints.push('income');
+  if (/\bbalance\b/i.test(nearby)) hints.push('balance');
   if (FUTURE_HINT.test(nearby)) hints.push('future');
   if (/\b(september|october|november|december)\b/i.test(nearby) && /\b(projected|forecasted|next month)\b/i.test(wide)) {
     if (hints.indexOf('future') === -1) hints.push('future');
@@ -223,6 +225,27 @@ function extractResponseClaims(text, options) {
     mark(consumed, m.index, m.index + m[0].length);
   }
 
+  const percentRe = /([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(%|percent\b)/gi;
+  while ((m = percentRe.exec(src))) {
+    const prev = m.index > 0 ? src.charAt(m.index - 1) : '';
+    if (prev === '$') continue;
+    if (used(consumed, m.index, m.index + m[0].length)) continue;
+    const parsed = parseGroupedNumber(m[1]);
+    if (!parsed) continue;
+    add({
+      kind: CLAIM_KIND.PERCENT,
+      rawSpan: m[0],
+      normalizedValue: parsed.value,
+      unit: 'percent',
+      sign: parsed.value < 0 ? 'negative' : 'positive',
+      semanticHints: nearbyHints(src, m.index, m.index + m[0].length),
+      nearbyTerms: windowText(src, m.index, m.index + m[0].length, 48),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+    mark(consumed, m.index, m.index + m[0].length);
+  }
+
   const dollarRe = /(?:-\$|\$\-?)(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?/g;
   while ((m = dollarRe.exec(src))) {
     if (used(consumed, m.index, m.index + m[0].length)) continue;
@@ -319,18 +342,16 @@ function extractResponseClaims(text, options) {
     mark(consumed, m.index, m.index + m[0].length);
   }
 
-  if (DIRECTION_HINT.test(src)) {
-    const dm = src.match(DIRECTION_HINT);
-    if (dm) {
-      add({
-        kind: CLAIM_KIND.DIRECTION,
-        rawSpan: dm[0],
-        token: dm[0].toLowerCase(),
-        semanticHints: ['future', 'direction'],
-        start: src.indexOf(dm[0]),
-        end: src.indexOf(dm[0]) + dm[0].length,
-      });
-    }
+  DIRECTION_HINT.lastIndex = 0;
+  while ((m = DIRECTION_HINT.exec(src))) {
+    add({
+      kind: CLAIM_KIND.DIRECTION,
+      rawSpan: m[0],
+      token: m[0].toLowerCase(),
+      semanticHints: nearbyHints(src, m.index, m.index + m[0].length).concat(['direction']),
+      start: m.index,
+      end: m.index + m[0].length,
+    });
   }
 
   if (RANKING_HINT.test(src)) {
@@ -350,12 +371,12 @@ function extractResponseClaims(text, options) {
   const dates = claims.filter((c) => c.kind === CLAIM_KIND.DATE);
   for (let i = 0; i < amounts.length; i += 1) {
     const amount = amounts[i];
-    const local = windowText(src, amount.start, amount.end, 64);
-    const entityMatch = local.match(/\b([A-Z][A-Za-z]{2,})\b/);
-    const monthNames = Object.keys(MONTH_INDEX);
+    const before = src.slice(Math.max(0, amount.start - 64), amount.start);
+    const capRe = /\b([A-Z][A-Za-z]{2,})\b/g;
     let entity = null;
-    if (entityMatch && monthNames.indexOf(entityMatch[1].toLowerCase()) === -1) {
-      entity = entityMatch[1];
+    let cap;
+    while ((cap = capRe.exec(before))) {
+      entity = cap[1];
     }
     let nearDate = null;
     for (let d = 0; d < dates.length; d += 1) {

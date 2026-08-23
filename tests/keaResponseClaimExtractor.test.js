@@ -89,6 +89,33 @@ async function run() {
     byKind(ambiguous, CLAIM_KIND.UNKNOWN_NUMERIC).some((r) => r.normalizedValue === 279.58));
   check('bare decimal is not auto USD', byKind(ambiguous, CLAIM_KIND.AMOUNT).length === 0);
 
+  section('3C.2 extractor percents and direction');
+  const decPct = extractResponseClaims('The percentage decrease in spending was 13.95%.');
+  check('13.95% is percent', byKind(decPct, CLAIM_KIND.PERCENT).some((r) => r.normalizedValue === 13.95
+    && r.unit === 'percent'));
+  check('13.95% is not USD amount', amounts(decPct).every((r) => r.normalizedValue !== 13.95));
+
+  const intPct = extractResponseClaims('Spending dropped by 19%.');
+  check('19% integer percent', byKind(intPct, CLAIM_KIND.PERCENT).some((r) => r.normalizedValue === 19));
+
+  const signedPct = extractResponseClaims('The change was -13.95%.');
+  check('signed -13.95%', byKind(signedPct, CLAIM_KIND.PERCENT).some((r) => r.normalizedValue === -13.95));
+
+  const plusPct = extractResponseClaims('Spending changed +13.95%.');
+  check('signed +13.95%', byKind(plusPct, CLAIM_KIND.PERCENT).some((r) => r.normalizedValue === 13.95));
+
+  const wordPct = extractResponseClaims('The decrease was 13.95 percent.');
+  check('13.95 percent word', byKind(wordPct, CLAIM_KIND.PERCENT).some((r) => r.normalizedValue === 13.95));
+
+  const wordInt = extractResponseClaims('Spending fell 19 percent.');
+  check('19 percent word', byKind(wordInt, CLAIM_KIND.PERCENT).some((r) => r.normalizedValue === 19));
+
+  const dirPast = extractResponseClaims('Spending decreased and was lower, with a downward trend.');
+  const dirTokens = byKind(dirPast, CLAIM_KIND.DIRECTION).map((r) => r.token);
+  check('past-tense decreased extracted', dirTokens.indexOf('decreased') !== -1);
+  check('lower extracted', dirTokens.indexOf('lower') !== -1);
+  check('downward extracted', dirTokens.indexOf('downward') !== -1);
+
   const spelled = extractResponseClaims('You spent twelve hundred dollars.');
   check('spelled-out numbers unsupported', byKind(spelled, CLAIM_KIND.AMOUNT).length === 0);
 
