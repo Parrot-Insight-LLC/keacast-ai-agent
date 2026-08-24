@@ -82,12 +82,15 @@ function concatHints(base, extra) {
 function amountRoleHints(text, start) {
   const before = text.slice(Math.max(0, start - 64), start);
   const hints = [];
+  const changeNounWas = /\b(?:absolute\s+)?(?:decrease|increase|change|difference)(?:\s+in\s+(?:spending|income|expenses?))?\s+was\s+$/i.test(before)
+    || /\b(?:spending|income|expenses?)\s+(?:decrease|increase|change|difference)\s+was\s+$/i.test(before);
+  const metricWas = /\b(?:spending|income|expenses?)\s+was\s+$/i.test(before);
   if (/\b(?:further\s+)?(?:decreased|increased|fell|rose|dropped|falling)\s+to\s+$/i.test(before)
-    || /\b(?:spending|income|expenses?)\s+was\s+$/i.test(before)
-    || /\bwas\s+$/i.test(before)) {
+    || (metricWas && !changeNounWas)) {
     hints.push('period_value');
   }
-  if (/\b(?:further\s+)?(?:decreased|increased|fell|rose|dropped)\s+by\s+$/i.test(before)) {
+  if (/\b(?:further\s+)?(?:decreased|increased|fell|rose|dropped)\s+by\s+$/i.test(before)
+    || changeNounWas) {
     hints.push('delta');
   }
   return hints;

@@ -648,6 +648,202 @@ async function run() {
   });
   check('comparison wrong direction not VALID', comparisonWrongDir.status !== VALIDATION_STATUS.VALID);
 
+  section('3C.2 comparison absolute-change role goldens');
+  const PROD_CMP_TEXT = [
+    '- Your spending decreased by 13.95% in July 2026 compared to June 2026.',
+    '- In June, spending was $15010.46.',
+    '- In July, spending was $12916.99.',
+    '- The absolute decrease in spending was $2093.47.',
+    '',
+    'This shows you spent less in July than in June by nearly 14%.',
+  ].join('\n');
+  const PROD_CMP_NO_14_TEXT = [
+    '- Your spending decreased by 13.95% in July 2026 compared to June 2026.',
+    '- In June, spending was $15010.46.',
+    '- In July, spending was $12916.99.',
+    '- The absolute decrease in spending was $2093.47.',
+  ].join('\n');
+  const PROD_CMP_COMBINED_TEXT = [
+    'In June, spending was $15010.46.',
+    'In July, spending was $12916.99.',
+    'The absolute decrease in spending was $2093.47.',
+    'That is a 13.95% decrease.',
+  ].join('\n');
+
+  const prodCmpExtracted = extractResponseClaims(PROD_CMP_TEXT);
+  const prodCmp = validateResponseClaims({
+    contract: comparisonC,
+    extractedClaims: prodCmpExtracted,
+  });
+  const prodPct1395 = prodCmpExtracted.find((r) => r.kind === 'percent' && r.normalizedValue === 13.95);
+  const prodPct14 = prodCmpExtracted.find((r) => r.kind === 'percent' && r.normalizedValue === 14);
+  const prodAmt2093 = prodCmpExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 2093.47);
+  const prodAmtJune = prodCmpExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 15010.46);
+  const prodAmtJuly = prodCmpExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 12916.99);
+  check('exact production comparison INVALID', prodCmp.status === VALIDATION_STATUS.INVALID);
+  check('exact production comparison UNSUPPORTED_COMPARISON', hasCode(prodCmp, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+  check('exact production comparison no UNSUPPORTED_AMOUNT', !hasCode(prodCmp, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+  check('exact production comparison 14% extracted', !!prodPct14);
+  check('exact production comparison 14% rejected', (prodCmp.violations || []).some((v) => v.extractedClaimId === (prodPct14 && prodPct14.id)));
+  check('exact production comparison 13.95 binds', !!prodPct1395
+    && !(prodCmp.violations || []).some((v) => v.extractedClaimId === prodPct1395.id));
+  check('exact production comparison 2093.47 is delta', prodAmt2093
+    && (prodAmt2093.semanticHints || []).indexOf('delta') !== -1
+    && (prodAmt2093.semanticHints || []).indexOf('period_value') === -1);
+  check('exact production comparison 2093.47 binds', !!prodAmt2093
+    && !(prodCmp.violations || []).some((v) => v.extractedClaimId === prodAmt2093.id));
+  check('exact production comparison June amount binds', !!prodAmtJune
+    && !(prodCmp.violations || []).some((v) => v.extractedClaimId === prodAmtJune.id));
+  check('exact production comparison July amount binds', !!prodAmtJuly
+    && !(prodCmp.violations || []).some((v) => v.extractedClaimId === prodAmtJuly.id));
+  check('exact production comparison 0 indeterminate', (prodCmp.indeterminate || []).length === 0);
+  check('exact production comparison only 14% violation', (prodCmp.violations || []).length === 1
+    && prodCmp.violations[0].extractedClaimId === (prodPct14 && prodPct14.id));
+
+  const prodCmpNo14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: PROD_CMP_NO_14_TEXT,
+  });
+  check('production comparison without 14% VALID', prodCmpNo14.status === VALIDATION_STATUS.VALID);
+  check('production comparison without 14% 0 violations', (prodCmpNo14.violations || []).length === 0);
+  check('production comparison without 14% 0 indeterminate', (prodCmpNo14.indeterminate || []).length === 0);
+
+  const absDecWas = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'The absolute decrease in spending was $2093.47.',
+  });
+  check('absolute decrease was $X VALID', absDecWas.status === VALIDATION_STATUS.VALID
+    && (absDecWas.violations || []).length === 0
+    && (absDecWas.indeterminate || []).length === 0);
+
+  const comparisonIncreaseLedger = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'matched_elapsed',
+        periodA: {
+          label: 'June 2026',
+          start: '2026-06-01',
+          end: '2026-06-30',
+          income: 0,
+          spending: 15010.46,
+          net: -15010.46,
+        },
+        periodB: {
+          label: 'July 2026',
+          start: '2026-07-01',
+          end: '2026-07-31',
+          income: 0,
+          spending: 12916.99,
+          net: -12916.99,
+        },
+        changes: {
+          income: { absolute: 0, percent: 0, direction: 'unchanged', baselineZero: false },
+          spending: { absolute: 2093.47, percent: 13.95, direction: 'increased', baselineZero: false },
+          net: { absolute: 2093.47, percent: 13.95, direction: 'improved', baselineZero: false },
+        },
+      },
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const comparisonIncreaseC = buildResponseValidationContract(comparisonIncreaseLedger).contract;
+  const absIncWas = validateResponseAgainstContract({
+    contract: comparisonIncreaseC,
+    text: 'The absolute increase in spending was $2093.47.',
+  });
+  check('absolute increase was $X VALID', absIncWas.status === VALIDATION_STATUS.VALID
+    && (absIncWas.violations || []).length === 0
+    && (absIncWas.indeterminate || []).length === 0);
+
+  const changeWasAmt = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'The change in spending was $2093.47.',
+  });
+  check('change in spending was $X binds magnitude', changeWasAmt.status === VALIDATION_STATUS.VALID
+    && (changeWasAmt.violations || []).length === 0);
+
+  const juneSpendWasValid = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In June, spending was $15010.46.',
+  });
+  check('June spending was $X VALID', juneSpendWasValid.status === VALIDATION_STATUS.VALID);
+  const julySpendWasValid = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In July, spending was $12916.99.',
+  });
+  check('July spending was $X VALID', julySpendWasValid.status === VALIDATION_STATUS.VALID);
+  const juneLabelSpendWas = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'June spending was $15010.46.',
+  });
+  check('June spending was $X label VALID', juneLabelSpendWas.status === VALIDATION_STATUS.VALID);
+  const decreasedToValid = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased to $12916.99.',
+  });
+  check('decreased to $X remains VALID', decreasedToValid.status === VALIDATION_STATUS.VALID);
+  const decreasedByValid = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by $2093.47.',
+  });
+  check('decreased by $X remains VALID', decreasedByValid.status === VALIDATION_STATUS.VALID);
+
+  const combinedAbsChange = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: PROD_CMP_COMBINED_TEXT,
+  });
+  check('combined period and absolute-change VALID', combinedAbsChange.status === VALIDATION_STATUS.VALID);
+  check('combined period and absolute-change 0 violations', (combinedAbsChange.violations || []).length === 0);
+  check('combined period and absolute-change 0 indeterminate', (combinedAbsChange.indeterminate || []).length === 0);
+
+  const wrongAbsDelta = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'The absolute decrease in spending was $2094.47.',
+  });
+  check('wrong absolute-change amount INVALID', wrongAbsDelta.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongAbsDelta, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+
+  const julyWrongPeriodExtracted = extractResponseClaims('In July, spending was $15010.46.');
+  const julyWrongPeriodAmt = julyWrongPeriodExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 15010.46);
+  check('July period with June amount remains period_value', !!julyWrongPeriodAmt
+    && (julyWrongPeriodAmt.semanticHints || []).indexOf('period_value') !== -1
+    && (julyWrongPeriodAmt.semanticHints || []).indexOf('delta') === -1);
+
+  const comparisonDeltaAsPeriod = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In June, spending was $2093.47.',
+  });
+  check('delta amount used as period value INVALID', comparisonDeltaAsPeriod.status === VALIDATION_STATUS.INVALID);
+
+  const comparisonPeriodAsDelta = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'The absolute decrease in spending was $12916.99.',
+  });
+  check('period amount used as delta INVALID', comparisonPeriodAsDelta.status === VALIDATION_STATUS.INVALID);
+
+  const absIncWrongDir = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'The absolute increase in spending was $2093.47.',
+  });
+  check('absolute increase vs decreased contract not VALID', absIncWrongDir.status !== VALIDATION_STATUS.VALID);
+
+  const absDecWrongDir = validateResponseAgainstContract({
+    contract: comparisonIncreaseC,
+    text: 'The absolute decrease in spending was $2093.47.',
+  });
+  check('absolute decrease vs increased contract not VALID', absDecWrongDir.status !== VALIDATION_STATUS.VALID);
+
   section('3C.2 trend period and first-to-last goldens');
   const trendLedger = buildTrendEvidenceLedger({
     evidence: {
@@ -1278,6 +1474,24 @@ async function run() {
   check('Case A/B/D 1000-run benchmarks completed', Number.isFinite(liveCmpAMs)
     && Number.isFinite(liveCmpBMs)
     && Number.isFinite(liveTrendDMs));
+
+  const tProdCmp = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(PROD_CMP_TEXT);
+    validateResponseAgainstContract({ contract: comparisonC, text: PROD_CMP_TEXT });
+  }
+  const prodCmpMs = Number(process.hrtime.bigint() - tProdCmp) / 1e6;
+  console.log(`  1000 exact production comparison extract+validate: ${prodCmpMs.toFixed(2)}ms total, ${(prodCmpMs / 1000).toFixed(3)}ms avg`);
+
+  const tProdCmpNo14 = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(PROD_CMP_NO_14_TEXT);
+    validateResponseAgainstContract({ contract: comparisonC, text: PROD_CMP_NO_14_TEXT });
+  }
+  const prodCmpNo14Ms = Number(process.hrtime.bigint() - tProdCmpNo14) / 1e6;
+  console.log(`  1000 no-14 comparison extract+validate: ${prodCmpNo14Ms.toFixed(2)}ms total, ${(prodCmpNo14Ms / 1000).toFixed(3)}ms avg`);
+  check('production comparison 1000-run benchmarks completed', Number.isFinite(prodCmpMs)
+    && Number.isFinite(prodCmpNo14Ms));
 
   section('3C.1 validator performance 1000 runs');
   const t0 = process.hrtime.bigint();

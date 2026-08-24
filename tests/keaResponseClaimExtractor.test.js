@@ -133,6 +133,62 @@ async function run() {
   check('dropped by is delta', dropped && (dropped.semanticHints || []).indexOf('delta') !== -1);
   check('dropped by is not period_value', dropped && (dropped.semanticHints || []).indexOf('period_value') === -1);
 
+  section('3C.2 extractor comparison absolute-change roles');
+  const absDec = extractResponseClaims('The absolute decrease in spending was $2093.47.');
+  const absDecAmt = amounts(absDec).find((r) => r.normalizedValue === 2093.47);
+  check('absolute decrease was $X is delta', absDecAmt && (absDecAmt.semanticHints || []).indexOf('delta') !== -1);
+  check('absolute decrease was $X is not period_value', absDecAmt
+    && (absDecAmt.semanticHints || []).indexOf('period_value') === -1);
+
+  const absInc = extractResponseClaims('The absolute increase in spending was $2093.47.');
+  const absIncAmt = amounts(absInc).find((r) => r.normalizedValue === 2093.47);
+  check('absolute increase was $X is delta', absIncAmt && (absIncAmt.semanticHints || []).indexOf('delta') !== -1);
+  check('absolute increase was $X is not period_value', absIncAmt
+    && (absIncAmt.semanticHints || []).indexOf('period_value') === -1);
+
+  const changeWas = extractResponseClaims('The change in spending was $2093.47.');
+  const changeAmt = amounts(changeWas).find((r) => r.normalizedValue === 2093.47);
+  check('change in spending was $X is delta', changeAmt && (changeAmt.semanticHints || []).indexOf('delta') !== -1);
+  check('change in spending was $X is not period_value', changeAmt
+    && (changeAmt.semanticHints || []).indexOf('period_value') === -1);
+
+  const spendDecWas = extractResponseClaims('The spending decrease was $2093.47.');
+  const spendDecAmt = amounts(spendDecWas).find((r) => r.normalizedValue === 2093.47);
+  check('spending decrease was $X is delta', spendDecAmt && (spendDecAmt.semanticHints || []).indexOf('delta') !== -1);
+
+  const juneWas = extractResponseClaims('In June, spending was $15010.46.');
+  const juneAmt = amounts(juneWas).find((r) => r.normalizedValue === 15010.46);
+  check('spending was $X is period_value', juneAmt && (juneAmt.semanticHints || []).indexOf('period_value') !== -1);
+  check('spending was $X is not delta', juneAmt && (juneAmt.semanticHints || []).indexOf('delta') === -1);
+
+  const juneSpendWas = extractResponseClaims('June spending was $15010.46.');
+  const juneSpendAmt = amounts(juneSpendWas).find((r) => r.normalizedValue === 15010.46);
+  check('June spending was $X is period_value', juneSpendAmt
+    && (juneSpendAmt.semanticHints || []).indexOf('period_value') !== -1);
+
+  const incomeWas = extractResponseClaims('Income was $5000 in June.');
+  const incomeAmt = amounts(incomeWas).find((r) => r.normalizedValue === 5000);
+  check('income was $X is period_value', incomeAmt && (incomeAmt.semanticHints || []).indexOf('period_value') !== -1);
+
+  const expensesWere = extractResponseClaims('Expenses were $15010.46 in June.');
+  const expensesAmt = amounts(expensesWere).find((r) => r.normalizedValue === 15010.46);
+  check('expenses were $X is not forced period_value', expensesAmt
+    && (expensesAmt.semanticHints || []).indexOf('period_value') === -1);
+
+  const decreasedBy = extractResponseClaims('Spending decreased by $2093.47.');
+  const decreasedByAmt = amounts(decreasedBy).find((r) => r.normalizedValue === 2093.47);
+  check('decreased by $X remains delta', decreasedByAmt
+    && (decreasedByAmt.semanticHints || []).indexOf('delta') !== -1);
+  check('decreased by $X is not period_value', decreasedByAmt
+    && (decreasedByAmt.semanticHints || []).indexOf('period_value') === -1);
+
+  const decreasedTo = extractResponseClaims('Spending decreased to $12916.99.');
+  const decreasedToAmt = amounts(decreasedTo).find((r) => r.normalizedValue === 12916.99);
+  check('decreased to $X remains period_value', decreasedToAmt
+    && (decreasedToAmt.semanticHints || []).indexOf('period_value') !== -1);
+  check('decreased to $X is not delta', decreasedToAmt
+    && (decreasedToAmt.semanticHints || []).indexOf('delta') === -1);
+
   const spelled = extractResponseClaims('You spent twelve hundred dollars.');
   check('spelled-out numbers unsupported', byKind(spelled, CLAIM_KIND.AMOUNT).length === 0);
 
