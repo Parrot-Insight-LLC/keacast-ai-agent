@@ -126,7 +126,7 @@ function directionPolarity(token) {
   const t = String(token || '').toLowerCase();
   if (!t) return null;
   if (t === 'decrease' || t === 'decreased' || t === 'decreasing' || t === 'lower'
-    || t === 'dropped' || t === 'falling' || t === 'downward' || t === 'fell'
+    || t === 'dropped' || t === 'falling' || t === 'downward' || t === 'fell' || t === 'less'
     || t === 'will decrease' || t === 'will fall' || t === 'expected to decrease') {
     return 'down';
   }
@@ -252,18 +252,48 @@ function spanDistance(aStart, bStart) {
   return aStart - bStart;
 }
 
-function closestDateForAmount(row, extracted) {
-  let best = null;
-  let bestDist = 73;
+function extractedDateMonth(d) {
+  if (d && d.month) return d.month;
+  if (d && d.iso && /^\d{4}-\d{2}-\d{2}$/.test(d.iso)) return Number(d.iso.slice(5, 7));
+  return null;
+}
+
+function pickClosestDateClaim(row, extracted) {
+  const entityMonth = monthFromEntity(row && row.entity);
+  const scored = [];
   for (let i = 0; i < extracted.length; i += 1) {
     const d = extracted[i];
     if (!d || d.kind !== CLAIM_KIND.DATE) continue;
     const dist = spanDistance(row.start || 0, d.start || 0);
-    if (dist <= 72 && dist < bestDist) {
-      best = d;
-      bestDist = dist;
-    }
+    if (dist > 72) continue;
+    scored.push({
+      date: d,
+      dist,
+      preceding: (d.end || d.start || 0) <= (row.start || 0),
+      month: extractedDateMonth(d),
+    });
   }
+  if (!scored.length) return null;
+  function bestOf(rows) {
+    let best = rows[0];
+    for (let i = 1; i < rows.length; i += 1) {
+      if (rows[i].dist < best.dist) best = rows[i];
+      else if (rows[i].dist === best.dist && rows[i].preceding && !best.preceding) best = rows[i];
+    }
+    return best.date;
+  }
+  if (entityMonth) {
+    const same = [];
+    for (let i = 0; i < scored.length; i += 1) {
+      if (scored[i].month === entityMonth) same.push(scored[i]);
+    }
+    if (same.length) return bestOf(same);
+  }
+  return bestOf(scored);
+}
+
+function closestDateForAmount(row, extracted) {
+  const best = pickClosestDateClaim(row, extracted);
   if (best) {
     return {
       dateIso: best.iso || null,
@@ -403,7 +433,9 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
       }
       const hints = row.semanticHints || [];
       const entity = row.entity ? String(row.entity).toLowerCase() : null;
-      const matches = [];
+      const roleDelta = hasHint(hints, 'delta');
+      const rolePeriodValue = hasHint(hints, 'period_value') && !roleDelta;
+      let matches = [];
       for (let c = 0; c < usdClaims.length; c += 1) {
         const claim = usdClaims[c];
         const options = authorizedDisplayCents(claim, contract, hints);
@@ -415,6 +447,21 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
         const item = items[k].item;
         const options = itemAuthorizedDisplayCents(item, contract, hints);
         if (options.indexOf(cents) !== -1) amountCandidates.push(items[k]);
+      }
+
+      if (roleDelta) {
+        const deltaMatches = [];
+        for (let c = 0; c < matches.length; c += 1) {
+          if (isSignedChangeAmountClaim(matches[c])) deltaMatches.push(matches[c]);
+        }
+        matches = deltaMatches;
+        amountCandidates.length = 0;
+      } else if (rolePeriodValue) {
+        const periodMatches = [];
+        for (let c = 0; c < matches.length; c += 1) {
+          if (!isSignedChangeAmountClaim(matches[c])) periodMatches.push(matches[c]);
+        }
+        matches = periodMatches;
       }
 
       if (hasHint(hints, 'income') && !hasHint(hints, 'expense') && matches.length) {

@@ -46,7 +46,7 @@ const PREVIEW_TOTAL_HINT = /\b(listed above|transactions listed|transactions abo
 const APPROX_HINT = /\b(approximately|approx(?:imately)?|about|roughly|around)\b/i;
 const INCREASE_HINT = /\b(increase by|net (?:positive )?cash flow|results in a net|net of)\b/i;
 const RANKING_HINT = /\b(largest|smallest|highest|lowest|biggest)\s+(expense|income|bill|transaction|amount|category|merchant)\b/i;
-const DIRECTION_HINT = /\b(will increase|will decrease|will rise|will fall|expected to increase|expected to decrease|increased|increasing|increase|decreased|decreasing|decrease|higher|lower|rose|rising|dropped|falling|upward|downward)\b/gi;
+const DIRECTION_HINT = /\b(will increase|will decrease|will rise|will fall|expected to increase|expected to decrease|increased|increasing|increase|decreased|decreasing|decrease|higher|lower|rose|rising|dropped|falling|upward|downward|less)\b/gi;
 const MONTH_NAME = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec';
 
 function overlaps(a, b) {
@@ -68,6 +68,69 @@ function windowText(text, start, end, radius) {
   const from = Math.max(0, start - radius);
   const to = Math.min(text.length, end + radius);
   return text.slice(from, to);
+}
+
+function concatHints(base, extra) {
+  const out = Array.isArray(base) ? base.slice() : [];
+  const add = Array.isArray(extra) ? extra : [];
+  for (let i = 0; i < add.length; i += 1) {
+    if (out.indexOf(add[i]) === -1) out.push(add[i]);
+  }
+  return out;
+}
+
+function amountRoleHints(text, start) {
+  const before = text.slice(Math.max(0, start - 64), start);
+  const hints = [];
+  if (/\b(?:further\s+)?(?:decreased|increased|fell|rose|dropped|falling)\s+to\s+$/i.test(before)
+    || /\b(?:spending|income|expenses?)\s+was\s+$/i.test(before)
+    || /\bwas\s+$/i.test(before)) {
+    hints.push('period_value');
+  }
+  if (/\b(?:further\s+)?(?:decreased|increased|fell|rose|dropped)\s+by\s+$/i.test(before)) {
+    hints.push('delta');
+  }
+  return hints;
+}
+
+function dateMonthOf(row) {
+  if (row && row.month) return row.month;
+  if (row && row.iso && /^\d{4}-\d{2}-\d{2}$/.test(row.iso)) return Number(row.iso.slice(5, 7));
+  return null;
+}
+
+function pickNearbyDate(amount, dates, entity) {
+  const entityMonth = monthNum(entity);
+  const scored = [];
+  for (let d = 0; d < dates.length; d += 1) {
+    const dist = dates[d].start > amount.start
+      ? dates[d].start - amount.start
+      : amount.start - dates[d].start;
+    if (dist > 72) continue;
+    scored.push({
+      date: dates[d],
+      dist,
+      preceding: (dates[d].end || dates[d].start) <= amount.start,
+      month: dateMonthOf(dates[d]),
+    });
+  }
+  if (!scored.length) return null;
+  function bestOf(rows) {
+    let best = rows[0];
+    for (let i = 1; i < rows.length; i += 1) {
+      if (rows[i].dist < best.dist) best = rows[i];
+      else if (rows[i].dist === best.dist && rows[i].preceding && !best.preceding) best = rows[i];
+    }
+    return best.date;
+  }
+  if (entityMonth) {
+    const same = [];
+    for (let i = 0; i < scored.length; i += 1) {
+      if (scored[i].month === entityMonth) same.push(scored[i]);
+    }
+    if (same.length) return bestOf(same);
+  }
+  return bestOf(scored);
 }
 
 function nearbyHints(text, start, end) {
@@ -251,7 +314,10 @@ function extractResponseClaims(text, options) {
     if (used(consumed, m.index, m.index + m[0].length)) continue;
     const parsed = parseGroupedNumber(m[0]);
     if (!parsed) continue;
-    const hints = nearbyHints(src, m.index, m.index + m[0].length);
+    const hints = concatHints(
+      nearbyHints(src, m.index, m.index + m[0].length),
+      amountRoleHints(src, m.index)
+    );
     add({
       kind: CLAIM_KIND.AMOUNT,
       rawSpan: m[0],
@@ -277,7 +343,10 @@ function extractResponseClaims(text, options) {
       normalizedValue: parsed.value,
       currency: 'USD',
       sign: parsed.value < 0 ? 'negative' : 'positive',
-      semanticHints: nearbyHints(src, m.index, m.index + m[0].length).concat(['money']),
+      semanticHints: concatHints(
+        nearbyHints(src, m.index, m.index + m[0].length).concat(['money']),
+        amountRoleHints(src, m.index)
+      ),
       nearbyTerms: windowText(src, m.index, m.index + m[0].length, 48),
       start: m.index,
       end: m.index + m[0].length,
@@ -323,7 +392,10 @@ function extractResponseClaims(text, options) {
         normalizedValue: nVal,
         currency: 'USD',
         sign: 'positive',
-        semanticHints: nearbyHints(src, m.index, m.index + m[0].length),
+        semanticHints: concatHints(
+          nearbyHints(src, m.index, m.index + m[0].length),
+          amountRoleHints(src, m.index)
+        ),
         nearbyTerms: nearby,
         start: m.index,
         end: m.index + m[0].length,
@@ -378,16 +450,7 @@ function extractResponseClaims(text, options) {
     while ((cap = capRe.exec(before))) {
       entity = cap[1];
     }
-    let nearDate = null;
-    for (let d = 0; d < dates.length; d += 1) {
-      const dist = dates[d].start > amount.start
-        ? dates[d].start - amount.start
-        : amount.start - dates[d].start;
-      if (dist <= 72) {
-        nearDate = dates[d];
-        break;
-      }
-    }
+    const nearDate = pickNearbyDate(amount, dates, entity);
     if (entity && nearDate) {
       amount.kind = CLAIM_KIND.ENTITY_AMOUNT_DATE;
       amount.entity = entity;

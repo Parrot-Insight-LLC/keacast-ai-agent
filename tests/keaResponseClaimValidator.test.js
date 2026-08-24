@@ -717,6 +717,219 @@ async function run() {
   });
   check('trend direction decreased/downward VALID', trendDir.status === VALIDATION_STATUS.VALID);
 
+  section('3C.2 live comparison/trend semantic-binding goldens');
+  const LIVE_CMP_A_TEXT = [
+    '- In July 2026, your spending was $12916.99.',
+    '- In June 2026, your spending was $15010.46.',
+    '- Your spending decreased by $2093.47 from June to July.',
+    '- This is a 13.95% reduction in spending month-over-month.',
+    '',
+    'So, you spent less in July compared to June by nearly 14%.',
+    'Would you like to review specific spending categories?',
+  ].join('\n');
+  const LIVE_CMP_B_TEXT = [
+    '- Your spending in June 2026 was $15010.46.',
+    '- Your spending in July 2026 was $12916.99.',
+    '- The spending decreased by $2093.47 from June to July.',
+    '- This represents a 13.95% decrease in spending from June to July.',
+    '',
+    'So, your spending dropped by 13.95% last month compared with the month before.',
+  ].join('\n');
+  const LIVE_TREND_D_TEXT = [
+    '- Your spending has decreased over the last three months.',
+    '- In June 1–24, 2026, spending was $13002.53.',
+    '- In July 1–24, 2026, spending decreased to $11924.02.',
+    '- In August 1–24, 2026, spending further decreased to $10374.82.',
+    '- Overall, spending dropped by $2627.71, a 20.21% decrease from June to August.',
+    '',
+    'This shows a clear downward trend in your spending during this period.',
+  ].join('\n');
+
+  const liveCmpAExtracted = extractResponseClaims(LIVE_CMP_A_TEXT);
+  const liveCmpA = validateResponseClaims({
+    contract: comparisonC,
+    extractedClaims: liveCmpAExtracted,
+  });
+  const pct1395 = liveCmpAExtracted.find((r) => r.kind === 'percent' && r.normalizedValue === 13.95);
+  const pct14 = liveCmpAExtracted.find((r) => r.kind === 'percent' && r.normalizedValue === 14);
+  const amt2093 = liveCmpAExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 2093.47);
+  check('live Case A INVALID', liveCmpA.status === VALIDATION_STATUS.INVALID);
+  check('live Case A UNSUPPORTED_COMPARISON', hasCode(liveCmpA, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+  check('live Case A extracted 14%', !!pct14);
+  check('live Case A 14% is rejected', (liveCmpA.violations || []).some((v) => v.extractedClaimId === (pct14 && pct14.id)));
+  check('live Case A exact 13.95 binds', !!pct1395
+    && !(liveCmpA.violations || []).some((v) => v.extractedClaimId === pct1395.id));
+  check('live Case A exact 2093.47 binds', !!amt2093
+    && !(liveCmpA.violations || []).some((v) => v.extractedClaimId === amt2093.id));
+
+  const exactPct = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased 13.95%.',
+  });
+  check('exact 13.95% VALID', exactPct.status === VALIDATION_STATUS.VALID
+    && (exactPct.violations || []).length === 0
+    && (exactPct.indeterminate || []).length === 0);
+
+  const nearly14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased nearly 14%.',
+  });
+  check('nearly 14% INVALID', nearly14.status === VALIDATION_STATUS.INVALID
+    && hasCode(nearly14, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+
+  const exact14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased 14%.',
+  });
+  check('exact unauthorized 14% INVALID', exact14.status === VALIDATION_STATUS.INVALID
+    && hasCode(exact14, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+
+  const liveCmpB = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: LIVE_CMP_B_TEXT,
+  });
+  check('live Case B VALID', liveCmpB.status === VALIDATION_STATUS.VALID);
+  check('live Case B 0 violations', (liveCmpB.violations || []).length === 0);
+  check('live Case B 0 indeterminate', (liveCmpB.indeterminate || []).length === 0);
+
+  const dirDecreased = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased.',
+  });
+  check('direction synonym decreased VALID', dirDecreased.status === VALIDATION_STATUS.VALID);
+  const dirLower = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending was lower.',
+  });
+  check('direction synonym lower VALID', dirLower.status === VALIDATION_STATUS.VALID);
+  const dirDropped = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending dropped.',
+  });
+  check('direction synonym dropped VALID', dirDropped.status === VALIDATION_STATUS.VALID);
+  const dirIncreased = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending increased.',
+  });
+  check('wrong direction increased not VALID', dirIncreased.status !== VALIDATION_STATUS.VALID);
+  const dirHigher = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending was higher.',
+  });
+  check('wrong direction higher not VALID', dirHigher.status !== VALIDATION_STATUS.VALID);
+  const dirRose = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending rose.',
+  });
+  check('wrong direction rose not VALID', dirRose.status !== VALIDATION_STATUS.VALID);
+
+  const liveTrendLedger = buildTrendEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_trend'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'matched_elapsed',
+        metricScope: 'spending',
+        periods: [
+          { label: 'June 1–24, 2026', start: '2026-06-01', end: '2026-06-24', spending: 13002.53 },
+          { label: 'July 1–24, 2026', start: '2026-07-01', end: '2026-07-24', spending: 11924.02 },
+          { label: 'August 1–24, 2026', start: '2026-08-01', end: '2026-08-24', spending: 10374.82 },
+        ],
+        trend: {
+          spending: {
+            direction: 'decreasing',
+            firstToLast: { absolute: -2627.71, percent: -20.21, baselineZero: false },
+          },
+        },
+        highest: { metric: 'spending', label: 'June 1–24, 2026', value: 13002.53 },
+        lowest: { metric: 'spending', label: 'August 1–24, 2026', value: 10374.82 },
+      },
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const liveTrendC = buildResponseValidationContract(liveTrendLedger).contract;
+
+  const liveTrendD = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: LIVE_TREND_D_TEXT,
+  });
+  check('live Case D VALID', liveTrendD.status === VALIDATION_STATUS.VALID);
+  check('live Case D 0 violations', (liveTrendD.violations || []).length === 0);
+  check('live Case D 0 indeterminate', (liveTrendD.indeterminate || []).length === 0);
+
+  const controlC = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'June: $13002.53. July: $11924.02. August: $10374.82.',
+  });
+  check('control each-of-last-3-months VALID', controlC.status === VALIDATION_STATUS.VALID
+    && (controlC.violations || []).length === 0
+    && (controlC.indeterminate || []).length === 0);
+
+  const controlE = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Spending dropped by $2627.71, a 20.21% decrease, showing a downward trend.',
+  });
+  check('control percent-over-last-3-months VALID', controlE.status === VALIDATION_STATUS.VALID
+    && (controlE.violations || []).length === 0
+    && (controlE.indeterminate || []).length === 0);
+
+  const toJuly = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'July spending decreased to $11924.02.',
+  });
+  check('decreased to binds July period VALID', toJuly.status === VALIDATION_STATUS.VALID);
+  const toAugust = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'August spending fell to $10374.82.',
+  });
+  check('fell to binds August period VALID', toAugust.status === VALIDATION_STATUS.VALID);
+
+  const byDelta = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Overall spending decreased by $2627.71.',
+  });
+  check('decreased by binds firstToLast VALID', byDelta.status === VALIDATION_STATUS.VALID);
+  const droppedBy = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Overall spending dropped by $2627.71.',
+  });
+  check('dropped by binds firstToLast VALID', droppedBy.status === VALIDATION_STATUS.VALID);
+
+  const wrongPeriod = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'In July, spending was $10374.82.',
+  });
+  check('wrong period amount LIST_ITEM_MISMATCH', wrongPeriod.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongPeriod, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const wrongTrendDelta = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Overall spending dropped by $2628.71.',
+  });
+  check('wrong trend delta INVALID', wrongTrendDelta.status === VALIDATION_STATUS.INVALID);
+
+  const wrongTrendPct = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Overall spending dropped 21%.',
+  });
+  check('wrong trend percent INVALID', wrongTrendPct.status === VALIDATION_STATUS.INVALID);
+
+  const deltaAsPeriod = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'In July, spending decreased to $2627.71.',
+  });
+  check('delta used as July period INVALID', deltaAsPeriod.status === VALIDATION_STATUS.INVALID);
+
+  const periodAsDelta = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Overall spending decreased by $11924.02.',
+  });
+  check('July period used as overall delta INVALID', periodAsDelta.status === VALIDATION_STATUS.INVALID);
+
   section('3C.2 recurring monthlyEquivalent goldens');
   const recurringLedger = buildRecurringEvidenceLedger({
     evidence: {
@@ -856,6 +1069,33 @@ async function run() {
   const recMs = Number(process.hrtime.bigint() - tRec) / 1e6;
   console.log(`  1000 recurring extract+validate: ${recMs.toFixed(2)}ms total, ${(recMs / 1000).toFixed(3)}ms avg`);
   check('3C.2 1000-run benchmarks completed', Number.isFinite(cmpMs) && Number.isFinite(trMs) && Number.isFinite(recMs));
+
+  const tLiveA = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_CMP_A_TEXT);
+    validateResponseAgainstContract({ contract: comparisonC, text: LIVE_CMP_A_TEXT });
+  }
+  const liveCmpAMs = Number(process.hrtime.bigint() - tLiveA) / 1e6;
+  console.log(`  1000 Case A extract+validate: ${liveCmpAMs.toFixed(2)}ms total, ${(liveCmpAMs / 1000).toFixed(3)}ms avg`);
+
+  const tLiveB = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_CMP_B_TEXT);
+    validateResponseAgainstContract({ contract: comparisonC, text: LIVE_CMP_B_TEXT });
+  }
+  const liveCmpBMs = Number(process.hrtime.bigint() - tLiveB) / 1e6;
+  console.log(`  1000 Case B extract+validate: ${liveCmpBMs.toFixed(2)}ms total, ${(liveCmpBMs / 1000).toFixed(3)}ms avg`);
+
+  const tLiveD = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_TREND_D_TEXT);
+    validateResponseAgainstContract({ contract: liveTrendC, text: LIVE_TREND_D_TEXT });
+  }
+  const liveTrendDMs = Number(process.hrtime.bigint() - tLiveD) / 1e6;
+  console.log(`  1000 Case D extract+validate: ${liveTrendDMs.toFixed(2)}ms total, ${(liveTrendDMs / 1000).toFixed(3)}ms avg`);
+  check('Case A/B/D 1000-run benchmarks completed', Number.isFinite(liveCmpAMs)
+    && Number.isFinite(liveCmpBMs)
+    && Number.isFinite(liveTrendDMs));
 
   section('3C.1 validator performance 1000 runs');
   const t0 = process.hrtime.bigint();

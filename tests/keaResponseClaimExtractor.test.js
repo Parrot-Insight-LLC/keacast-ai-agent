@@ -116,6 +116,23 @@ async function run() {
   check('lower extracted', dirTokens.indexOf('lower') !== -1);
   check('downward extracted', dirTokens.indexOf('downward') !== -1);
 
+  const dirLess = extractResponseClaims('You spent less in July.');
+  check('less extracted as direction', byKind(dirLess, CLAIM_KIND.DIRECTION).some((r) => r.token === 'less'));
+
+  const toAmt = extractResponseClaims('In July 1–24, 2026, spending decreased to $11924.02. In August 1–24, 2026, spending further decreased to $10374.82.');
+  const julyTo = amounts(toAmt).find((r) => r.normalizedValue === 11924.02);
+  const augustTo = amounts(toAmt).find((r) => r.normalizedValue === 10374.82);
+  check('decreased to is period_value', julyTo && (julyTo.semanticHints || []).indexOf('period_value') !== -1);
+  check('further decreased to is period_value', augustTo && (augustTo.semanticHints || []).indexOf('period_value') !== -1);
+  check('July to-amount keeps July date month', julyTo && julyTo.dateMonth === 7);
+  check('July to-amount is not August', julyTo && julyTo.dateMonth !== 8);
+  check('August to-amount keeps August date month', augustTo && augustTo.dateMonth === 8);
+
+  const byAmt = extractResponseClaims('Overall, spending dropped by $2627.71.');
+  const dropped = amounts(byAmt).find((r) => r.normalizedValue === 2627.71);
+  check('dropped by is delta', dropped && (dropped.semanticHints || []).indexOf('delta') !== -1);
+  check('dropped by is not period_value', dropped && (dropped.semanticHints || []).indexOf('period_value') === -1);
+
   const spelled = extractResponseClaims('You spent twelve hundred dollars.');
   check('spelled-out numbers unsupported', byKind(spelled, CLAIM_KIND.AMOUNT).length === 0);
 
