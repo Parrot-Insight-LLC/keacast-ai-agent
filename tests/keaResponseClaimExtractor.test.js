@@ -278,6 +278,27 @@ async function run() {
   check('decreased by 13.95% is not monetary delta', byKind(compactPct, CLAIM_KIND.PERCENT)
     .some((r) => r.normalizedValue === 13.95 && (r.semanticHints || []).indexOf('delta') === -1));
 
+  section('3C.2 extractor trend from-to following period');
+  const fromToSentence = extractResponseClaims(
+    'Spending dropped from $13002.53 in June 1–24 to $10374.82 in August 1–24.'
+  );
+  const fromAmt = amounts(fromToSentence).find((r) => r.normalizedValue === 13002.53);
+  const toAmtFromTo = amounts(fromToSentence).find((r) => r.normalizedValue === 10374.82);
+  check('from-to first amount entity is June', fromAmt && fromAmt.entity === 'June');
+  check('from-to first amount date month is June', fromAmt && fromAmt.dateMonth === 6);
+  check('from-to second amount entity is August', toAmtFromTo && toAmtFromTo.entity === 'August');
+  check('from-to second amount date month is August', toAmtFromTo && toAmtFromTo.dateMonth === 8);
+  check('from-to second amount is not June', toAmtFromTo && toAmtFromTo.entity !== 'June'
+    && toAmtFromTo.dateMonth !== 6);
+
+  const fromToYear = extractResponseClaims(
+    'Spending dropped from $13002.53 in June 2026 to $10374.82 in August 2026.'
+  );
+  const fromYear = amounts(fromToYear).find((r) => r.normalizedValue === 13002.53);
+  const toYear = amounts(fromToYear).find((r) => r.normalizedValue === 10374.82);
+  check('from-to year first amount entity is June', fromYear && /^june$/i.test(fromYear.entity));
+  check('from-to year second amount entity is August', toYear && /^august$/i.test(toYear.entity));
+
   section('3C.1 extractor immutability');
   const options = { foo: 1 };
   const frozenOpts = JSON.stringify(options);

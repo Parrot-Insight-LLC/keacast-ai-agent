@@ -941,6 +941,14 @@ async function run() {
     '',
     'This shows a clear downward trend in your spending during this period.',
   ].join('\n');
+  const LIVE_TREND_FROM_TO_TEXT = [
+    '- Your spending has decreased over the last three months.',
+    '- Specifically, spending dropped from $13002.53 in June 1–24 to $10374.82 in August 1–24.',
+    '- This is a decrease of $2627.71, or about 20.21%.',
+    '- The trend shows a consistent reduction in spending month over month during this period.',
+    '',
+    'Your spending is trending downward, indicating you are spending less each month.',
+  ].join('\n');
 
   const liveCmpAExtracted = extractResponseClaims(LIVE_CMP_A_TEXT);
   const liveCmpA = validateResponseClaims({
@@ -1126,6 +1134,97 @@ async function run() {
     text: 'Overall spending decreased by $11924.02.',
   });
   check('July period used as overall delta INVALID', periodAsDelta.status === VALIDATION_STATUS.INVALID);
+
+  section('3C.2 trend from-to following-period goldens');
+  const fromToSentence = 'Spending dropped from $13002.53 in June 1–24 to $10374.82 in August 1–24.';
+  const fromToExtracted = extractResponseClaims(fromToSentence);
+  const fromToJune = fromToExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 13002.53);
+  const fromToAugust = fromToExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 10374.82);
+  check('from-to first amount entity June', fromToJune && fromToJune.entity === 'June');
+  check('from-to second amount entity August', fromToAugust && fromToAugust.entity === 'August');
+  check('from-to second amount not June', fromToAugust && fromToAugust.entity !== 'June');
+  const fromToValid = validateResponseClaims({
+    contract: liveTrendC,
+    extractedClaims: fromToExtracted,
+  });
+  check('from-to sentence VALID', fromToValid.status === VALIDATION_STATUS.VALID
+    && (fromToValid.violations || []).length === 0
+    && (fromToValid.indeterminate || []).length === 0);
+
+  const prodFromToExtracted = extractResponseClaims(LIVE_TREND_FROM_TO_TEXT);
+  const prodFromTo = validateResponseClaims({
+    contract: liveTrendC,
+    extractedClaims: prodFromToExtracted,
+  });
+  const prodFromJune = prodFromToExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 13002.53);
+  const prodToAugust = prodFromToExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 10374.82);
+  const prodDelta2627 = prodFromToExtracted.find((r) => (
+    r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+  ) && r.normalizedValue === 2627.71);
+  const prodPct2021 = prodFromToExtracted.find((r) => r.kind === 'percent' && r.normalizedValue === 20.21);
+  check('exact production from-to VALID', prodFromTo.status === VALIDATION_STATUS.VALID);
+  check('exact production from-to 0 violations', (prodFromTo.violations || []).length === 0);
+  check('exact production from-to 0 indeterminate', (prodFromTo.indeterminate || []).length === 0);
+  check('exact production from-to June amount binds', !!prodFromJune
+    && !(prodFromTo.violations || []).some((v) => v.extractedClaimId === prodFromJune.id));
+  check('exact production from-to August amount binds', !!prodToAugust
+    && prodToAugust.entity === 'August'
+    && !(prodFromTo.violations || []).some((v) => v.extractedClaimId === prodToAugust.id));
+  check('exact production from-to delta binds', !!prodDelta2627
+    && !(prodFromTo.violations || []).some((v) => v.extractedClaimId === prodDelta2627.id));
+  check('exact production from-to 20.21 binds', !!prodPct2021
+    && !(prodFromTo.violations || []).some((v) => v.extractedClaimId === prodPct2021.id));
+  check('exact production from-to no LIST_ITEM_MISMATCH', !hasCode(prodFromTo, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const wrongSecondPeriod = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Spending dropped from $13002.53 in June 1–24 to $10374.82 in June 1–24.',
+  });
+  check('wrong second period INVALID', wrongSecondPeriod.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongSecondPeriod, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const wrongSecondAmount = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Spending dropped from $13002.53 in June 1–24 to $11924.02 in August 1–24.',
+  });
+  check('wrong second amount INVALID', wrongSecondAmount.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongSecondAmount, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const swappedFromTo = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Spending dropped from $10374.82 in June 1–24 to $13002.53 in August 1–24.',
+  });
+  check('swapped from-to amounts INVALID', swappedFromTo.status === VALIDATION_STATUS.INVALID);
+
+  const fromToCmpAbs = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'The absolute decrease in spending was $2093.47.',
+  });
+  check('comparison absolute-change regression VALID', fromToCmpAbs.status === VALIDATION_STATUS.VALID);
+  const fromToCmpJune = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In June, spending was $15010.46.',
+  });
+  check('comparison June spending was regression VALID', fromToCmpJune.status === VALIDATION_STATUS.VALID);
+  const fromToCmpPct = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by 13.95%.',
+  });
+  check('comparison exact 13.95 regression VALID', fromToCmpPct.status === VALIDATION_STATUS.VALID);
+  const fromToCmpNearly14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by nearly 14%.',
+  });
+  check('comparison nearly 14 regression INVALID', fromToCmpNearly14.status === VALIDATION_STATUS.INVALID
+    && hasCode(fromToCmpNearly14, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
 
   section('3C.2 recurring monthlyEquivalent goldens');
   const recurringLedger = buildRecurringEvidenceLedger({
@@ -1492,6 +1591,34 @@ async function run() {
   console.log(`  1000 no-14 comparison extract+validate: ${prodCmpNo14Ms.toFixed(2)}ms total, ${(prodCmpNo14Ms / 1000).toFixed(3)}ms avg`);
   check('production comparison 1000-run benchmarks completed', Number.isFinite(prodCmpMs)
     && Number.isFinite(prodCmpNo14Ms));
+
+  const tProdTrend = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_TREND_FROM_TO_TEXT);
+    validateResponseAgainstContract({ contract: liveTrendC, text: LIVE_TREND_FROM_TO_TEXT });
+  }
+  const prodTrendMs = Number(process.hrtime.bigint() - tProdTrend) / 1e6;
+  console.log(`  1000 exact production trend extract+validate: ${prodTrendMs.toFixed(2)}ms total, ${(prodTrendMs / 1000).toFixed(3)}ms avg`);
+
+  const tCaseDBench = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_TREND_D_TEXT);
+    validateResponseAgainstContract({ contract: liveTrendC, text: LIVE_TREND_D_TEXT });
+  }
+  const caseDBenchMs = Number(process.hrtime.bigint() - tCaseDBench) / 1e6;
+  console.log(`  1000 Case D trend extract+validate: ${caseDBenchMs.toFixed(2)}ms total, ${(caseDBenchMs / 1000).toFixed(3)}ms avg`);
+
+  const upcomingControlText = '$120 on August 24';
+  const tUpcomingOn = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(upcomingControlText);
+    validateResponseAgainstContract({ contract: liveE, text: upcomingControlText });
+  }
+  const upcomingOnMs = Number(process.hrtime.bigint() - tUpcomingOn) / 1e6;
+  console.log(`  1000 upcoming $X on DATE extract+validate: ${upcomingOnMs.toFixed(2)}ms total, ${(upcomingOnMs / 1000).toFixed(3)}ms avg`);
+  check('production trend / Case D / upcoming 1000-run benchmarks completed', Number.isFinite(prodTrendMs)
+    && Number.isFinite(caseDBenchMs)
+    && Number.isFinite(upcomingOnMs));
 
   section('3C.1 validator performance 1000 runs');
   const t0 = process.hrtime.bigint();

@@ -154,6 +154,61 @@ function findSameItemRecurringNextDate(text, amount, dates) {
   return best.date;
 }
 
+const FROM_TO_MONEY = '\\$(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?';
+const FROM_TO_PERIOD = '(?:' + MONTH_NAME + ')(?:\\s+\\d{1,2}(?:\\s*[\\u2013\\-]\\s*\\d{1,2})?)?(?:\\s+\\d{4})?';
+const FROM_TO_CLAUSE = new RegExp(
+  '\\bfrom\\s+(' + FROM_TO_MONEY + ')\\s+in\\s+(' + FROM_TO_PERIOD + ')\\s+to\\s+(' + FROM_TO_MONEY + ')\\s+in\\s+(' + FROM_TO_PERIOD + ')',
+  'gi'
+);
+
+function leadingMonthName(periodSpan) {
+  const m = String(periodSpan || '').match(new RegExp('^(?:' + MONTH_NAME + ')', 'i'));
+  return m ? m[0] : null;
+}
+
+function followingPeriodToken(tokens, afterEnd, windowEnd, month) {
+  let best = null;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token) continue;
+    if (token.start < afterEnd || token.start >= windowEnd) continue;
+    if (month && dateMonthOf(token) !== month) continue;
+    const dist = token.start - afterEnd;
+    if (!best || dist < best.dist) best = { token, dist };
+  }
+  return best ? best.token : null;
+}
+
+function findFromToFollowingPeriods(text, amounts, tokens) {
+  const src = String(text || '');
+  const hits = Object.create(null);
+  FROM_TO_CLAUSE.lastIndex = 0;
+  let m;
+  while ((m = FROM_TO_CLAUSE.exec(src))) {
+    if (m[0].indexOf('\n') !== -1 || m[0].indexOf('\r') !== -1) continue;
+    const matchStart = m.index;
+    const matchEnd = m.index + m[0].length;
+    const relA = m[0].indexOf(m[1]);
+    const relB = m[0].indexOf(m[3], relA + m[1].length);
+    if (relA < 0 || relB < 0) continue;
+    const startA = matchStart + relA;
+    const startB = matchStart + relB;
+    const entityA = leadingMonthName(m[2]);
+    const entityB = leadingMonthName(m[4]);
+    const monthA = monthNum(entityA);
+    const monthB = monthNum(entityB);
+    const dateA = followingPeriodToken(tokens, startA + m[1].length, startB, monthA);
+    const dateB = followingPeriodToken(tokens, startB + m[3].length, matchEnd, monthB);
+    for (let i = 0; i < amounts.length; i += 1) {
+      const amount = amounts[i];
+      if (!amount) continue;
+      if (amount.start === startA && entityA) hits[amount.start] = { entity: entityA, date: dateA };
+      else if (amount.start === startB && entityB) hits[amount.start] = { entity: entityB, date: dateB };
+    }
+  }
+  return hits;
+}
+
 function pickNearbyDate(amount, dates, entity) {
   const entityMonth = monthNum(entity);
   const scored = [];
@@ -496,17 +551,27 @@ function extractResponseClaims(text, options) {
 
   const amounts = claims.filter((c) => c.kind === CLAIM_KIND.AMOUNT);
   const dates = claims.filter((c) => c.kind === CLAIM_KIND.DATE);
+  const periodTokens = claims.filter((c) => c.kind === CLAIM_KIND.DATE || c.kind === CLAIM_KIND.PERIOD);
+  const fromToHits = findFromToFollowingPeriods(src, amounts, periodTokens);
   for (let i = 0; i < amounts.length; i += 1) {
     const amount = amounts[i];
-    const before = src.slice(Math.max(0, amount.start - 64), amount.start);
-    const capRe = /\b([A-Z][A-Za-z]{2,})\b/g;
+    const fromTo = fromToHits[amount.start];
     let entity = null;
-    let cap;
-    while ((cap = capRe.exec(before))) {
-      entity = cap[1];
+    let sameItemDate = null;
+    if (fromTo) {
+      entity = fromTo.entity;
+    } else {
+      const before = src.slice(Math.max(0, amount.start - 64), amount.start);
+      const capRe = /\b([A-Z][A-Za-z]{2,})\b/g;
+      let cap;
+      while ((cap = capRe.exec(before))) {
+        entity = cap[1];
+      }
+      sameItemDate = findSameItemRecurringNextDate(src, amount, dates);
     }
-    const sameItemDate = findSameItemRecurringNextDate(src, amount, dates);
-    const nearDate = sameItemDate || pickNearbyDate(amount, dates, entity);
+    const nearDate = fromTo
+      ? (fromTo.date || null)
+      : (sameItemDate || pickNearbyDate(amount, dates, entity));
     if (sameItemDate) {
       amount.semanticHints = concatHints(amount.semanticHints, ['recurring_next_due']);
     }
