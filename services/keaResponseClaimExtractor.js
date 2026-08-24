@@ -99,6 +99,58 @@ function dateMonthOf(row) {
   return null;
 }
 
+function listItemBounds(text, index) {
+  const src = String(text || '');
+  const pos = Number(index) || 0;
+  let start = 0;
+  for (let i = pos - 1; i >= 0; i -= 1) {
+    const ch = src.charAt(i);
+    if (ch === '\n' || ch === '\r') {
+      start = i + 1;
+      break;
+    }
+  }
+  let end = src.length;
+  for (let i = pos; i < src.length; i += 1) {
+    const ch = src.charAt(i);
+    if (ch === '\n' || ch === '\r') {
+      end = i;
+      break;
+    }
+  }
+  return { start, end };
+}
+
+const RECURRING_NEXT_DATE_PREFIX = /\b(?:next\s+(?:due|occurrence)|due)\s*:?\s*$/i;
+
+function findSameItemRecurringNextDate(text, amount, dates) {
+  if (!amount || !Array.isArray(dates) || !dates.length) return null;
+  const bounds = listItemBounds(text, amount.start);
+  const following = [];
+  const preceding = [];
+  for (let i = 0; i < dates.length; i += 1) {
+    const date = dates[i];
+    if (!date) continue;
+    if (date.start < bounds.start || date.start >= bounds.end) continue;
+    const prefix = String(text || '').slice(bounds.start, date.start);
+    if (!RECURRING_NEXT_DATE_PREFIX.test(prefix)) continue;
+    const followingDate = date.start >= (amount.end || amount.start);
+    const dist = followingDate
+      ? date.start - (amount.end || amount.start)
+      : (amount.start || 0) - (date.end || date.start);
+    const row = { date, dist };
+    if (followingDate) following.push(row);
+    else preceding.push(row);
+  }
+  const pool = following.length ? following : preceding;
+  if (!pool.length) return null;
+  let best = pool[0];
+  for (let i = 1; i < pool.length; i += 1) {
+    if (pool[i].dist < best.dist) best = pool[i];
+  }
+  return best.date;
+}
+
 function pickNearbyDate(amount, dates, entity) {
   const entityMonth = monthNum(entity);
   const scored = [];
@@ -450,7 +502,11 @@ function extractResponseClaims(text, options) {
     while ((cap = capRe.exec(before))) {
       entity = cap[1];
     }
-    const nearDate = pickNearbyDate(amount, dates, entity);
+    const sameItemDate = findSameItemRecurringNextDate(src, amount, dates);
+    const nearDate = sameItemDate || pickNearbyDate(amount, dates, entity);
+    if (sameItemDate) {
+      amount.semanticHints = concatHints(amount.semanticHints, ['recurring_next_due']);
+    }
     if (entity && nearDate) {
       amount.kind = CLAIM_KIND.ENTITY_AMOUNT_DATE;
       amount.entity = entity;
@@ -460,6 +516,10 @@ function extractResponseClaims(text, options) {
     } else if (entity) {
       amount.kind = CLAIM_KIND.ENTITY_AMOUNT;
       amount.entity = entity;
+    } else if (sameItemDate) {
+      amount.dateIso = sameItemDate.iso || null;
+      amount.dateMonth = sameItemDate.month;
+      amount.dateDay = sameItemDate.day;
     }
   }
 

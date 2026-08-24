@@ -9,6 +9,7 @@ const {
   buildComparisonEvidenceLedger,
   buildTrendEvidenceLedger,
   buildRecurringEvidenceLedger,
+  buildIncomeHorizonEvidenceLedger,
 } = require('../services/keaEvidenceLedgerBuilders');
 const {
   VALIDATION_STATUS,
@@ -1035,6 +1036,170 @@ async function run() {
   });
   check('kea scheduled source wording still VALID', scheduledSource.status === VALIDATION_STATUS.VALID);
 
+  section('3C.2 recurring same-item next-due goldens');
+  const LIVE_CASE_F_TEXT = [
+    'Your Main Account has the following recurring expenses scheduled:',
+    '',
+    '- Daycare: $705 weekly, equivalent to $3055 monthly, next due 2026-08-28',
+    '- Mortgage: $2824.83 monthly, next due 2026-09-02',
+    '- Car Note: $934 monthly, next due 2026-09-18',
+    '- Weekly Gas: $120 weekly, equivalent to $520 monthly, next due 2026-08-24',
+    '- Savings transfer: $400 monthly, next due 2026-09-15 (variable amount)',
+    '- Mercury Insurance: $267.32 monthly, next due 2026-08-27',
+    '- AT&T Utilities: $240 monthly, next due 2026-09-04',
+    '- Aqua Tots Education: $238 monthly, next due 2026-10-01',
+    '- Cobb EMC Power Bill: $230 monthly, next due 2026-10-09',
+    '- Northwestern MU ISA Payment: $162.24 monthly, next due 2026-09-20',
+    '- The Litt (Child Care): $119 monthly, next due 2026-09-04',
+    '- The Litt (Child Care): $105 monthly, next due 2026-08-26',
+    '- Mira Pest Control: $79.99 monthly, next due 2026-09-23',
+    '- Water Bill: $70 monthly, next due 2026-09-01',
+    '- ADT Services: $66.99 monthly, next due 2026-09-05',
+    '',
+    'The total monthly equivalent of these recurring expenses is approximately $9741.54.',
+  ].join('\n');
+  const caseFLedger = buildRecurringEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_recurring'],
+      facts: {
+        metricScope: 'expense',
+        recurringDefinition: 'kea_scheduled_series',
+        expenses: [
+          { label: 'Daycare', amount: 705, monthlyEquivalent: 3055, nextDate: '2026-08-28', category: 'Child Care' },
+          { label: 'Mortgage', amount: 2824.83, monthlyEquivalent: 2824.83, nextDate: '2026-09-02', category: 'Housing' },
+          { label: 'Car Note', amount: 934, monthlyEquivalent: 934, nextDate: '2026-09-18', category: 'Auto' },
+          { label: 'Weekly Gas', amount: 120, monthlyEquivalent: 520, nextDate: '2026-08-24', category: 'Gas' },
+          { label: 'Savings transfer', amount: 400, monthlyEquivalent: 400, nextDate: '2026-09-15', category: 'Transfers' },
+          { label: 'Mercury Insurance', amount: 267.32, monthlyEquivalent: 267.32, nextDate: '2026-08-27', category: 'Insurance' },
+          { label: 'AT&T Utilities', amount: 240, monthlyEquivalent: 240, nextDate: '2026-09-04', category: 'Utilities' },
+          { label: 'Aqua Tots Education', amount: 238, monthlyEquivalent: 238, nextDate: '2026-10-01', category: 'Education' },
+          { label: 'Cobb EMC Power Bill', amount: 230, monthlyEquivalent: 230, nextDate: '2026-10-09', category: 'Utilities' },
+          { label: 'Northwestern MU ISA Payment', amount: 162.24, monthlyEquivalent: 162.24, nextDate: '2026-09-20', category: 'Insurance' },
+          { label: 'The Litt (Child Care)', amount: 119, monthlyEquivalent: 119, nextDate: '2026-09-04', category: 'Child Care' },
+          { label: 'The Litt (Child Care)', amount: 105, monthlyEquivalent: 105, nextDate: '2026-08-26', category: 'Child Care' },
+          { label: 'Mira Pest Control', amount: 79.99, monthlyEquivalent: 79.99, nextDate: '2026-09-23', category: 'Services' },
+          { label: 'Water Bill', amount: 70, monthlyEquivalent: 70, nextDate: '2026-09-01', category: 'Utilities' },
+          { label: 'ADT Services', amount: 66.99, monthlyEquivalent: 66.99, nextDate: '2026-09-05', category: 'Home' },
+        ],
+        totals: { recurringExpenseMonthlyEquivalent: 9741.54 },
+      },
+      observations: [],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Main Account' },
+  }).ledger;
+  const caseFC = buildResponseValidationContract(caseFLedger).contract;
+
+  const caseF = validateResponseAgainstContract({ contract: caseFC, text: LIVE_CASE_F_TEXT });
+  check('Case F rich next-due VALID', caseF.status === VALIDATION_STATUS.VALID);
+  check('Case F 0 violations', (caseF.violations || []).length === 0);
+  check('Case F 0 indeterminate', (caseF.indeterminate || []).length === 0);
+
+  const wrongMortgageDate = validateResponseAgainstContract({
+    contract: caseFC,
+    text: 'Mortgage: $2824.83 monthly, next due 2026-08-28',
+  });
+  check('wrong recurring next date INVALID', wrongMortgageDate.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongMortgageDate, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const crossItemDate = validateResponseAgainstContract({
+    contract: caseFC,
+    text: 'Mortgage: $2824.83 monthly, next due 2026-08-28',
+  });
+  check('cross-item Daycare date on Mortgage INVALID', crossItemDate.status === VALIDATION_STATUS.INVALID
+    && hasCode(crossItemDate, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const monthlyAsOccurrenceOther = validateResponseAgainstContract({
+    contract: caseFC,
+    text: 'Car Note: $520 weekly, next due 2026-09-18',
+  });
+  check('monthlyEquivalent cannot replace another item occurrence', monthlyAsOccurrenceOther.status === VALIDATION_STATUS.INVALID);
+
+  const weeklyEqSameStream = validateResponseAgainstContract({
+    contract: caseFC,
+    text: 'Weekly Gas: $120 weekly, equivalent to $520 monthly, next due 2026-08-24',
+  });
+  check('Weekly Gas occurrence and monthlyEquivalent next-due VALID', weeklyEqSameStream.status === VALIDATION_STATUS.VALID);
+
+  const littIsolation = validateResponseAgainstContract({
+    contract: caseFC,
+    text: [
+      '- The Litt (Child Care): $119 monthly, next due 2026-09-04',
+      '- The Litt (Child Care): $105 monthly, next due 2026-08-26',
+    ].join('\n'),
+  });
+  check('duplicate The Litt dates stay isolated VALID', littIsolation.status === VALIDATION_STATUS.VALID
+    && (littIsolation.violations || []).length === 0);
+
+  const littCross = validateResponseAgainstContract({
+    contract: caseFC,
+    text: '- The Litt (Child Care): $119 monthly, next due 2026-08-26',
+  });
+  check('The Litt $119 cannot take $105 date', littCross.status === VALIDATION_STATUS.INVALID
+    && hasCode(littCross, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const upcomingOnDate = validateResponseAgainstContract({
+    contract: liveE,
+    text: 'Weekly Gas: $120 on August 24',
+  });
+  check('upcoming $X on DATE VALID', upcomingOnDate.status === VALIDATION_STATUS.VALID);
+  const upcomingBareOn = validateResponseAgainstContract({
+    contract: liveE,
+    text: '$120 on August 24',
+  });
+  check('upcoming bare $X on DATE VALID', upcomingBareOn.status === VALIDATION_STATUS.VALID);
+  const upcomingPrecedingDate = validateResponseAgainstContract({
+    contract: liveE,
+    text: 'August 24: $120',
+  });
+  check('upcoming DATE: $X VALID', upcomingPrecedingDate.status === VALIDATION_STATUS.VALID);
+
+  const trendToReg = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'In July 1–24, 2026, spending decreased to $11924.02.',
+  });
+  check('trend decreased to regression VALID', trendToReg.status === VALIDATION_STATUS.VALID);
+  const trendByReg = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: 'Overall spending dropped by $2627.71.',
+  });
+  check('trend decreased by regression VALID', trendByReg.status === VALIDATION_STATUS.VALID);
+
+  const cmpPctReg = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Your spending in July 2026 decreased by 13.95% compared to June 2026.',
+  });
+  check('compact exact 13.95% comparison VALID', cmpPctReg.status === VALIDATION_STATUS.VALID
+    && (cmpPctReg.violations || []).length === 0
+    && (cmpPctReg.indeterminate || []).length === 0);
+  const nearly14Reg = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased nearly 14%.',
+  });
+  check('nearly 14% still INVALID', nearly14Reg.status === VALIDATION_STATUS.INVALID
+    && hasCode(nearly14Reg, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+
+  const horizonLedger = buildIncomeHorizonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_income_horizon'],
+      facts: {
+        incomeHorizonDefinition: 'kea_scheduled_recurring_income',
+        nextIncome: [{ label: 'Direct Deposit', date: '2026-08-31', amount: 4626.36 }],
+        combinedScheduledIncomeAmount: 4626.36,
+      },
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const horizonC = buildResponseValidationContract(horizonLedger).contract;
+  const horizonOk = validateResponseAgainstContract({
+    contract: horizonC,
+    text: 'Your next scheduled income is $4626.36 on 2026-08-31.',
+  });
+  check('income horizon next income VALID', horizonOk.status === VALIDATION_STATUS.VALID);
+
   section('3C.2 comparison / trend / recurring performance');
   const tCmp = process.hrtime.bigint();
   for (let i = 0; i < 1000; i += 1) {
@@ -1069,6 +1234,23 @@ async function run() {
   const recMs = Number(process.hrtime.bigint() - tRec) / 1e6;
   console.log(`  1000 recurring extract+validate: ${recMs.toFixed(2)}ms total, ${(recMs / 1000).toFixed(3)}ms avg`);
   check('3C.2 1000-run benchmarks completed', Number.isFinite(cmpMs) && Number.isFinite(trMs) && Number.isFinite(recMs));
+
+  const tCaseF = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_CASE_F_TEXT);
+    validateResponseAgainstContract({ contract: caseFC, text: LIVE_CASE_F_TEXT });
+  }
+  const caseFMs = Number(process.hrtime.bigint() - tCaseF) / 1e6;
+  console.log(`  1000 Case F extract+validate: ${caseFMs.toFixed(2)}ms total, ${(caseFMs / 1000).toFixed(3)}ms avg`);
+
+  const tUpcoming = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_E_TEXT);
+    validateResponseAgainstContract({ contract: liveE, text: LIVE_E_TEXT });
+  }
+  const upcomingMs = Number(process.hrtime.bigint() - tUpcoming) / 1e6;
+  console.log(`  1000 upcoming-list extract+validate: ${upcomingMs.toFixed(2)}ms total, ${(upcomingMs / 1000).toFixed(3)}ms avg`);
+  check('Case F / upcoming 1000-run benchmarks completed', Number.isFinite(caseFMs) && Number.isFinite(upcomingMs));
 
   const tLiveA = process.hrtime.bigint();
   for (let i = 0; i < 1000; i += 1) {

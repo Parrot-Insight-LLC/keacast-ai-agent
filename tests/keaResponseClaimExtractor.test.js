@@ -144,6 +144,84 @@ async function run() {
   const negated = extractResponseClaims('Your balance is not $5000.');
   check('negation still extracts amount', amounts(negated).some((r) => r.normalizedValue === 5000));
 
+  section('3C.2 extractor same-item recurring next-due');
+  const mortgageLine = extractResponseClaims('- Mortgage: $2824.83 monthly, next due 2026-09-02');
+  const mortgageAmt = amounts(mortgageLine).find((r) => r.normalizedValue === 2824.83);
+  check('Mortgage amount date is 2026-09-02', mortgageAmt && mortgageAmt.dateIso === '2026-09-02');
+  check('Mortgage next-due hint', mortgageAmt && (mortgageAmt.semanticHints || []).indexOf('recurring_next_due') !== -1);
+
+  const carNoteLine = extractResponseClaims('- Car Note: $934 monthly, next due 2026-09-18');
+  const carNoteAmt = amounts(carNoteLine).find((r) => r.normalizedValue === 934);
+  check('Car Note amount date is 2026-09-18', carNoteAmt && carNoteAmt.dateIso === '2026-09-18');
+
+  const weeklyGasLine = extractResponseClaims('- Weekly Gas: $120 weekly, equivalent to $520 monthly, next due 2026-08-24');
+  const weeklyOcc = amounts(weeklyGasLine).find((r) => r.normalizedValue === 120);
+  const weeklyEq = amounts(weeklyGasLine).find((r) => r.normalizedValue === 520);
+  check('Weekly Gas occurrence date is 2026-08-24', weeklyOcc && weeklyOcc.dateIso === '2026-08-24');
+  check('Weekly Gas monthlyEquivalent stays same item date', weeklyEq && weeklyEq.dateIso === '2026-08-24');
+  check('Weekly Gas does not split streams', weeklyOcc && weeklyEq && weeklyOcc.entity === weeklyEq.entity);
+
+  const daycareLine = extractResponseClaims('- Daycare: $705 weekly, equivalent to $3055 monthly, next due 2026-08-28');
+  const daycareOcc = amounts(daycareLine).find((r) => r.normalizedValue === 705);
+  const daycareEq = amounts(daycareLine).find((r) => r.normalizedValue === 3055);
+  check('Daycare occurrence date is 2026-08-28', daycareOcc && daycareOcc.dateIso === '2026-08-28');
+  check('Daycare monthlyEquivalent date is 2026-08-28', daycareEq && daycareEq.dateIso === '2026-08-28');
+
+  const prevBullet = extractResponseClaims([
+    '- Daycare: $705 weekly, equivalent to $3055 monthly, next due 2026-08-28',
+    '- Mortgage: $2824.83 monthly, next due 2026-09-02',
+  ].join('\n'));
+  const prevMortgage = amounts(prevBullet).find((r) => r.normalizedValue === 2824.83);
+  check('previous-bullet ISO is not attached to Mortgage', prevMortgage && prevMortgage.dateIso === '2026-09-02');
+  check('Mortgage does not use Daycare 2026-08-28', prevMortgage && prevMortgage.dateIso !== '2026-08-28');
+
+  const nextBullet = extractResponseClaims([
+    '- Mortgage: $2824.83 monthly, next due 2026-09-02',
+    '- Car Note: $934 monthly, next due 2026-09-18',
+  ].join('\n'));
+  const nextMortgage = amounts(nextBullet).find((r) => r.normalizedValue === 2824.83);
+  const nextCar = amounts(nextBullet).find((r) => r.normalizedValue === 934);
+  check('Mortgage isolated from next bullet', nextMortgage && nextMortgage.dateIso === '2026-09-02');
+  check('Car Note isolated from previous bullet', nextCar && nextCar.dateIso === '2026-09-18');
+
+  const littDup = extractResponseClaims([
+    '- The Litt (Child Care): $119 monthly, next due 2026-09-04',
+    '- The Litt (Child Care): $105 monthly, next due 2026-08-26',
+  ].join('\n'));
+  const litt119 = amounts(littDup).find((r) => r.normalizedValue === 119);
+  const litt105 = amounts(littDup).find((r) => r.normalizedValue === 105);
+  check('The Litt $119 keeps 2026-09-04', litt119 && litt119.dateIso === '2026-09-04');
+  check('The Litt $105 keeps 2026-08-26', litt105 && litt105.dateIso === '2026-08-26');
+
+  const plainNextDue = extractResponseClaims('Mortgage is $2824.83 monthly, next due 2026-09-02.');
+  const plainMortgage = amounts(plainNextDue).find((r) => r.normalizedValue === 2824.83);
+  check('plain-sentence next-due date is 2026-09-02', plainMortgage && plainMortgage.dateIso === '2026-09-02');
+
+  const upcomingOnDate = extractResponseClaims('Weekly Gas: $120 on August 31');
+  const upcomingAmt = amounts(upcomingOnDate).find((r) => r.normalizedValue === 120);
+  check('upcoming $X on DATE is not recurring_next_due', upcomingAmt
+    && (upcomingAmt.semanticHints || []).indexOf('recurring_next_due') === -1);
+  check('upcoming $X on DATE keeps August 31', upcomingAmt && upcomingAmt.dateMonth === 8 && upcomingAmt.dateDay === 31);
+
+  const upcomingBareOn = extractResponseClaims('$120 on August 31');
+  const upcomingBare = amounts(upcomingBareOn).find((r) => r.normalizedValue === 120);
+  check('bare $X on DATE is not recurring_next_due', upcomingBare
+    && (upcomingBare.semanticHints || []).indexOf('recurring_next_due') === -1);
+
+  const upcomingPreceding = extractResponseClaims('August 31: $120');
+  const upcomingPre = amounts(upcomingPreceding).find((r) => r.normalizedValue === 120);
+  check('preceding DATE: $X is not recurring_next_due', upcomingPre
+    && (upcomingPre.semanticHints || []).indexOf('recurring_next_due') === -1);
+
+  const compactPct = extractResponseClaims(
+    'Your spending in July 2026 decreased by 13.95% compared to June 2026.'
+  );
+  check('compact 13.95% still percent', byKind(compactPct, CLAIM_KIND.PERCENT)
+    .some((r) => r.normalizedValue === 13.95 && r.unit === 'percent'));
+  check('compact 13.95% is not USD', amounts(compactPct).every((r) => r.normalizedValue !== 13.95));
+  check('decreased by 13.95% is not monetary delta', byKind(compactPct, CLAIM_KIND.PERCENT)
+    .some((r) => r.normalizedValue === 13.95 && (r.semanticHints || []).indexOf('delta') === -1));
+
   section('3C.1 extractor immutability');
   const options = { foo: 1 };
   const frozenOpts = JSON.stringify(options);

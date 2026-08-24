@@ -293,6 +293,18 @@ function pickClosestDateClaim(row, extracted) {
 }
 
 function closestDateForAmount(row, extracted) {
+  if (hasHint(row && row.semanticHints, 'recurring_next_due')
+    && (row.dateIso || (row.dateMonth && row.dateDay))) {
+    return {
+      dateIso: row.dateIso || null,
+      iso: row.dateIso || null,
+      dateMonth: row.dateMonth,
+      dateDay: row.dateDay,
+      month: row.dateMonth,
+      day: row.dateDay,
+      kind: CLAIM_KIND.DATE,
+    };
+  }
   const best = pickClosestDateClaim(row, extracted);
   if (best) {
     return {
