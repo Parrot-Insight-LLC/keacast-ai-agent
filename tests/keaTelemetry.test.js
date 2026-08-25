@@ -380,6 +380,39 @@ async function run() {
   rvThrew.recordResponseValidation(undefined);
   check('recordResponseValidation null is safe', rvThrew.toPayload().response_validation_status === 'not_applicable');
 
+  section('keaTelemetry response enforcement defaults');
+  check('enforcement eligible defaults false', pDefault.response_enforcement_eligible === false);
+  check('enforcement blocked defaults false', pDefault.response_enforcement_blocked === false);
+  check('enforcement reason defaults none', pDefault.response_enforcement_reason === 'none');
+  check('enforcement capability defaults none', pDefault.response_enforcement_capability === 'none');
+  check('enforcement fallback defaults false', pDefault.response_enforcement_fallback_used === false);
+
+  const tEnf = createKeaTelemetry({ requestId: 'req-enf' });
+  tEnf.recordResponseEnforcement({
+    response_enforcement_eligible: true,
+    response_enforcement_enabled: true,
+    response_enforcement_blocked: true,
+    response_enforcement_reason: 'eligible_invalid_blocked',
+    response_enforcement_capability: 'financial_forecast',
+    response_enforcement_severity: 'critical',
+    response_enforcement_fallback_used: true,
+    amount: 1193.93,
+    merchant: 'Target',
+    text: 'Your projected balance is $4846.97',
+  });
+  const pEnf = tEnf.toPayload();
+  check('enforcement blocked recorded', pEnf.response_enforcement_blocked === true);
+  check('enforcement reason recorded', pEnf.response_enforcement_reason === 'eligible_invalid_blocked');
+  check('enforcement amount rejected', pEnf.amount === undefined);
+  check('enforcement merchant rejected', pEnf.merchant === undefined);
+  check('enforcement text rejected', pEnf.text === undefined);
+  const enfBlob = JSON.stringify(pEnf);
+  check('enforcement json has no $ or Target', enfBlob.indexOf('$') === -1 && enfBlob.indexOf('Target') === -1);
+
+  const enfThrew = createKeaTelemetry({ requestId: 'req-enf-throw' });
+  enfThrew.recordResponseEnforcement(undefined);
+  check('recordResponseEnforcement null is safe', enfThrew.toPayload().response_enforcement_blocked === false);
+
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;
 }

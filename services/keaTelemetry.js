@@ -6,6 +6,10 @@ const {
   emptyShadowTelemetry,
   sanitizeResponseValidationTelemetry,
 } = require('./keaResponseValidationShadow');
+const {
+  emptyEnforcementTelemetry,
+  sanitizeResponseEnforcementTelemetry,
+} = require('./keaResponseValidationEnforcement');
 
 /**
  * Per-turn Kea chat telemetry. One JSON line, no PII / amounts / JWT / message text.
@@ -155,6 +159,7 @@ function createKeaTelemetry({ requestId } = {}) {
     evidence_projection_failure_reason: 'none',
   };
   const responseValidation = emptyShadowTelemetry();
+  const responseEnforcement = emptyEnforcementTelemetry();
 
   let lastStage = null;
   let clientAborted = false;
@@ -396,6 +401,14 @@ function createKeaTelemetry({ requestId } = {}) {
     }
   }
 
+  function recordResponseEnforcement(flags) {
+    try {
+      Object.assign(responseEnforcement, sanitizeResponseEnforcementTelemetry(flags));
+    } catch (err) {
+      // Telemetry must never change chat control flow.
+    }
+  }
+
   function setResponseCharacterCount(n) {
     response_character_count = Number(n) || 0;
   }
@@ -615,6 +628,13 @@ function createKeaTelemetry({ requestId } = {}) {
       response_validation_ms: Number(responseValidation.response_validation_ms) || 0,
       response_validation_exception_reason: responseValidation.response_validation_exception_reason || 'none',
       response_validation_flag_enabled: !!responseValidation.response_validation_flag_enabled,
+      response_enforcement_eligible: !!responseEnforcement.response_enforcement_eligible,
+      response_enforcement_enabled: !!responseEnforcement.response_enforcement_enabled,
+      response_enforcement_blocked: !!responseEnforcement.response_enforcement_blocked,
+      response_enforcement_reason: responseEnforcement.response_enforcement_reason || 'none',
+      response_enforcement_capability: responseEnforcement.response_enforcement_capability || 'none',
+      response_enforcement_severity: responseEnforcement.response_enforcement_severity || 'none',
+      response_enforcement_fallback_used: !!responseEnforcement.response_enforcement_fallback_used,
       last_stage: lastStage,
       client_aborted: !!clientAborted,
       azure_failure_reason: azureFailureReason,
@@ -680,6 +700,7 @@ function createKeaTelemetry({ requestId } = {}) {
     recordGrounding,
     recordEvidence,
     recordResponseValidation,
+    recordResponseEnforcement,
     setResponseCharacterCount,
     setIdentity,
     setSelectedAccountMeta,

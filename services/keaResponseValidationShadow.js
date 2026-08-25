@@ -269,12 +269,18 @@ function materialClaimCount(extracted) {
 function runShadowResponseValidation(input = {}, deps = {}) {
   const t0 = process.hrtime.bigint();
   const flagEnabled = isResponseValidationShadowEnabled();
+  const artifacts = { validation: null, contract: null, extractedClaims: null };
   function timed(overrides) {
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    return sanitizeResponseValidationTelemetry(Object.assign({
-      response_validation_flag_enabled: flagEnabled,
-      response_validation_ms: ms,
-    }, overrides));
+    return {
+      telemetry: sanitizeResponseValidationTelemetry(Object.assign({
+        response_validation_flag_enabled: flagEnabled,
+        response_validation_ms: ms,
+      }, overrides)),
+      validation: artifacts.validation,
+      contract: artifacts.contract,
+      extractedClaims: artifacts.extractedClaims,
+    };
   }
 
   try {
@@ -376,6 +382,9 @@ function runShadowResponseValidation(input = {}, deps = {}) {
         ? RESPONSE_VALIDATION_STATUS.INDETERMINATE
         : RESPONSE_VALIDATION_STATUS.VALID);
     const primary = pickPrimaryViolation(result);
+    artifacts.validation = result;
+    artifacts.contract = built.contract;
+    artifacts.extractedClaims = extracted;
     return timed({
       response_validation_performed: true,
       response_validation_shadow: true,
@@ -402,8 +411,15 @@ function runShadowResponseValidation(input = {}, deps = {}) {
 function applyShadowResponseValidation(input = {}, deps = {}) {
   const text = input && typeof input.text === 'string' ? input.text : '';
   let telemetry;
+  let validation = null;
+  let contract = null;
+  let extractedClaims = null;
   try {
-    telemetry = runShadowResponseValidation(Object.assign({}, input, { text }), deps);
+    const ran = runShadowResponseValidation(Object.assign({}, input, { text }), deps);
+    telemetry = ran && ran.telemetry ? ran.telemetry : ran;
+    validation = ran && ran.validation ? ran.validation : null;
+    contract = ran && ran.contract ? ran.contract : null;
+    extractedClaims = ran && ran.extractedClaims ? ran.extractedClaims : null;
   } catch (err) {
     telemetry = sanitizeResponseValidationTelemetry({
       response_validation_performed: true,
@@ -413,7 +429,7 @@ function applyShadowResponseValidation(input = {}, deps = {}) {
       response_validation_flag_enabled: isResponseValidationShadowEnabled(),
     });
   }
-  return { finalText: text, telemetry };
+  return { finalText: text, telemetry, validation, contract, extractedClaims };
 }
 
 module.exports = {

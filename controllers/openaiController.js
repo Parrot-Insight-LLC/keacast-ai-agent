@@ -51,6 +51,7 @@ const {
 } = require('../services/keaEvidencePromptCutover');
 const { telemetryForNonCutoverTurn, emptyEvidenceTelemetry } = require('../services/keaEvidenceTelemetry');
 const { applyShadowResponseValidation } = require('../services/keaResponseValidationShadow');
+const { applyResponseValidationEnforcement } = require('../services/keaResponseValidationEnforcement');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const {
   azureChatTimeoutMs,
@@ -4507,11 +4508,14 @@ exports.chat = async (req, res) => {
           result.content || '## ❌ No Response\n\n**Sorry, no response generated.**',
           dialogueState
         );
-    const finalText = stripCurrencyCommas(guardedContent);
+    let finalText = stripCurrencyCommas(guardedContent);
     // Phase 3C.2: observe Azure finalText against the same-request Ledger.
-    // Never mutates finalText. Never retries Azure. Never fail-softs.
+    // Phase 3C.3: optionally replace with a non-financial fallback when an
+    // approved critical/high INVALID result is enforcement-eligible.
+    // Never retries Azure. Never fail-softs validation exceptions.
+    let shadow = { finalText, telemetry: null, validation: null, contract: null, extractedClaims: null };
     try {
-      const shadow = applyShadowResponseValidation({
+      shadow = applyShadowResponseValidation({
         text: finalText,
         ledger: requestLedger,
         capability: effectiveCap,
@@ -4535,6 +4539,37 @@ exports.chat = async (req, res) => {
           response_validation_shadow: true,
           response_validation_status: 'exception',
           response_validation_exception_reason: 'validation_exception',
+        });
+      } catch (ignored) { /* never own control flow */ }
+    }
+    try {
+      const enforced = applyResponseValidationEnforcement({
+        originalText: finalText,
+        shadow,
+        capability: effectiveCap,
+        sourceKind: requestLedger && requestLedger.source && requestLedger.source.kind,
+        responseMode: responseModeFor({
+          policy: phase1Policy,
+          evidence: phase1Evidence,
+          capability: phase1Route.capability,
+          failSoft: phase1FailSoft,
+        }),
+        responseSource,
+        writeResponseMode: (result && result.writeResponseMode) || 'none',
+        simulationMode: !!simulationMode,
+        invitationWriteHandoff: !!(phase1Route && phase1Route.invitationWriteHandoff),
+        repeatWriteHandoff: !!(phase1Route && phase1Route.repeatWriteHandoff),
+        ledger: requestLedger,
+      });
+      if (enforced && typeof enforced.finalText === 'string') {
+        finalText = enforced.finalText;
+      }
+      try { telemetry.recordResponseEnforcement(enforced && enforced.telemetry); } catch (e) { /* telemetry must not own control flow */ }
+    } catch (e) {
+      try {
+        telemetry.recordResponseEnforcement({
+          response_enforcement_blocked: false,
+          response_enforcement_reason: 'fail_open',
         });
       } catch (ignored) { /* never own control flow */ }
     }
