@@ -293,7 +293,8 @@ function pickClosestDateClaim(row, extracted) {
 }
 
 function closestDateForAmount(row, extracted) {
-  if (hasHint(row && row.semanticHints, 'recurring_next_due')
+  if ((hasHint(row && row.semanticHints, 'recurring_next_due')
+    || hasHint(row && row.semanticHints, 'range_start'))
     && (row.dateIso || (row.dateMonth && row.dateDay))) {
     return {
       dateIso: row.dateIso || null,

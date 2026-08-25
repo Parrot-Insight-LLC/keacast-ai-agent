@@ -299,6 +299,67 @@ async function run() {
   check('from-to year first amount entity is June', fromYear && /^june$/i.test(fromYear.entity));
   check('from-to year second amount entity is August', toYear && /^august$/i.test(toYear.entity));
 
+  section('3C.2 extractor trend range-before-amount start date');
+  const rangeJuly = extractResponseClaims(
+    'From July 1 to July 24, 2026, you spent $11924.02.'
+  );
+  const rangeJulyAmt = amounts(rangeJuly).find((r) => r.normalizedValue === 11924.02);
+  check('range-before July entity is July', rangeJulyAmt && rangeJulyAmt.entity === 'July');
+  check('range-before July date is day 1', rangeJulyAmt && rangeJulyAmt.dateMonth === 7
+    && rangeJulyAmt.dateDay === 1);
+  check('range-before July date is not day 24', rangeJulyAmt && rangeJulyAmt.dateDay !== 24);
+  check('range-before July has range_start hint', rangeJulyAmt
+    && (rangeJulyAmt.semanticHints || []).indexOf('range_start') !== -1);
+
+  const rangeJune = extractResponseClaims(
+    'From June 1 to June 24, 2026, you spent $13002.53.'
+  );
+  const rangeJuneAmt = amounts(rangeJune).find((r) => r.normalizedValue === 13002.53);
+  check('range-before June date is day 1', rangeJuneAmt && rangeJuneAmt.dateMonth === 6
+    && rangeJuneAmt.dateDay === 1);
+
+  const rangeAugust = extractResponseClaims(
+    'From August 1 to August 24, 2026, you spent $10374.82.'
+  );
+  const rangeAugustAmt = amounts(rangeAugust).find((r) => r.normalizedValue === 10374.82);
+  check('range-before August date is day 1', rangeAugustAmt && rangeAugustAmt.dateMonth === 8
+    && rangeAugustAmt.dateDay === 1);
+
+  const rangeNewline = extractResponseClaims(
+    'From July 1 to July 24, 2026,\nMortgage: $2824.83'
+  );
+  const rangeMortgage = amounts(rangeNewline).find((r) => r.normalizedValue === 2824.83);
+  check('range-before does not cross newline onto Mortgage', rangeMortgage
+    && (rangeMortgage.semanticHints || []).indexOf('range_start') === -1
+    && rangeMortgage.dateDay !== 1);
+
+  const reversedRange = extractResponseClaims(
+    'From July 24 to July 1, 2026, you spent $11924.02.'
+  );
+  const reversedAmt = amounts(reversedRange).find((r) => r.normalizedValue === 11924.02);
+  check('reversed range keeps first date day 24', reversedAmt && reversedAmt.dateDay === 24);
+
+  const explicitWrongDay = extractResponseClaims(
+    'On July 24, spending was $11924.02.'
+  );
+  const explicitWrongAmt = amounts(explicitWrongDay).find((r) => r.normalizedValue === 11924.02);
+  check('explicit July 24 outside range keeps day 24', explicitWrongAmt
+    && explicitWrongAmt.dateMonth === 7
+    && explicitWrongAmt.dateDay === 24);
+  check('explicit July 24 has no range_start hint', explicitWrongAmt
+    && (explicitWrongAmt.semanticHints || []).indexOf('range_start') === -1);
+
+  const upcomingLabeled = extractResponseClaims('Weekly Gas: $120 on August 31');
+  const upcomingLabeledAmt = amounts(upcomingLabeled).find((r) => r.normalizedValue === 120);
+  check('labeled $X on DATE keeps August 31 without range_start', upcomingLabeledAmt
+    && upcomingLabeledAmt.dateMonth === 8
+    && upcomingLabeledAmt.dateDay === 31
+    && (upcomingLabeledAmt.semanticHints || []).indexOf('range_start') === -1);
+  const upcomingColonRange = extractResponseClaims('August 31: $120');
+  const upcomingColonAmt = amounts(upcomingColonRange).find((r) => r.normalizedValue === 120);
+  check('DATE: $X has no range_start', upcomingColonAmt
+    && (upcomingColonAmt.semanticHints || []).indexOf('range_start') === -1);
+
   section('3C.1 extractor immutability');
   const options = { foo: 1 };
   const frozenOpts = JSON.stringify(options);

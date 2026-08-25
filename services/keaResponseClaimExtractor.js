@@ -209,6 +209,54 @@ function findFromToFollowingPeriods(text, amounts, tokens) {
   return hits;
 }
 
+const RANGE_BEFORE_AMOUNT = new RegExp(
+  '\\bfrom\\s+(' + MONTH_NAME + ')\\s+(\\d{1,2})\\s+to\\s+(' + MONTH_NAME + ')\\s+(\\d{1,2})(?:,)?\\s+(\\d{4})\\b',
+  'gi'
+);
+
+function dateTokenAt(dates, start) {
+  for (let i = 0; i < dates.length; i += 1) {
+    if (dates[i] && dates[i].start === start) return dates[i];
+  }
+  return null;
+}
+
+function rangeClauseUnsafe(gap) {
+  const src = String(gap || '');
+  if (src.indexOf('\n') !== -1 || src.indexOf('\r') !== -1) return true;
+  if (/[.!?]/.test(src)) return true;
+  return false;
+}
+
+function findRangeStartForFollowingAmount(text, amounts, dates) {
+  const src = String(text || '');
+  const hits = Object.create(null);
+  RANGE_BEFORE_AMOUNT.lastIndex = 0;
+  let m;
+  while ((m = RANGE_BEFORE_AMOUNT.exec(src))) {
+    if (m[0].indexOf('\n') !== -1 || m[0].indexOf('\r') !== -1) continue;
+    if (monthNum(m[1]) !== monthNum(m[3])) continue;
+    const d1Raw = m[1] + ' ' + m[2];
+    const d1Rel = m[0].indexOf(d1Raw);
+    if (d1Rel < 0) continue;
+    const startDate = dateTokenAt(dates, m.index + d1Rel);
+    if (!startDate) continue;
+    const rangeEnd = m.index + m[0].length;
+    let best = null;
+    for (let i = 0; i < amounts.length; i += 1) {
+      const amount = amounts[i];
+      if (!amount || amount.start < rangeEnd) continue;
+      if (amount.start - rangeEnd > 96) continue;
+      if (rangeClauseUnsafe(src.slice(rangeEnd, amount.start))) continue;
+      const dist = amount.start - rangeEnd;
+      if (!best || dist < best.dist) best = { amount, dist };
+    }
+    if (!best || hits[best.amount.start]) continue;
+    hits[best.amount.start] = { entity: m[1], date: startDate };
+  }
+  return hits;
+}
+
 function pickNearbyDate(amount, dates, entity) {
   const entityMonth = monthNum(entity);
   const scored = [];
@@ -553,13 +601,17 @@ function extractResponseClaims(text, options) {
   const dates = claims.filter((c) => c.kind === CLAIM_KIND.DATE);
   const periodTokens = claims.filter((c) => c.kind === CLAIM_KIND.DATE || c.kind === CLAIM_KIND.PERIOD);
   const fromToHits = findFromToFollowingPeriods(src, amounts, periodTokens);
+  const rangeStartHits = findRangeStartForFollowingAmount(src, amounts, dates);
   for (let i = 0; i < amounts.length; i += 1) {
     const amount = amounts[i];
     const fromTo = fromToHits[amount.start];
+    const rangeStart = fromTo ? null : rangeStartHits[amount.start];
     let entity = null;
     let sameItemDate = null;
     if (fromTo) {
       entity = fromTo.entity;
+    } else if (rangeStart) {
+      entity = rangeStart.entity;
     } else {
       const before = src.slice(Math.max(0, amount.start - 64), amount.start);
       const capRe = /\b([A-Z][A-Za-z]{2,})\b/g;
@@ -571,9 +623,14 @@ function extractResponseClaims(text, options) {
     }
     const nearDate = fromTo
       ? (fromTo.date || null)
-      : (sameItemDate || pickNearbyDate(amount, dates, entity));
+      : (rangeStart
+        ? (rangeStart.date || null)
+        : (sameItemDate || pickNearbyDate(amount, dates, entity)));
     if (sameItemDate) {
       amount.semanticHints = concatHints(amount.semanticHints, ['recurring_next_due']);
+    }
+    if (rangeStart) {
+      amount.semanticHints = concatHints(amount.semanticHints, ['range_start']);
     }
     if (entity && nearDate) {
       amount.kind = CLAIM_KIND.ENTITY_AMOUNT_DATE;

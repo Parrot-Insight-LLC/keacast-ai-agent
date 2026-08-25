@@ -949,6 +949,13 @@ async function run() {
     '',
     'Your spending is trending downward, indicating you are spending less each month.',
   ].join('\n');
+  const LIVE_TREND_RANGE_TEXT = [
+    '- From June 1 to June 24, 2026, you spent $13002.53.',
+    '- From July 1 to July 24, 2026, you spent $11924.02.',
+    '- From August 1 to August 24, 2026, you spent $10374.82.',
+    '',
+    'Your spending has decreased over these three periods.',
+  ].join('\n');
 
   const liveCmpAExtracted = extractResponseClaims(LIVE_CMP_A_TEXT);
   const liveCmpA = validateResponseClaims({
@@ -1057,6 +1064,31 @@ async function run() {
     accountContext: { accountId: '10', accountLabel: 'Checking' },
   }).ledger;
   const liveTrendC = buildResponseValidationContract(liveTrendLedger).contract;
+  const rangeTrendLedger = buildTrendEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_trend'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'matched_elapsed',
+        metricScope: 'spending',
+        periods: [
+          { label: 'June 1–24, 2026', start: '2026-06-01', end: '2026-06-24', spending: 13002.53 },
+          { label: 'July 1–24, 2026', start: '2026-07-01', end: '2026-07-24', spending: 11924.02 },
+          { label: 'August 1–24, 2026', start: '2026-08-01', end: '2026-08-24', spending: 10374.82 },
+        ],
+        trend: {
+          spending: {
+            direction: 'decreasing',
+            firstToLast: { absolute: -2627.71, percent: -20.21, baselineZero: false },
+          },
+        },
+      },
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const rangeTrendC = buildResponseValidationContract(rangeTrendLedger).contract;
 
   const liveTrendD = validateResponseAgainstContract({
     contract: liveTrendC,
@@ -1450,6 +1482,237 @@ async function run() {
   });
   check('upcoming DATE: $X VALID', upcomingPrecedingDate.status === VALIDATION_STATUS.VALID);
 
+  section('3C.2 trend range-before-amount start date');
+  function rangeAmount(rows, value) {
+    return rows.find((r) => (
+      r.kind === 'amount' || r.kind === 'entity_amount' || r.kind === 'entity_amount_date'
+    ) && r.normalizedValue === value);
+  }
+  function rangePeriod(contract, iso) {
+    const rows = (contract.allowedListItems && contract.allowedListItems.periods) || [];
+    for (let i = 0; i < rows.length; i += 1) {
+      if (rows[i].date === iso) return rows[i];
+    }
+    return null;
+  }
+  function rangeClean(result, row) {
+    return !!row && !(result.violations || []).some((v) => v.extractedClaimId === row.id);
+  }
+  check('rangeTrendC has no highest/lowest scalar claims',
+    !(rangeTrendC.allowedClaims || []).some((c) => (
+      c.path === 'facts.highest.value' || c.path === 'facts.lowest.value'
+    )));
+
+  const rangeProdExtracted = extractResponseClaims(LIVE_TREND_RANGE_TEXT);
+  const rangeProd = validateResponseClaims({
+    contract: rangeTrendC,
+    extractedClaims: rangeProdExtracted,
+  });
+  const rangeJuneAmt = rangeAmount(rangeProdExtracted, 13002.53);
+  const rangeJulyAmt = rangeAmount(rangeProdExtracted, 11924.02);
+  const rangeAugustAmt = rangeAmount(rangeProdExtracted, 10374.82);
+  const junePeriod = rangePeriod(rangeTrendC, '2026-06-01');
+  const julyPeriod = rangePeriod(rangeTrendC, '2026-07-01');
+  const augustPeriod = rangePeriod(rangeTrendC, '2026-08-01');
+  check('exact production range-before-amount VALID', rangeProd.status === VALIDATION_STATUS.VALID);
+  check('exact production range-before-amount 0 violations', (rangeProd.violations || []).length === 0);
+  check('exact production range-before-amount 0 indeterminate', (rangeProd.indeterminate || []).length === 0);
+  check('production June extracted date is June 1', rangeJuneAmt
+    && rangeJuneAmt.entity === 'June'
+    && rangeJuneAmt.dateMonth === 6
+    && rangeJuneAmt.dateDay === 1);
+  check('production June date is not June 24', rangeJuneAmt && rangeJuneAmt.dateDay !== 24);
+  check('production June binds June period tuple', rangeClean(rangeProd, rangeJuneAmt)
+    && junePeriod
+    && junePeriod.amount === 13002.53
+    && junePeriod.date === '2026-06-01');
+  check('production July extracted date is July 1', rangeJulyAmt
+    && rangeJulyAmt.entity === 'July'
+    && rangeJulyAmt.dateMonth === 7
+    && rangeJulyAmt.dateDay === 1);
+  check('production July date is not July 24', rangeJulyAmt && rangeJulyAmt.dateDay !== 24);
+  check('production July binds July period tuple', rangeClean(rangeProd, rangeJulyAmt)
+    && julyPeriod
+    && julyPeriod.amount === 11924.02
+    && julyPeriod.date === '2026-07-01');
+  check('production August extracted date is August 1', rangeAugustAmt
+    && rangeAugustAmt.entity === 'August'
+    && rangeAugustAmt.dateMonth === 8
+    && rangeAugustAmt.dateDay === 1);
+  check('production August date is not August 24', rangeAugustAmt && rangeAugustAmt.dateDay !== 24);
+  check('production August binds August period tuple', rangeClean(rangeProd, rangeAugustAmt)
+    && augustPeriod
+    && augustPeriod.amount === 10374.82
+    && augustPeriod.date === '2026-08-01');
+  check('production range-before-amount no LIST_ITEM_MISMATCH',
+    !hasCode(rangeProd, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const juneIsoText = 'From June 1 to June 24, 2026, you spent $13002.53.';
+  const juneIsoExtracted = extractResponseClaims(juneIsoText);
+  const juneIso = validateResponseClaims({
+    contract: rangeTrendC,
+    extractedClaims: juneIsoExtracted,
+  });
+  const juneIsoAmt = rangeAmount(juneIsoExtracted, 13002.53);
+  check('isolated June range-before-amount VALID', juneIso.status === VALIDATION_STATUS.VALID
+    && (juneIso.violations || []).length === 0
+    && (juneIso.indeterminate || []).length === 0);
+  check('isolated June amount date is June 1', juneIsoAmt
+    && juneIsoAmt.dateMonth === 6
+    && juneIsoAmt.dateDay === 1);
+  check('isolated June binds June period identity', rangeClean(juneIso, juneIsoAmt)
+    && junePeriod && junePeriod.date === '2026-06-01');
+
+  const julyIsoText = 'From July 1 to July 24, 2026, you spent $11924.02.';
+  const julyIsoExtracted = extractResponseClaims(julyIsoText);
+  const julyIso = validateResponseClaims({
+    contract: rangeTrendC,
+    extractedClaims: julyIsoExtracted,
+  });
+  const julyIsoAmt = rangeAmount(julyIsoExtracted, 11924.02);
+  check('isolated July range-before-amount VALID', julyIso.status === VALIDATION_STATUS.VALID
+    && (julyIso.violations || []).length === 0
+    && (julyIso.indeterminate || []).length === 0);
+  check('isolated July amount date is July 1', julyIsoAmt
+    && julyIsoAmt.dateMonth === 7
+    && julyIsoAmt.dateDay === 1);
+  check('isolated July binds July period identity', rangeClean(julyIso, julyIsoAmt)
+    && julyPeriod && julyPeriod.date === '2026-07-01');
+
+  const augustIsoText = 'From August 1 to August 24, 2026, you spent $10374.82.';
+  const augustIsoExtracted = extractResponseClaims(augustIsoText);
+  const augustIso = validateResponseClaims({
+    contract: rangeTrendC,
+    extractedClaims: augustIsoExtracted,
+  });
+  const augustIsoAmt = rangeAmount(augustIsoExtracted, 10374.82);
+  check('isolated August range-before-amount VALID', augustIso.status === VALIDATION_STATUS.VALID
+    && (augustIso.violations || []).length === 0
+    && (augustIso.indeterminate || []).length === 0);
+  check('isolated August amount date is August 1', augustIsoAmt
+    && augustIsoAmt.dateMonth === 8
+    && augustIsoAmt.dateDay === 1);
+  check('isolated August binds August period identity', rangeClean(augustIso, augustIsoAmt)
+    && augustPeriod && augustPeriod.date === '2026-08-01');
+
+  const compactRangeText = [
+    '- June 1–24, 2026: $13002.53',
+    '- July 1–24, 2026: $11924.02',
+    '- August 1–24, 2026: $10374.82',
+  ].join('\n');
+  const compactRange = validateResponseAgainstContract({
+    contract: rangeTrendC,
+    text: compactRangeText,
+  });
+  check('compact June 1–24 VALID', compactRange.status === VALIDATION_STATUS.VALID);
+  check('compact July 1–24 VALID', compactRange.status === VALIDATION_STATUS.VALID);
+  check('compact August 1–24 VALID', compactRange.status === VALIDATION_STATUS.VALID
+    && (compactRange.violations || []).length === 0
+    && (compactRange.indeterminate || []).length === 0);
+
+  const fromToRangeReg = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: LIVE_TREND_FROM_TO_TEXT,
+  });
+  check('previous from-to trend remains VALID', fromToRangeReg.status === VALIDATION_STATUS.VALID
+    && (fromToRangeReg.violations || []).length === 0
+    && (fromToRangeReg.indeterminate || []).length === 0);
+
+  const caseDRangeReg = validateResponseAgainstContract({
+    contract: liveTrendC,
+    text: LIVE_TREND_D_TEXT,
+  });
+  check('Case D decreased-to/decreased-by remains VALID', caseDRangeReg.status === VALIDATION_STATUS.VALID
+    && (caseDRangeReg.violations || []).length === 0
+    && (caseDRangeReg.indeterminate || []).length === 0);
+
+  const wrongRangeMonth = validateResponseAgainstContract({
+    contract: rangeTrendC,
+    text: 'From June 1 to June 24, 2026, you spent $11924.02.',
+  });
+  check('wrong range month INVALID', wrongRangeMonth.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongRangeMonth, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const wrongRangeAmount = validateResponseAgainstContract({
+    contract: rangeTrendC,
+    text: 'From July 1 to July 24, 2026, you spent $10374.82.',
+  });
+  check('wrong amount for range INVALID', wrongRangeAmount.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongRangeAmount, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const wrongRangeCents = validateResponseAgainstContract({
+    contract: rangeTrendC,
+    text: 'From July 1 to July 24, 2026, you spent $11925.02.',
+  });
+  check('wrong cents INVALID', wrongRangeCents.status === VALIDATION_STATUS.INVALID);
+
+  const explicitJuly24 = validateResponseAgainstContract({
+    contract: rangeTrendC,
+    text: 'On July 24, spending was $11924.02.',
+  });
+  check('explicit July 24 outside range INVALID', explicitJuly24.status === VALIDATION_STATUS.INVALID
+    && hasCode(explicitJuly24, VIOLATION_CODE.LIST_ITEM_MISMATCH));
+
+  const reversedRangeVal = validateResponseAgainstContract({
+    contract: rangeTrendC,
+    text: 'From July 24 to July 1, 2026, you spent $11924.02.',
+  });
+  check('malformed reversed range not authorized', reversedRangeVal.status === VALIDATION_STATUS.INVALID);
+
+  const rangeUpcomingOn = validateResponseAgainstContract({
+    contract: liveE,
+    text: '$120 on August 24',
+  });
+  check('range-before upcoming $X on DATE regression VALID', rangeUpcomingOn.status === VALIDATION_STATUS.VALID);
+  const rangeUpcomingColon = validateResponseAgainstContract({
+    contract: liveE,
+    text: 'August 24: $120',
+  });
+  check('range-before upcoming DATE: $X regression VALID', rangeUpcomingColon.status === VALIDATION_STATUS.VALID);
+
+  const rangeRecurring = validateResponseAgainstContract({
+    contract: caseFC,
+    text: LIVE_CASE_F_TEXT,
+  });
+  check('range-before recurring Case F remains VALID', rangeRecurring.status === VALIDATION_STATUS.VALID
+    && (rangeRecurring.violations || []).length === 0
+    && (rangeRecurring.indeterminate || []).length === 0);
+
+  const rangeCmpAbs = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'The spending decreased by $2093.47.',
+  });
+  check('range-before comparison absolute-change VALID', rangeCmpAbs.status === VALIDATION_STATUS.VALID);
+  const rangeCmpNearly14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by nearly 14%.',
+  });
+  check('range-before comparison 14% negative INVALID', rangeCmpNearly14.status === VALIDATION_STATUS.INVALID
+    && hasCode(rangeCmpNearly14, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+
+  const rangeBalance = validateResponseAgainstContract({
+    contract: snapC,
+    text: 'Your available balance is $4846.97.',
+  });
+  check('range-before available-balance regression VALID', rangeBalance.status === VALIDATION_STATUS.VALID);
+  const rangeTarget = validateResponseAgainstContract({
+    contract: lookupC,
+    text: 'You spent $279.58 at Target.',
+  });
+  check('range-before Target exact regression VALID', rangeTarget.status === VALIDATION_STATUS.VALID);
+  const rangeTargetWrong = validateResponseAgainstContract({
+    contract: lookupC,
+    text: 'You spent $280 at Target.',
+  });
+  check('range-before Target wrong-value INVALID', rangeTargetWrong.status === VALIDATION_STATUS.INVALID);
+  const rangeForecast = validateResponseAgainstContract({
+    contract: snapC,
+    text: LIVE_C_TEXT,
+  });
+  check('range-before forecast unsupported-derivation remains INVALID', rangeForecast.status === VALIDATION_STATUS.INVALID
+    && (hasCode(rangeForecast, VIOLATION_CODE.UNSUPPORTED_DERIVATION)
+      || hasCode(rangeForecast, VIOLATION_CODE.UNSUPPORTED_FORECAST)));
+
   const trendToReg = validateResponseAgainstContract({
     contract: liveTrendC,
     text: 'In July 1–24, 2026, spending decreased to $11924.02.',
@@ -1616,9 +1879,18 @@ async function run() {
   }
   const upcomingOnMs = Number(process.hrtime.bigint() - tUpcomingOn) / 1e6;
   console.log(`  1000 upcoming $X on DATE extract+validate: ${upcomingOnMs.toFixed(2)}ms total, ${(upcomingOnMs / 1000).toFixed(3)}ms avg`);
-  check('production trend / Case D / upcoming 1000-run benchmarks completed', Number.isFinite(prodTrendMs)
+
+  const tRangeBefore = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_TREND_RANGE_TEXT);
+    validateResponseAgainstContract({ contract: rangeTrendC, text: LIVE_TREND_RANGE_TEXT });
+  }
+  const rangeBeforeMs = Number(process.hrtime.bigint() - tRangeBefore) / 1e6;
+  console.log(`  1000 exact production range-before-amount extract+validate: ${rangeBeforeMs.toFixed(2)}ms total, ${(rangeBeforeMs / 1000).toFixed(3)}ms avg`);
+  check('production trend / Case D / upcoming / range-before 1000-run benchmarks completed', Number.isFinite(prodTrendMs)
     && Number.isFinite(caseDBenchMs)
-    && Number.isFinite(upcomingOnMs));
+    && Number.isFinite(upcomingOnMs)
+    && Number.isFinite(rangeBeforeMs));
 
   section('3C.1 validator performance 1000 runs');
   const t0 = process.hrtime.bigint();
