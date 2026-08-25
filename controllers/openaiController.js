@@ -289,10 +289,18 @@ function stripCurrencyCommas(text) {
   return text.replace(/\$-?\d{1,3}(?:,\d{3})+(?:\.\d+)?/g, (m) => m.replace(/,/g, ''));
 }
 
+// Plaid dates are YYYY-MM-DD; Keacast `start`/`date` are often YYYY/MM/DD.
+// Passing an explicit format avoids Moment's JS Date() fallback deprecation.
+const DATE_ONLY_FORMATS = ['YYYY-MM-DD', 'YYYY/MM/DD'];
+
+function parseDateOnly(value) {
+  if (value == null || value === '') return moment.invalid();
+  return moment(value, DATE_ONLY_FORMATS, true);
+}
+
 function shortDate(value) {
   if (!value) return '';
-  // Accept either Plaid `date` or Keacast `start` (both YYYY-MM-DD strings).
-  const m = moment(value);
+  const m = parseDateOnly(value);
   return m.isValid() ? m.format('MMM D') : '';
 }
 
@@ -326,8 +334,8 @@ function pickRecentTransactions(account, limit = 6) {
     for (const t of account.plaidTransactions) flat.push(t);
   }
   flat.sort((a, b) => {
-    const da = moment(a?.date || a?.start || a?.authorized_date || 0).valueOf();
-    const db = moment(b?.date || b?.start || b?.authorized_date || 0).valueOf();
+    const da = parseDateOnly(a?.date || a?.start || a?.authorized_date).valueOf() || 0;
+    const db = parseDateOnly(b?.date || b?.start || b?.authorized_date).valueOf() || 0;
     return db - da;
   });
   return flat.slice(0, limit).map(compactTxnLine).filter(Boolean);
