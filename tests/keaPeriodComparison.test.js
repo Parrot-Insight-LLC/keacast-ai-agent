@@ -57,9 +57,9 @@ function sampleComparisonResult(body = {}) {
       transactionCount: 7,
     },
     changes: {
-      income: { absolute: 600, percent: 12, baselineZero: false },
-      spending: { absolute: -420, percent: -10, baselineZero: false },
-      net: { absolute: 1020, percent: 127.5, baselineZero: false },
+      income: { absolute: 600, percent: 12, baselineZero: false, direction: 'increased' },
+      spending: { absolute: -420, percent: -10, baselineZero: false, direction: 'decreased' },
+      net: { absolute: 1020, percent: 127.5, baselineZero: false, direction: 'improved' },
     },
     categoryChanges: {
       topIncreases: [{ category: 'Dining', periodA: 300, periodB: 480, absolute: 180, percent: 60, baselineZero: false }],
@@ -247,6 +247,7 @@ async function run() {
           baselineZero: false,
           crossedZero: true,
           crossing: 'positive_to_negative',
+          direction: 'worsened',
         },
       },
     },

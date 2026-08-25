@@ -210,9 +210,9 @@ function sampleComparisonResult() {
       transactionCount: 7,
     },
     changes: {
-      income: { absolute: 600, percent: 12, baselineZero: false },
-      spending: { absolute: -420, percent: -10, baselineZero: false },
-      net: { absolute: 1020, percent: 127.5, baselineZero: false },
+      income: { absolute: 600, percent: 12, baselineZero: false, direction: 'increased' },
+      spending: { absolute: -420, percent: -10, baselineZero: false, direction: 'decreased' },
+      net: { absolute: 1020, percent: 127.5, baselineZero: false, direction: 'improved' },
     },
     observations: [
       { code: 'spending_decreased' },
@@ -629,11 +629,14 @@ async function run() {
   assertLedgerFactParity('comparison', cmpClone.facts, cmp.facts, [
     'periodA.income', 'periodA.spending', 'periodA.net',
     'periodB.income', 'periodB.spending', 'periodB.net',
-    'changes.income.absolute', 'changes.income.percent',
-    'changes.spending.absolute', 'changes.spending.percent',
-    'changes.net.absolute', 'changes.net.percent',
+    'changes.income.absolute', 'changes.income.percent', 'changes.income.direction',
+    'changes.spending.absolute', 'changes.spending.percent', 'changes.spending.direction',
+    'changes.net.absolute', 'changes.net.percent', 'changes.net.direction',
     'changes.income.baselineZero',
   ]);
+  check('comparison spending DIRECTION claim', claimByPath(cmp, 'facts.changes.spending.direction')
+    && claimByPath(cmp, 'facts.changes.spending.direction').type === 'DIRECTION'
+    && claimByPath(cmp, 'facts.changes.spending.direction').value === 'decreased');
   recordSize('comparison', cmp);
 
   const nullPct = buildComparisonEvidenceLedger({
@@ -645,9 +648,9 @@ async function run() {
         periodA: { start: '2026-06-01', end: '2026-06-30', income: 0, spending: 0, net: 0 },
         periodB: { start: '2026-07-01', end: '2026-07-31', income: 100, spending: 50, net: 50 },
         changes: {
-          income: { absolute: 100, percent: null, baselineZero: true },
-          spending: { absolute: 50, percent: null, baselineZero: true },
-          net: { absolute: 50, percent: null, baselineZero: true, crossedZero: false },
+          income: { absolute: 100, percent: null, baselineZero: true, direction: 'increased' },
+          spending: { absolute: 50, percent: null, baselineZero: true, direction: 'increased' },
+          net: { absolute: 50, percent: null, baselineZero: true, crossedZero: false, direction: 'improved' },
         },
       },
       observations: [],

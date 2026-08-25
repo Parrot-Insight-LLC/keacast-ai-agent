@@ -613,11 +613,12 @@ async function run() {
           net: -12916.99,
         },
         changes: {
-          income: { absolute: 0, percent: 0, direction: 'unchanged', baselineZero: false },
+          income: { absolute: 0, percent: 0, baselineZero: false },
           spending: { absolute: -2093.47, percent: -13.95, direction: 'decreased', baselineZero: false },
           net: { absolute: 2093.47, percent: 13.95, direction: 'improved', baselineZero: false },
         },
       },
+      observations: [{ code: 'spending_decreased' }, { code: 'net_improved' }],
       limitations: [],
     },
     accountContext: { accountId: '10', accountLabel: 'Checking' },
@@ -734,23 +735,24 @@ async function run() {
           start: '2026-06-01',
           end: '2026-06-30',
           income: 0,
-          spending: 15010.46,
-          net: -15010.46,
+          spending: 12916.99,
+          net: -12916.99,
         },
         periodB: {
           label: 'July 2026',
           start: '2026-07-01',
           end: '2026-07-31',
           income: 0,
-          spending: 12916.99,
-          net: -12916.99,
+          spending: 15010.46,
+          net: -15010.46,
         },
         changes: {
-          income: { absolute: 0, percent: 0, direction: 'unchanged', baselineZero: false },
+          income: { absolute: 0, percent: 0, baselineZero: false },
           spending: { absolute: 2093.47, percent: 13.95, direction: 'increased', baselineZero: false },
-          net: { absolute: 2093.47, percent: 13.95, direction: 'improved', baselineZero: false },
+          net: { absolute: -2093.47, percent: -13.95, direction: 'worsened', baselineZero: false },
         },
       },
+      observations: [{ code: 'spending_increased' }, { code: 'net_worsened' }],
       limitations: [],
     },
     accountContext: { accountId: '10', accountLabel: 'Checking' },
@@ -843,6 +845,165 @@ async function run() {
     text: 'The absolute decrease in spending was $2093.47.',
   });
   check('absolute decrease vs increased contract not VALID', absDecWrongDir.status !== VALIDATION_STATUS.VALID);
+
+  section('3C.2 comparison direction authority projection');
+  const LIVE_CMP_DIR_TEXT = 'Your spending decreased by 13.95% in July 2026 compared to June 2026.';
+  const LIVE_CMP_DIR_WRONG = 'Your spending increased by 13.95% in July 2026 compared to June 2026.';
+  const LIVE_CMP_DIR_FULL = [
+    '- Your spending in June 2026 was $15010.46.',
+    '- Your spending in July 2026 was $12916.99.',
+    '- The spending decreased by $2093.47.',
+    '- This represents a 13.95% decrease in spending from June to July 2026.',
+  ].join('\n');
+  const LIVE_CMP_DIR_FULL_14 = `${LIVE_CMP_DIR_FULL}\nYour spending dropped by nearly 14%.`;
+
+  check('production-shaped spending DIRECTION claim',
+    (comparisonLedger.claims || []).some((c) => c.type === 'DIRECTION'
+      && c.path === 'facts.changes.spending.direction'
+      && c.value === 'decreased'));
+  check('contract authorizes spending decreased',
+    comparisonC.allowedClaims.some((c) => c.type === 'DIRECTION'
+      && c.path === 'facts.changes.spending.direction'
+      && c.value === 'decreased'
+      && c.semanticRole === 'direction'));
+  check('no synthetic unchanged direction',
+    !comparisonC.allowedClaims.some((c) => c.type === 'DIRECTION' && c.value === 'unchanged'));
+  check('no income direction when income absolute is 0',
+    !comparisonC.allowedClaims.some((c) => c.type === 'DIRECTION' && /income/.test(c.path || '')));
+
+  const compactDir = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: LIVE_CMP_DIR_TEXT,
+  });
+  check('compact live decreased 13.95 VALID', compactDir.status === VALIDATION_STATUS.VALID);
+  check('compact live 0 violations', (compactDir.violations || []).length === 0);
+  check('compact live 0 indeterminate', (compactDir.indeterminate || []).length === 0);
+  check('compact live no_direction_claim gone',
+    !(compactDir.indeterminate || []).some((row) => row.reasonCode === 'no_direction_claim'));
+
+  const compactWrong = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: LIVE_CMP_DIR_WRONG,
+  });
+  check('wrong increased vs decreased INVALID', compactWrong.status === VALIDATION_STATUS.INVALID
+    && hasCode(compactWrong, VIOLATION_CODE.UNAUTHORIZED_DIRECTION));
+
+  const compactPct = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by 13.95%.',
+  });
+  check('exact 13.95 remains VALID', compactPct.status === VALIDATION_STATUS.VALID
+    && (compactPct.indeterminate || []).length === 0);
+
+  const compact14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by 14%.',
+  });
+  check('14% remains INVALID', compact14.status === VALIDATION_STATUS.INVALID
+    && hasCode(compact14, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+  check('14% direction still binds',
+    !(compact14.indeterminate || []).some((row) => row.reasonCode === 'no_direction_claim'));
+
+  const compactNearly14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by nearly 14%.',
+  });
+  check('nearly 14% remains INVALID', compactNearly14.status === VALIDATION_STATUS.INVALID
+    && hasCode(compactNearly14, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+
+  const compactAbs = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by $2093.47.',
+  });
+  check('$2093.47 remains VALID', compactAbs.status === VALIDATION_STATUS.VALID
+    && (compactAbs.indeterminate || []).length === 0);
+
+  const compactWrongAbs = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending decreased by $2094.47.',
+  });
+  check('wrong $2094.47 remains INVALID', compactWrongAbs.status === VALIDATION_STATUS.INVALID);
+
+  const fullDir = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: LIVE_CMP_DIR_FULL,
+  });
+  check('full comparison without approximation VALID', fullDir.status === VALIDATION_STATUS.VALID
+    && (fullDir.violations || []).length === 0
+    && (fullDir.indeterminate || []).length === 0);
+
+  const fullDir14 = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: LIVE_CMP_DIR_FULL_14,
+  });
+  check('full comparison with nearly 14% INVALID', fullDir14.status === VALIDATION_STATUS.INVALID
+    && hasCode(fullDir14, VIOLATION_CODE.UNSUPPORTED_COMPARISON));
+  check('full 14% has no direction indeterminate',
+    !(fullDir14.indeterminate || []).some((row) => row.reasonCode === 'no_direction_claim'));
+
+  const increasedOk = validateResponseAgainstContract({
+    contract: comparisonIncreaseC,
+    text: 'Your spending increased by 13.95% in July 2026 compared to June 2026.',
+  });
+  check('increased vs increased authority VALID', increasedOk.status === VALIDATION_STATUS.VALID
+    && (increasedOk.indeterminate || []).length === 0);
+  const increasedWrong = validateResponseAgainstContract({
+    contract: comparisonIncreaseC,
+    text: 'Your spending decreased by 13.95% in July 2026 compared to June 2026.',
+  });
+  check('decreased vs increased authority INVALID', increasedWrong.status === VALIDATION_STATUS.INVALID
+    && hasCode(increasedWrong, VIOLATION_CODE.UNAUTHORIZED_DIRECTION));
+
+  const dualMetricLedger = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'matched_elapsed',
+        periodA: {
+          label: 'July 1–16, 2026',
+          start: '2026-07-01',
+          end: '2026-07-16',
+          income: 5000,
+          spending: 4200,
+          net: 800,
+        },
+        periodB: {
+          label: 'August 1–16, 2026',
+          start: '2026-08-01',
+          end: '2026-08-16',
+          income: 5600,
+          spending: 3780,
+          net: 1820,
+        },
+        changes: {
+          income: { absolute: 600, percent: 12, direction: 'increased', baselineZero: false },
+          spending: { absolute: -420, percent: -10, direction: 'decreased', baselineZero: false },
+          net: { absolute: 1020, percent: 127.5, direction: 'improved', baselineZero: false },
+        },
+      },
+      observations: [
+        { code: 'spending_decreased' },
+        { code: 'income_increased' },
+        { code: 'net_improved' },
+      ],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const dualMetricC = buildResponseValidationContract(dualMetricLedger).contract;
+  const incomeWrongPolarity = validateResponseAgainstContract({
+    contract: dualMetricC,
+    text: 'Your income decreased by 12%.',
+  });
+  check('income decreased does not bind spending decreased', incomeWrongPolarity.status !== VALIDATION_STATUS.VALID);
+  const spendingOkDual = validateResponseAgainstContract({
+    contract: dualMetricC,
+    text: 'Your spending decreased by 10%.',
+  });
+  check('spending decreased binds spending authority', spendingOkDual.status === VALIDATION_STATUS.VALID
+    && (spendingOkDual.indeterminate || []).length === 0);
 
   section('3C.2 trend period and first-to-last goldens');
   const trendLedger = buildTrendEvidenceLedger({
@@ -1769,6 +1930,32 @@ async function run() {
   }
   const cmpMs = Number(process.hrtime.bigint() - tCmp) / 1e6;
   console.log(`  1000 comparison extract+validate: ${cmpMs.toFixed(2)}ms total, ${(cmpMs / 1000).toFixed(3)}ms avg`);
+
+  const tCmpDir = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_CMP_DIR_TEXT);
+    validateResponseAgainstContract({ contract: comparisonC, text: LIVE_CMP_DIR_TEXT });
+  }
+  const cmpDirMs = Number(process.hrtime.bigint() - tCmpDir) / 1e6;
+  console.log(`  1000 compact comparison direction: ${cmpDirMs.toFixed(2)}ms total, ${(cmpDirMs / 1000).toFixed(3)}ms avg`);
+
+  const tCmpFull = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_CMP_DIR_FULL);
+    validateResponseAgainstContract({ contract: comparisonC, text: LIVE_CMP_DIR_FULL });
+  }
+  const cmpFullMs = Number(process.hrtime.bigint() - tCmpFull) / 1e6;
+  console.log(`  1000 full comparison direction: ${cmpFullMs.toFixed(2)}ms total, ${(cmpFullMs / 1000).toFixed(3)}ms avg`);
+
+  const tCmpWrong = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    extractResponseClaims(LIVE_CMP_DIR_WRONG);
+    validateResponseAgainstContract({ contract: comparisonC, text: LIVE_CMP_DIR_WRONG });
+  }
+  const cmpWrongMs = Number(process.hrtime.bigint() - tCmpWrong) / 1e6;
+  console.log(`  1000 wrong-direction comparison: ${cmpWrongMs.toFixed(2)}ms total, ${(cmpWrongMs / 1000).toFixed(3)}ms avg`);
+  check('comparison direction 1000-run benchmarks completed',
+    Number.isFinite(cmpDirMs) && Number.isFinite(cmpFullMs) && Number.isFinite(cmpWrongMs));
 
   const tTr = process.hrtime.bigint();
   for (let i = 0; i < 1000; i += 1) {

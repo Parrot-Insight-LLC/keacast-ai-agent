@@ -199,9 +199,9 @@ function sampleComparison(extra = {}) {
     periodA: { label: 'July 1–16, 2026', start: '2026-07-01', end: '2026-07-16', income: 5000, spending: 4200, net: 800, transactionCount: 8 },
     periodB: { label: 'August 1–16, 2026', start: '2026-08-01', end: '2026-08-16', income: 5600, spending: 3780, net: 1820, transactionCount: 7 },
     changes: {
-      income: { absolute: 600, percent: 12, baselineZero: false },
-      spending: { absolute: -420, percent: -10, baselineZero: false },
-      net: { absolute: 1020, percent: 127.5, baselineZero: false, crossedZero: false },
+      income: { absolute: 600, percent: 12, baselineZero: false, direction: 'increased' },
+      spending: { absolute: -420, percent: -10, baselineZero: false, direction: 'decreased' },
+      net: { absolute: 1020, percent: 127.5, baselineZero: false, crossedZero: false, direction: 'improved' },
     },
     observations: [{ code: 'spending_decreased' }, { code: 'income_increased' }, { code: 'net_improved' }],
     limitations: [],

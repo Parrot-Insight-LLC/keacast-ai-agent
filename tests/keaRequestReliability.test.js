@@ -124,9 +124,9 @@ function sampleComparisonResult() {
       income: 5600, spending: 3780, net: 1820,
     },
     changes: {
-      income: { absolute: 600, percent: 12, baselineZero: false },
-      spending: { absolute: -420, percent: -10, baselineZero: false },
-      net: { absolute: 1020, percent: 127.5, baselineZero: false },
+      income: { absolute: 600, percent: 12, baselineZero: false, direction: 'increased' },
+      spending: { absolute: -420, percent: -10, baselineZero: false, direction: 'decreased' },
+      net: { absolute: 1020, percent: 127.5, baselineZero: false, direction: 'improved' },
     },
     observations: [{ code: 'spending_decreased' }, { code: 'net_improved' }],
     limitations: [],
