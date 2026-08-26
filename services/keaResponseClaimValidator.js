@@ -15,6 +15,11 @@ const {
   LIST_COVERAGE,
 } = require('./keaResponseValidationContract');
 const { CLAIM_KIND, extractResponseClaims } = require('./keaResponseClaimExtractor');
+const {
+  isSnapshotSemanticValidationEnabled,
+  isSnapshotContract,
+  evaluateSnapshotSemanticIdentity,
+} = require('./keaSnapshotSemanticValidation');
 
 function toCents(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -641,7 +646,8 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
       if (hasHint(hints, 'income') && !hasHint(hints, 'expense') && matches.length) {
         const incomeMatches = matches.filter(isIncomePath);
         const expenseOnly = matches.length && incomeMatches.length === 0 && matches.every(isExpensePath);
-        if (expenseOnly) {
+        if (expenseOnly
+          && !(isSnapshotSemanticValidationEnabled() && isSnapshotContract(contract))) {
           addViolation(
             VIOLATION_CODE.UNSUPPORTED_AMOUNT,
             SEVERITY.CRITICAL,
@@ -825,6 +831,29 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
             'preview_list_does_not_establish_total'
           );
           amountCheck = 'invalid';
+          continue;
+        }
+      }
+
+      if (isSnapshotSemanticValidationEnabled()) {
+        const semantic = evaluateSnapshotSemanticIdentity({
+          contract,
+          row,
+          extracted,
+          matches,
+          amountCandidates,
+          boundHit: listBound ? boundHit : null,
+        });
+        if (semantic && semantic.mismatch) {
+          addViolation(
+            VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH,
+            SEVERITY.HIGH,
+            row,
+            semantic.evidenceClaimId || (matches[0] && matches[0].claimId) || null,
+            semantic.reason
+          );
+          amountCheck = 'invalid';
+          bindingCheck = 'invalid';
           continue;
         }
       }

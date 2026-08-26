@@ -624,6 +624,99 @@ async function run() {
     check('unset returns azure text', unset.enforced.finalText === LIVE_C_TEXT);
   });
 
+  section('3C.4 Slice 2 enforcement isolation');
+  const {
+    SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY,
+    SNAPSHOT_SEMANTIC_REASON,
+  } = require('../services/keaSnapshotSemanticValidation');
+  withFlag(SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY, 'true', () => {
+    withEnforcement('true', () => {
+      const onlySemantic = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'financial_forecast',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [{
+              code: VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH,
+              severity: SEVERITY.CRITICAL,
+              reasonCode: SNAPSHOT_SEMANTIC_REASON.WINDOW_HORIZON_MISMATCH,
+            }],
+          },
+        },
+      });
+      check('semantic-only not blocked', onlySemantic.block === false);
+      check('semantic-only not eligible family',
+        onlySemantic.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+      const mixed = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'financial_forecast',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [
+              {
+                code: VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH,
+                severity: SEVERITY.HIGH,
+                reasonCode: SNAPSHOT_SEMANTIC_REASON.WINDOW_HORIZON_MISMATCH,
+              },
+              {
+                code: VIOLATION_CODE.UNSUPPORTED_DERIVATION,
+                severity: SEVERITY.CRITICAL,
+                reasonCode: 'unauthorized_derived_amount',
+              },
+            ],
+          },
+        },
+      });
+      check('mixed semantic+derivation still blocked', mixed.block === true);
+
+      const liveC = enforceTurn(LIVE_C_TEXT, {
+        ledger: snapshotLedger,
+        capability: 'financial_forecast',
+      });
+      check('LIVE_C still blocked with Slice 2 ON', liveC.enforced.decision.block === true);
+      check('LIVE_C still fallback', liveC.enforced.finalText === RESPONSE_VALIDATION_FALLBACK);
+      check('LIVE_C one validation pass', liveC.validateCalls === 1);
+      check('LIVE_C zero extra extract', liveC.extractCalls === 1);
+
+      const sept = enforceTurn('September expenses will total $1134.56.', {
+        ledger: snapshotLedger,
+        capability: 'financial_forecast',
+      });
+      check('September 15-day invalid in shadow',
+        sept.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+      check('September 15-day not blocked', sept.enforced.decision.block === false);
+      check('September original reaches user', sept.enforced.finalText === 'September expenses will total $1134.56.');
+      check('September primary semantic',
+        sept.shadow.telemetry.response_validation_primary_violation === VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH);
+    });
+  });
+  withFlag(SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY, 'false', () => {
+    withEnforcement('true', () => {
+      const liveC = enforceTurn(LIVE_C_TEXT, {
+        ledger: snapshotLedger,
+        capability: 'financial_forecast',
+      });
+      check('Slice 2 OFF does not disable 3C.3', liveC.enforced.decision.block === true);
+    });
+  });
+
   section('3C.3 telemetry privacy');
   withEnforcement('true', () => {
     const t = createKeaTelemetry({ requestId: 'enf-1' });

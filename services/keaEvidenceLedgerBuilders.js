@@ -1013,6 +1013,9 @@ function buildSnapshotEvidenceLedger(input) {
   if (factsIn.monthExpenses !== undefined) {
     claims.add('TOTAL', 'facts.monthExpenses', factsIn.monthExpenses, CLAIM_UNITS.USD);
   }
+  if (factsIn.monthNet !== undefined) {
+    claims.add('TOTAL', 'facts.monthNet', factsIn.monthNet, CLAIM_UNITS.USD);
+  }
 
   // Compact snapshot caps (keaAccountSnapshot). Index only; do not recap or sort.
   const lists = {};

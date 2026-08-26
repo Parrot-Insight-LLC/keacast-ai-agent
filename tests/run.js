@@ -38,6 +38,7 @@ const suites = [
   './keaResponseValidationContract.test.js',
   './keaResponseClaimExtractor.test.js',
   './keaResponseClaimValidator.test.js',
+  './keaSnapshotSemanticValidation.test.js',
   './keaResponseValidationShadow.test.js',
   './keaResponseValidationEnforcement.test.js',
   './keaConversationCapsule.test.js',
