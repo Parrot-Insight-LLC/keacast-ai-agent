@@ -314,12 +314,17 @@ function spokenSnapshotSemantics(row, extracted) {
   spoken.upcomingExpense = upcomingExpense;
   spoken.upcomingIncome = upcomingIncome;
 
+  const localExpense = /\b(expenses?|bills?)\b/i.test(nearby);
+  const localIncome = /\bincome\b/i.test(nearby);
+  const localBalance = /\bbalance\b/i.test(nearby) || hasHint(hints, 'balance');
+
   if (/\bnet\b/i.test(nearby) && !/\bnetflix\b/i.test(nearby)) spoken.metric = 'net';
   else if (spoken.upcomingExpense) spoken.metric = 'expense';
   else if (spoken.upcomingIncome) spoken.metric = 'income';
-  else if (hasHint(hints, 'expense') && !hasHint(hints, 'income')) spoken.metric = 'expense';
-  else if (hasHint(hints, 'income') && !hasHint(hints, 'expense')) spoken.metric = 'income';
   else if (spoken.balanceRole) spoken.metric = 'balance';
+  else if (localExpense && !localIncome) spoken.metric = 'expense';
+  else if (localIncome && !localExpense) spoken.metric = 'income';
+  else if (localBalance) spoken.metric = 'balance';
 
   const relatives = nearbyTokens(row, extracted, [CLAIM_KIND.RELATIVE_PERIOD]);
   for (let i = 0; i < relatives.length; i += 1) {

@@ -358,6 +358,33 @@ async function run() {
     check('O available VALID', validate(roles, 'Your available balance is $100.').status === VALIDATION_STATUS.VALID);
     check('P current VALID', validate(roles, 'Your current balance is $200.').status === VALIDATION_STATUS.VALID);
     check('Q reconciled VALID', validate(roles, 'Your reconciled balance is $300.').status === VALIDATION_STATUS.VALID);
+    check('available right now VALID',
+      validate(roles, 'Your available balance is $100 right now.').status === VALIDATION_STATUS.VALID);
+    check('currently have available VALID',
+      validate(roles, 'You currently have an available balance of $100.').status === VALIDATION_STATUS.VALID);
+    check('available plus spending explanation VALID', validate(roles, [
+      'Your available balance is $100.',
+      'This is the amount currently accessible for spending or withdrawal.',
+    ].join(' ')).status === VALIDATION_STATUS.VALID);
+
+    const liveAvailLedger = buildFactsLedger({
+      availableBalance: 2207.75,
+      currentBalance: 2500,
+      reconciledBalance: 2600,
+      upcomingExpenseTotal: 600,
+      upcomingIncomeTotal: 700,
+    });
+    const liveAvailText = [
+      'Your available balance in the Main Account at Wells Fargo is $2207.75.',
+      '',
+      'This is the amount currently accessible for spending or withdrawal.',
+    ].join('\n');
+    const liveAvail = validate(liveAvailLedger, liveAvailText);
+    check('live available + spending explanation VALID', liveAvail.status === VALIDATION_STATUS.VALID);
+    check('live available no SNAPSHOT_SEMANTIC_MISMATCH',
+      !hasCode(liveAvail, VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH));
+    check('minimal available 2207.75 VALID',
+      validate(liveAvailLedger, 'Your available balance is $2207.75.').status === VALIDATION_STATUS.VALID);
 
     const r = validate(roles, 'Your available balance is $300.');
     check('R reconciled as available INVALID', r.status === VALIDATION_STATUS.INVALID
