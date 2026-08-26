@@ -163,6 +163,137 @@ function periodMonthMatches(hit, entity) {
   return itemM === month;
 }
 
+function isComparisonContract(contract) {
+  return contract.sourceKind === 'cashflow_period_comparison'
+    || contract.capability === 'cashflow_comparison';
+}
+
+function comparisonPeriodPathKey(path) {
+  const p = String(path || '');
+  if (p === 'facts.periodA' || p.indexOf('facts.periodA.') === 0) return 'periodA';
+  if (p === 'facts.periodB' || p.indexOf('facts.periodB.') === 0) return 'periodB';
+  return null;
+}
+
+function isoMonthYear(iso) {
+  const s = String(iso || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return { year: Number(s.slice(0, 4)), month: Number(s.slice(5, 7)) };
+}
+
+function claimComparisonPeriodIdentity(claim) {
+  const fromIso = isoMonthYear(claim && claim.period && claim.period.start);
+  if (fromIso) return fromIso;
+  const label = String((claim && claim.period && claim.period.label) || '').toLowerCase();
+  if (!label) return null;
+  const names = Object.keys(MONTH_INDEX);
+  let month = null;
+  for (let i = 0; i < names.length; i += 1) {
+    if (names[i].length < 3) continue;
+    if (label.indexOf(names[i]) !== -1) {
+      month = MONTH_INDEX[names[i]];
+      break;
+    }
+  }
+  if (!month) return null;
+  const yearHit = label.match(/\b((?:19|20)\d{2})\b/);
+  return { month, year: yearHit ? Number(yearHit[1]) : null };
+}
+
+function isExtractedAmountKind(kind) {
+  return kind === CLAIM_KIND.AMOUNT
+    || kind === CLAIM_KIND.ENTITY_AMOUNT
+    || kind === CLAIM_KIND.ENTITY_AMOUNT_DATE;
+}
+
+function hasInterveningAmount(extracted, from, to, selfStart) {
+  const rows = Array.isArray(extracted) ? extracted : [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const e = rows[i];
+    if (!e || !isExtractedAmountKind(e.kind)) continue;
+    const s = e.start || 0;
+    if (s === selfStart) continue;
+    if (s >= from && s < to) return true;
+  }
+  return false;
+}
+
+function spokenPeriodIdentity(row, extracted) {
+  const entityMonth = monthFromEntity(row && row.entity);
+  const scored = [];
+  const rows = Array.isArray(extracted) ? extracted : [];
+  const amountStart = row.start || 0;
+  const amountEnd = row.end != null ? row.end : amountStart;
+  for (let i = 0; i < rows.length; i += 1) {
+    const tok = rows[i];
+    if (!tok) continue;
+    if (tok.kind !== CLAIM_KIND.PERIOD && tok.kind !== CLAIM_KIND.DATE) continue;
+    const month = tok.month || monthFromEntity(tok.rawSpan);
+    if (!month) continue;
+    const dist = spanDistance(amountStart, tok.start || 0);
+    if (dist > 96) continue;
+    const tokStart = tok.start || 0;
+    const following = tokStart >= amountEnd;
+    const followDist = following ? (tokStart - amountEnd) : null;
+    scored.push({
+      month,
+      year: tok.year != null ? Number(tok.year) : null,
+      dist,
+      followDist,
+      following,
+      tokStart,
+      periodKind: tok.kind === CLAIM_KIND.PERIOD,
+    });
+  }
+  const trailing = [];
+  for (let i = 0; i < scored.length; i += 1) {
+    const cur = scored[i];
+    if (!cur.following || cur.followDist == null || cur.followDist > 18) continue;
+    if (hasInterveningAmount(rows, amountEnd, cur.tokStart, amountStart)) continue;
+    trailing.push(cur);
+  }
+  if (trailing.length) {
+    let best = trailing[0];
+    for (let i = 1; i < trailing.length; i += 1) {
+      const cur = trailing[i];
+      if (cur.followDist < best.followDist) best = cur;
+      else if (cur.followDist === best.followDist && cur.periodKind && !best.periodKind) best = cur;
+    }
+    return { month: best.month, year: best.year };
+  }
+  if (entityMonth) {
+    let year = null;
+    let yearDist = null;
+    for (let i = 0; i < scored.length; i += 1) {
+      if (scored[i].month !== entityMonth) continue;
+      if (yearDist == null || scored[i].dist < yearDist) {
+        year = scored[i].year;
+        yearDist = scored[i].dist;
+      }
+    }
+    return { month: entityMonth, year };
+  }
+  if (scored.length) {
+    let best = scored[0];
+    for (let i = 1; i < scored.length; i += 1) {
+      const cur = scored[i];
+      if (cur.dist < best.dist) best = cur;
+      else if (cur.dist === best.dist && cur.periodKind && !best.periodKind) best = cur;
+    }
+    return { month: best.month, year: best.year };
+  }
+  return null;
+}
+
+function comparisonPeriodIdentityMatches(claim, spoken) {
+  if (!spoken || !spoken.month) return true;
+  const id = claimComparisonPeriodIdentity(claim);
+  if (!id || id.month == null) return true;
+  if (id.month !== spoken.month) return false;
+  if (spoken.year != null && id.year != null && spoken.year !== id.year) return false;
+  return true;
+}
+
 function hasHint(hints, name) {
   return Array.isArray(hints) && hints.indexOf(name) !== -1;
 }
@@ -475,6 +606,36 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
           if (!isSignedChangeAmountClaim(matches[c])) periodMatches.push(matches[c]);
         }
         matches = periodMatches;
+      }
+
+      if (isComparisonContract(contract) && !roleDelta) {
+        const spoken = spokenPeriodIdentity(row, extracted);
+        if (spoken && spoken.month) {
+          const periodPathMatches = [];
+          for (let c = 0; c < matches.length; c += 1) {
+            if (comparisonPeriodPathKey(matches[c].path)) periodPathMatches.push(matches[c]);
+          }
+          if (periodPathMatches.length) {
+            const identityMatches = [];
+            for (let c = 0; c < periodPathMatches.length; c += 1) {
+              if (comparisonPeriodIdentityMatches(periodPathMatches[c], spoken)) {
+                identityMatches.push(periodPathMatches[c]);
+              }
+            }
+            if (!identityMatches.length) {
+              addViolation(
+                VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION,
+                SEVERITY.CRITICAL,
+                row,
+                periodPathMatches[0].claimId,
+                'period_identity_mismatch'
+              );
+              bindingCheck = 'invalid';
+              continue;
+            }
+            matches = identityMatches;
+          }
+        }
       }
 
       if (hasHint(hints, 'income') && !hasHint(hints, 'expense') && matches.length) {

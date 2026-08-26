@@ -821,6 +821,15 @@ async function run() {
   check('July period with June amount remains period_value', !!julyWrongPeriodAmt
     && (julyWrongPeriodAmt.semanticHints || []).indexOf('period_value') !== -1
     && (julyWrongPeriodAmt.semanticHints || []).indexOf('delta') === -1);
+  const julyWrongPeriodValid = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In July 2026, spending was $15010.46.',
+  });
+  check('July period with June amount INVALID', julyWrongPeriodValid.status === VALIDATION_STATUS.INVALID
+    && hasCode(julyWrongPeriodValid, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION)
+    && (julyWrongPeriodValid.violations || []).some((v) => v.reasonCode === 'period_identity_mismatch'));
+  check('July period with June amount is not UNSUPPORTED_AMOUNT',
+    !hasCode(julyWrongPeriodValid, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
 
   const comparisonDeltaAsPeriod = validateResponseAgainstContract({
     contract: comparisonC,
@@ -1004,6 +1013,231 @@ async function run() {
   });
   check('spending decreased binds spending authority', spendingOkDual.status === VALIDATION_STATUS.VALID
     && (spendingOkDual.indeterminate || []).length === 0);
+
+  section('3C.4 comparison period-scalar identity');
+  const juneWrongJulyAmt = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In June 2026, spending was $12916.99.',
+  });
+  check('June period with July amount INVALID', juneWrongJulyAmt.status === VALIDATION_STATUS.INVALID
+    && hasCode(juneWrongJulyAmt, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION)
+    && (juneWrongJulyAmt.violations || []).some((v) => v.reasonCode === 'period_identity_mismatch'));
+  const wrongValueJuly = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In July 2026, spending was $99999.00.',
+  });
+  check('wrong raw July amount UNSUPPORTED_AMOUNT', wrongValueJuly.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongValueJuly, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+  const noPeriodScalar = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending was $15010.46.',
+  });
+  check('no explicit period unique scalar remains VALID', noPeriodScalar.status === VALIDATION_STATUS.VALID
+    && (noPeriodScalar.violations || []).length === 0);
+  const juneBare = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In June, spending was $15010.46.',
+  });
+  check('In June spending variant VALID', juneBare.status === VALIDATION_STATUS.VALID);
+  const spendingInJune = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Spending in June was $15010.46.',
+  });
+  check('Spending in June variant VALID', spendingInJune.status === VALIDATION_STATUS.VALID);
+  const julyBareLabel = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'July spending was $12916.99.',
+  });
+  check('July spending label variant VALID', julyBareLabel.status === VALIDATION_STATUS.VALID);
+  const yearMismatch = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'In June 2025, spending was $15010.46.',
+  });
+  check('June 2025 does not bind June 2026', yearMismatch.status === VALIDATION_STATUS.INVALID
+    && hasCode(yearMismatch, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION));
+  const reversalUnchanged = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'June spending decreased relative to July.',
+  });
+  check('comparison A/B reversal remains unenforced VALID', reversalUnchanged.status === VALIDATION_STATUS.VALID);
+  const lastMonthUnchanged = validateResponseAgainstContract({
+    contract: comparisonC,
+    text: 'Last month spending was $12916.99.',
+  });
+  check('last_month relation remains unchanged VALID', lastMonthUnchanged.status === VALIDATION_STATUS.VALID);
+
+  const identityLedger = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'full_months',
+        periodA: {
+          label: 'June 2026',
+          start: '2026-06-01',
+          end: '2026-06-30',
+          income: 300,
+          spending: 100,
+          net: 50,
+        },
+        periodB: {
+          label: 'July 2026',
+          start: '2026-07-01',
+          end: '2026-07-31',
+          income: 400,
+          spending: 200,
+          net: 75,
+        },
+        changes: {
+          income: { absolute: 100, percent: 33.33, direction: 'increased', baselineZero: false },
+          spending: { absolute: 100, percent: 100, direction: 'increased', baselineZero: false },
+          net: { absolute: 25, percent: 50, direction: 'improved', baselineZero: false },
+        },
+      },
+      observations: [],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Main Account' },
+  }).ledger;
+  const identityC = buildResponseValidationContract(identityLedger).contract;
+  check('identity A spending VALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In June 2026, spending was $100.',
+  }).status === VALIDATION_STATUS.VALID);
+  check('identity B spending VALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In July 2026, spending was $200.',
+  }).status === VALIDATION_STATUS.VALID);
+  check('identity B spending was A amount INVALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In July 2026, spending was $100.',
+  }).status === VALIDATION_STATUS.INVALID);
+  check('identity A spending was B amount INVALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In June 2026, spending was $200.',
+  }).status === VALIDATION_STATUS.INVALID);
+  check('identity A income VALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In June 2026, income was $300.',
+  }).status === VALIDATION_STATUS.VALID);
+  check('identity B income VALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In July 2026, income was $400.',
+  }).status === VALIDATION_STATUS.VALID);
+  const wrongPeriodIncome = validateResponseAgainstContract({
+    contract: identityC, text: 'In July 2026, income was $300.',
+  });
+  check('identity B income was A amount INVALID', wrongPeriodIncome.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongPeriodIncome, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION));
+  check('identity A income was B amount INVALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In June 2026, income was $400.',
+  }).status === VALIDATION_STATUS.INVALID);
+  check('identity A net VALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In June 2026, net was $50.',
+  }).status === VALIDATION_STATUS.VALID);
+  check('identity B net VALID', validateResponseAgainstContract({
+    contract: identityC, text: 'In July 2026, net was $75.',
+  }).status === VALIDATION_STATUS.VALID);
+  const wrongPeriodNet = validateResponseAgainstContract({
+    contract: identityC, text: 'In June 2026, net was $75.',
+  });
+  check('identity A net was B amount INVALID', wrongPeriodNet.status === VALIDATION_STATUS.INVALID
+    && hasCode(wrongPeriodNet, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION));
+
+  const metricCrossLedger = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        windowKind: 'full_months',
+        periodA: {
+          label: 'June 2026', start: '2026-06-01', end: '2026-06-30',
+          income: 80, spending: 100, net: -20,
+        },
+        periodB: {
+          label: 'July 2026', start: '2026-07-01', end: '2026-07-31',
+          income: 120, spending: 90, net: 30,
+        },
+        changes: {
+          income: { absolute: 40, percent: 50, direction: 'increased', baselineZero: false },
+          spending: { absolute: -10, percent: -10, direction: 'decreased', baselineZero: false },
+          net: { absolute: 50, percent: 0, direction: 'improved', baselineZero: false },
+        },
+      },
+      observations: [],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Main Account' },
+  }).ledger;
+  const metricCrossC = buildResponseValidationContract(metricCrossLedger).contract;
+  const metricCrossBeforeShape = validateResponseAgainstContract({
+    contract: metricCrossC,
+    text: 'In June, spending was $120.',
+  });
+  check('cross-period income cents cannot authorize June spending',
+    metricCrossBeforeShape.status === VALIDATION_STATUS.INVALID
+    && hasCode(metricCrossBeforeShape, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION));
+
+  const metricSameLedger = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        windowKind: 'full_months',
+        periodA: {
+          label: 'June 2026', start: '2026-06-01', end: '2026-06-30',
+          income: 100, spending: 100, net: 0,
+        },
+        periodB: {
+          label: 'July 2026', start: '2026-07-01', end: '2026-07-31',
+          income: 200, spending: 80, net: 120,
+        },
+        changes: {
+          income: { absolute: 100, percent: 100, direction: 'increased', baselineZero: false },
+          spending: { absolute: -20, percent: -20, direction: 'decreased', baselineZero: false },
+          net: { absolute: 120, percent: 0, direction: 'improved', baselineZero: false },
+        },
+      },
+      observations: [],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Main Account' },
+  }).ledger;
+  const metricSameC = buildResponseValidationContract(metricSameLedger).contract;
+  check('same-period spending $100 VALID', validateResponseAgainstContract({
+    contract: metricSameC, text: 'June spending was $100.',
+  }).status === VALIDATION_STATUS.VALID);
+  check('same-period income $100 VALID', validateResponseAgainstContract({
+    contract: metricSameC, text: 'June income was $100.',
+  }).status === VALIDATION_STATUS.VALID);
+
+  const sameMonthLedger = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        windowKind: 'explicit_bounds',
+        periodA: {
+          label: 'June 1–10, 2026', start: '2026-06-01', end: '2026-06-10',
+          income: 10, spending: 40, net: -30,
+        },
+        periodB: {
+          label: 'June 11–20, 2026', start: '2026-06-11', end: '2026-06-20',
+          income: 12, spending: 55, net: -43,
+        },
+        changes: {
+          income: { absolute: 2, percent: 20, direction: 'increased', baselineZero: false },
+          spending: { absolute: 15, percent: 37.5, direction: 'increased', baselineZero: false },
+          net: { absolute: -13, percent: 0, direction: 'worsened', baselineZero: false },
+        },
+      },
+      observations: [],
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Main Account' },
+  }).ledger;
+  const sameMonthC = buildResponseValidationContract(sameMonthLedger).contract;
+  const sameMonthOk = validateResponseAgainstContract({
+    contract: sameMonthC,
+    text: 'In June 2026, spending was $40.',
+  });
+  check('same-calendar-month windows do not false-invalid unique cents',
+    sameMonthOk.status === VALIDATION_STATUS.VALID);
 
   section('3C.2 trend period and first-to-last goldens');
   const trendLedger = buildTrendEvidenceLedger({
@@ -1956,6 +2190,38 @@ async function run() {
   console.log(`  1000 wrong-direction comparison: ${cmpWrongMs.toFixed(2)}ms total, ${(cmpWrongMs / 1000).toFixed(3)}ms avg`);
   check('comparison direction 1000-run benchmarks completed',
     Number.isFinite(cmpDirMs) && Number.isFinite(cmpFullMs) && Number.isFinite(cmpWrongMs));
+
+  const tCmpPeriodOk = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    validateResponseAgainstContract({
+      contract: comparisonC,
+      text: 'In June 2026, spending was $15010.46.',
+    });
+  }
+  const cmpPeriodOkMs = Number(process.hrtime.bigint() - tCmpPeriodOk) / 1e6;
+  console.log(`  1000 correct comparison period-scalar: ${cmpPeriodOkMs.toFixed(2)}ms total, ${(cmpPeriodOkMs / 1000).toFixed(3)}ms avg`);
+
+  const tCmpPeriodBad = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    validateResponseAgainstContract({
+      contract: comparisonC,
+      text: 'In July 2026, spending was $15010.46.',
+    });
+  }
+  const cmpPeriodBadMs = Number(process.hrtime.bigint() - tCmpPeriodBad) / 1e6;
+  console.log(`  1000 wrong-period comparison period-scalar: ${cmpPeriodBadMs.toFixed(2)}ms total, ${(cmpPeriodBadMs / 1000).toFixed(3)}ms avg`);
+
+  const tCmpFrozen = process.hrtime.bigint();
+  for (let i = 0; i < 1000; i += 1) {
+    validateResponseAgainstContract({
+      contract: comparisonC,
+      text: 'Spending decreased by $2093.47, or 13.95%.',
+    });
+  }
+  const cmpFrozenMs = Number(process.hrtime.bigint() - tCmpFrozen) / 1e6;
+  console.log(`  1000 frozen comparison delta/percent: ${cmpFrozenMs.toFixed(2)}ms total, ${(cmpFrozenMs / 1000).toFixed(3)}ms avg`);
+  check('3C.4 comparison period-scalar 1000-run benchmarks completed',
+    Number.isFinite(cmpPeriodOkMs) && Number.isFinite(cmpPeriodBadMs) && Number.isFinite(cmpFrozenMs));
 
   const tTr = process.hrtime.bigint();
   for (let i = 0; i < 1000; i += 1) {

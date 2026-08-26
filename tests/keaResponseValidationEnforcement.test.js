@@ -444,21 +444,22 @@ async function run() {
 
     section('3C.3 Q comparison period-scalar exclusion');
     const q = enforceTurn(CMP_PERIOD_SCALAR, { ledger: comparisonLedger, capability: 'cashflow_comparison' });
+    check('Q invalid period identity', q.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+    check('Q UNSUPPORTED_PERIOD_ATTRIBUTION',
+      (q.shadow.validation.violations || []).some((v) => (
+        v.code === VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION
+        && v.reasonCode === 'period_identity_mismatch'
+      )));
+    const qFamilies = (q.shadow.validation.violations || []).map((v) => (
+      comparisonClaimFamily(v, q.shadow.extractedClaims, q.shadow.contract)
+    ));
+    check('Q violations are excluded families', qFamilies.length > 0 && qFamilies.every((f) => (
+      f === 'period_scalar' || f === 'unclassified'
+    )));
     check('Q not blocked', q.enforced.decision.block === false);
     check('Q original returned', q.enforced.finalText === CMP_PERIOD_SCALAR);
-    if (q.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID) {
-      const families = (q.shadow.validation.violations || []).map((v) => (
-        comparisonClaimFamily(v, q.shadow.extractedClaims, q.shadow.contract)
-      ));
-      check('Q violations are excluded families', families.every((f) => (
-        f === 'period_scalar' || f === 'unclassified'
-      )));
-      check('Q reason not_eligible_claim_family',
-        q.enforced.decision.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
-    } else {
-      check('Q remains VALID so period scalar is not enforced as protected',
-        q.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
-    }
+    check('Q reason not_eligible_claim_family',
+      q.enforced.decision.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
 
     section('3C.3 R affordability exclusion');
     const r = enforceTurn('You can afford the $800 purchase.', {

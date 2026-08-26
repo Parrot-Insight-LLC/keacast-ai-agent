@@ -134,11 +134,24 @@ function semanticRoleForPath(path) {
   return null;
 }
 
+function comparisonPeriodFromPath(path, ledger) {
+  const p = String(path || '');
+  const facts = (ledger && ledger.facts) || {};
+  if ((p === 'facts.periodA' || p.indexOf('facts.periodA.') === 0) && facts.periodA) {
+    return copyPeriod(facts.periodA);
+  }
+  if ((p === 'facts.periodB' || p.indexOf('facts.periodB.') === 0) && facts.periodB) {
+    return copyPeriod(facts.periodB);
+  }
+  return null;
+}
+
 function projectClaim(claim, ledger) {
   const copied = safeClone(claim);
   if (!copied || typeof copied !== 'object') return null;
   const sourceKind = ledger.source && ledger.source.kind ? ledger.source.kind : null;
   const scope = ledger.scope || {};
+  const pathPeriod = comparisonPeriodFromPath(copied.path, ledger);
   return {
     claimId: copied.id,
     type: copied.type,
@@ -147,7 +160,7 @@ function projectClaim(claim, ledger) {
     unit: copied.unit,
     visibility: copied.visibility || null,
     semanticRole: semanticRoleForPath(copied.path),
-    period: copyPeriod(scope.period),
+    period: pathPeriod || copyPeriod(scope.period),
     sourceKind,
     accountScope: scope.accountScope || null,
   };

@@ -423,6 +423,18 @@ async function run() {
   check('comparison direction retained', cmpC.allowedClaims.some((c) => c.type === 'DIRECTION'
     && c.path === 'facts.changes.spending.direction' && c.value === 'decreased'));
   check('comparison windowKind', cmpC.scope.windowKind === 'matched_elapsed');
+  check('comparison periodA spending period is periodA not scope.periodB',
+    claimByPath(cmpC, 'facts.periodA.spending').period
+    && claimByPath(cmpC, 'facts.periodA.spending').period.start === '2026-07-01'
+    && claimByPath(cmpC, 'facts.periodA.spending').period.end === '2026-07-16'
+    && claimByPath(cmpC, 'facts.periodA.spending').period.label === 'July 1–16, 2026');
+  check('comparison periodB spending period is periodB',
+    claimByPath(cmpC, 'facts.periodB.spending').period
+    && claimByPath(cmpC, 'facts.periodB.spending').period.start === '2026-08-01'
+    && claimByPath(cmpC, 'facts.periodB.spending').period.label === 'August 1–16, 2026');
+  check('comparison change claims keep scope.period',
+    claimByPath(cmpC, 'facts.changes.spending.absolute').period
+    && claimByPath(cmpC, 'facts.changes.spending.absolute').period.start === '2026-08-01');
 
   section('3C.1 G trend contract');
   const trend = buildTrend();
