@@ -2,21 +2,25 @@
 
 /**
  * Phase 3C.4 Slice 2 — snapshot horizon + list-role identity (shadow only).
+ * Phase 3C.4 Slice 3 — preview / full-total coverage identity (shadow only).
  *
  * Derives semantic tuples from existing snapshot paths / list names.
- * Does not calculate finances, totals, minima, or period overlap.
+ * Does not calculate finances, totals, minima, ranking, or period overlap.
  */
 
 const { parseLedgerPromptFlag } = require('./keaEvidencePromptCutover');
 const { CLAIM_KIND } = require('./keaResponseClaimExtractor');
+const { LIST_COVERAGE } = require('./keaResponseValidationContract');
 
 const SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY = 'USE_SNAPSHOT_SEMANTIC_VALIDATION_SHADOW';
+const SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY = 'USE_SNAPSHOT_COVERAGE_VALIDATION_SHADOW';
 
 const SNAPSHOT_SEMANTIC_REASON = Object.freeze({
   WINDOW_HORIZON_MISMATCH: 'window_horizon_mismatch',
   SEMANTIC_ROLE_MISMATCH: 'semantic_role_mismatch',
   CURRENT_FUTURE_ROLE_MISMATCH: 'current_future_role_mismatch',
   LIST_ROLE_MISMATCH: 'list_role_mismatch',
+  COVERAGE_ROLE_MISMATCH: 'coverage_role_mismatch',
 });
 
 const REASON_PRIORITY = Object.freeze([
@@ -24,7 +28,12 @@ const REASON_PRIORITY = Object.freeze([
   SNAPSHOT_SEMANTIC_REASON.CURRENT_FUTURE_ROLE_MISMATCH,
   SNAPSHOT_SEMANTIC_REASON.SEMANTIC_ROLE_MISMATCH,
   SNAPSHOT_SEMANTIC_REASON.LIST_ROLE_MISMATCH,
+  SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH,
 ]);
+
+const COVERAGE_TOTAL_RE = /\b(totals?|totalling|totaling|add up|adds up)\b/i;
+const LISTED_COVERAGE_RE = /\b(?:these listed|listed upcoming|listed (?:expenses?|income|items)|items listed|expenses listed|shown above|shown here|listed above|listed here|listed transactions|transactions listed|all listed|all the items listed|items shown|items below|these items)\b/i;
+const COMPLETE_LIST_RE = /\b(?:complete|entire)\s+(?:upcoming\s+)?(?:(?:expense|income)\s+)?list\b/i;
 
 const MONTH_INDEX = Object.freeze({
   january: 1, jan: 1,
@@ -45,6 +54,12 @@ const MONTH_NAME_RE = /\b(january|february|march|april|may|june|july|august|sept
 
 function isSnapshotSemanticValidationEnabled() {
   const raw = process.env[SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY];
+  if (raw == null || String(raw).trim() === '') return false;
+  return parseLedgerPromptFlag(raw).enabled === true;
+}
+
+function isSnapshotCoverageValidationEnabled() {
+  const raw = process.env[SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY];
   if (raw == null || String(raw).trim() === '') return false;
   return parseLedgerPromptFlag(raw).enabled === true;
 }
@@ -360,6 +375,71 @@ function spokenSnapshotSemantics(row, extracted) {
   return spoken;
 }
 
+function spokenCoverageRole(nearby) {
+  const text = String(nearby || '');
+  if (!text) return null;
+
+  if (/\b(includes?|including|one of|item is)\b/i.test(text) && !COVERAGE_TOTAL_RE.test(text)) {
+    return null;
+  }
+
+  if (COMPLETE_LIST_RE.test(text) && COVERAGE_TOTAL_RE.test(text)) {
+    return 'complete_list_total';
+  }
+
+  if (/\bpreview\b/i.test(text)) {
+    if (/\b(includes?|including)\b/i.test(text) && !COVERAGE_TOTAL_RE.test(text)) return null;
+    if (/\bpreview\s+shows\b/i.test(text)) return 'preview_total';
+    if (COVERAGE_TOTAL_RE.test(text)) return 'preview_total';
+  }
+
+  if (COVERAGE_TOTAL_RE.test(text) && LISTED_COVERAGE_RE.test(text)) {
+    return 'listed_items_total';
+  }
+
+  return null;
+}
+
+function amountLocalCoverageText(row) {
+  const nearby = String((row && row.nearbyTerms) || '');
+  const span = String((row && row.rawSpan) || '');
+  if (!span) return nearby;
+  const idx = nearby.lastIndexOf(span);
+  if (idx === -1) return nearby;
+  return nearby.slice(0, idx);
+}
+
+function previewUpcomingCoverage(contract) {
+  return !!(contract && contract.listCoverage && contract.listCoverage.upcoming === LIST_COVERAGE.PREVIEW);
+}
+
+function coverageMismatch(contract, spoken, candidates) {
+  if (!spoken || !spoken.coverageRole) return null;
+  if (!previewUpcomingCoverage(contract)) return null;
+  const role = spoken.coverageRole;
+  if (role !== 'preview_total' && role !== 'listed_items_total' && role !== 'complete_list_total') {
+    return null;
+  }
+
+  let evidenceClaimId = null;
+  let hit = false;
+  const rows = Array.isArray(candidates) ? candidates : [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const tuple = rows[i] && rows[i].tuple;
+    if (!tuple) continue;
+    if (tuple.aggregateRole === 'upcoming_window_total' || tuple.listRole === 'upcoming_item') {
+      hit = true;
+      if (!evidenceClaimId && rows[i].claimId) evidenceClaimId = rows[i].claimId;
+    }
+  }
+  if (!hit) return null;
+  return {
+    mismatch: true,
+    reason: SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH,
+    evidenceClaimId,
+  };
+}
+
 function spokenHasConstraint(spoken) {
   if (!spoken) return false;
   return !!(spoken.balanceRole
@@ -495,16 +575,27 @@ function collectCandidates(matches, amountCandidates, boundHit) {
 }
 
 function evaluateSnapshotSemanticIdentity(input) {
-  if (!isSnapshotSemanticValidationEnabled()) return { mismatch: false };
+  const slice2 = isSnapshotSemanticValidationEnabled();
+  const slice3 = isSnapshotCoverageValidationEnabled();
+  if (!slice2 && !slice3) return { mismatch: false };
+
   const contract = input && input.contract;
   if (!isSnapshotContract(contract)) return { mismatch: false };
   const row = input && input.row;
   if (!row) return { mismatch: false };
 
   const spoken = spokenSnapshotSemantics(row, input.extracted);
-  if (!spokenHasConstraint(spoken)) return { mismatch: false };
+  if (slice3) spoken.coverageRole = spokenCoverageRole(amountLocalCoverageText(row));
 
   const candidates = collectCandidates(input.matches, input.amountCandidates, input.boundHit);
+
+  if (slice3) {
+    const coverage = coverageMismatch(contract, spoken, candidates);
+    if (coverage) return coverage;
+  }
+
+  if (!slice2) return { mismatch: false };
+  if (!spokenHasConstraint(spoken)) return { mismatch: false };
   if (!candidates.length) return { mismatch: false };
 
   const currentPeriod = currentPeriodIdentity(contract);
@@ -525,8 +616,10 @@ function evaluateSnapshotSemanticIdentity(input) {
 
 module.exports = {
   SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY,
+  SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY,
   SNAPSHOT_SEMANTIC_REASON,
   isSnapshotSemanticValidationEnabled,
+  isSnapshotCoverageValidationEnabled,
   isSnapshotContract,
   tupleFromClaim,
   tupleFromList,

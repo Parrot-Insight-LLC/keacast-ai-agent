@@ -9,13 +9,16 @@ const {
   VALIDATION_STATUS,
   SEVERITY,
   VIOLATION_CODE,
+  LIST_COVERAGE,
   buildResponseValidationContract,
 } = require('../services/keaResponseValidationContract');
 const { validateResponseAgainstContract } = require('../services/keaResponseClaimValidator');
 const {
   SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY,
+  SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY,
   SNAPSHOT_SEMANTIC_REASON,
   isSnapshotSemanticValidationEnabled,
+  isSnapshotCoverageValidationEnabled,
   tupleFromClaim,
 } = require('../services/keaSnapshotSemanticValidation');
 const {
@@ -48,6 +51,10 @@ function withFlag(key, value, fn) {
 
 function withShadow(value, fn) {
   return withFlag(SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY, value, fn);
+}
+
+function withCoverage(value, fn) {
+  return withFlag(SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY, value, fn);
 }
 
 function codes(result) {
@@ -109,6 +116,32 @@ function collisionLedger() {
   return buildFactsLedger({
     availableBalance: 100,
     upcomingExpenseTotal: 200,
+  });
+}
+
+function coverageLedger() {
+  return buildFactsLedger({
+    availableBalance: 2207.75,
+    currentBalance: 2500,
+    reconciledBalance: 2600,
+    upcomingExpenseTotal: 5627.40,
+    upcomingIncomeTotal: 4100,
+    upcoming: [
+      { name: 'Mortgage', amount: -2824.83, start: '2026-08-28' },
+      { name: 'Daycare', amount: -705, start: '2026-08-22' },
+      { name: 'AT&T', amount: -240, start: '2026-08-25' },
+    ],
+  });
+}
+
+function sameCentsCoverageLedger() {
+  return buildFactsLedger({
+    availableBalance: 50,
+    upcomingExpenseTotal: 100,
+    upcomingIncomeTotal: 200,
+    upcoming: [
+      { name: 'Mortgage', amount: -100, start: '2026-08-28' },
+    ],
   });
 }
 
@@ -585,6 +618,321 @@ async function run() {
       check('LIVE_C still invalid', liveC.telemetry.response_validation_status === 'invalid');
       check('LIVE_C still blocked', blocked.block === true);
       check('one validation pass', liveC.telemetry.response_validation_performed === true);
+    });
+  });
+
+  section('3C.4 Slice 3 coverage flag defaults');
+  withCoverage(undefined, () => {
+    check('coverage unset defaults OFF', isSnapshotCoverageValidationEnabled() === false);
+  });
+  withCoverage('', () => {
+    check('coverage empty defaults OFF', isSnapshotCoverageValidationEnabled() === false);
+  });
+  withCoverage('false', () => {
+    check('coverage false OFF', isSnapshotCoverageValidationEnabled() === false);
+  });
+  withCoverage('true', () => {
+    check('coverage true ON', isSnapshotCoverageValidationEnabled() === true);
+  });
+  check('coverage flag name',
+    SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY === 'USE_SNAPSHOT_COVERAGE_VALIDATION_SHADOW');
+
+  const cov = coverageLedger();
+  const covC = contractOf(cov);
+  const sameCov = sameCentsCoverageLedger();
+  check('snapshot upcoming coverage is preview',
+    covC.listCoverage.upcoming === LIST_COVERAGE.PREVIEW);
+
+  section('3C.4 Slice 3 rollback preserves Slice 2');
+  withShadow('true', () => {
+    withCoverage(undefined, () => {
+      check('coverage unset listed total still VALID',
+        validate(cov, 'These listed upcoming expenses total $5627.40.').status
+        === VALIDATION_STATUS.VALID);
+      check('Slice 2 September still INVALID',
+        validateResponseAgainstContract({
+          contract: snapC,
+          text: 'September expenses will total $1134.56.',
+        }).status === VALIDATION_STATUS.INVALID);
+    });
+    withCoverage('false', () => {
+      check('coverage false listed total VALID',
+        validate(cov, 'These listed upcoming expenses total $5627.40.').status
+        === VALIDATION_STATUS.VALID);
+    });
+  });
+
+  withShadow('true', () => {
+    withCoverage('true', () => {
+      withFlag(RESPONSE_VALIDATION_ENFORCEMENT_ENV_KEY, 'true', () => {
+        section('3C.4 Slice 3 positive full-window totals');
+        check('generic upcoming expense total VALID',
+          validate(cov, 'Upcoming expenses total $5627.40.').status === VALIDATION_STATUS.VALID);
+        check('explicit 15-day total VALID',
+          validate(cov, 'You have $5627.40 in upcoming expenses over the next 15 days.').status
+          === VALIDATION_STATUS.VALID);
+        check('over next 15 days wording VALID',
+          validate(cov, 'Over the next 15 days, upcoming expenses total $5627.40.').status
+          === VALIDATION_STATUS.VALID);
+        check('upcoming expense total is VALID',
+          validate(cov, 'Your upcoming expense total is $5627.40.').status
+          === VALIDATION_STATUS.VALID);
+        check('Keacast shows upcoming VALID',
+          validate(cov, 'Keacast shows $5627.40 of upcoming expenses in the next 15 days.').status
+          === VALIDATION_STATUS.VALID);
+        check('generic upcoming income VALID',
+          validate(cov, 'Upcoming income over the next 15 days is $4100.').status
+          === VALIDATION_STATUS.VALID
+          || validate(cov, 'Upcoming income over the next 15 days is $4100.00.').status
+          === VALIDATION_STATUS.VALID);
+
+        section('3C.4 Slice 3 preview item mentions remain VALID');
+        check('preview includes Mortgage VALID',
+          validate(cov, 'The preview includes Mortgage for $2824.83.').status
+          === VALIDATION_STATUS.VALID);
+        check('one listed Daycare VALID',
+          validate(cov, 'One listed upcoming item is Daycare for $705.').status
+          === VALIDATION_STATUS.VALID);
+        check('AT&T upcoming item VALID',
+          validate(cov, 'One of the upcoming items is AT&T for $240.').status
+          === VALIDATION_STATUS.VALID);
+
+        section('3C.4 Slice 3 available-balance regressions');
+        check('available 2207.75 VALID',
+          validate(cov, 'Your available balance is $2207.75.').status === VALIDATION_STATUS.VALID);
+        check('live pending/holds narration VALID', validate(cov, [
+          'Your available balance in the Main Account at Wells Fargo is $2207.75.',
+          'This reflects the funds you can currently use, considering pending transactions and holds.',
+        ].join('\n')).status === VALIDATION_STATUS.VALID);
+        check('available spending explanation VALID', validate(cov, [
+          'Your available balance in the Main Account at Wells Fargo is $2207.75.',
+          '',
+          'This is the amount currently accessible for spending or withdrawal.',
+        ].join('\n')).status === VALIDATION_STATUS.VALID);
+
+        section('3C.4 Slice 3 negative coverage goldens');
+        function coverageInvalid(text) {
+          const result = validate(cov, text);
+          return result.status === VALIDATION_STATUS.INVALID
+            && semanticHit(result, SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH);
+        }
+        check('these listed expenses INVALID',
+          coverageInvalid('These listed upcoming expenses total $5627.40.'));
+        check('complete upcoming expense list INVALID',
+          coverageInvalid('Your complete upcoming expense list totals $5627.40.'));
+        check('preview shows INVALID',
+          coverageInvalid('The preview shows $5627.40 of expenses.'));
+        check('items in this preview INVALID',
+          coverageInvalid('The items in this preview total $5627.40.'));
+        const shownAbove = validate(cov, 'The expenses shown above total $5627.40.');
+        check('shown above INVALID', shownAbove.status === VALIDATION_STATUS.INVALID
+          && (hasCode(shownAbove, VIOLATION_CODE.PREVIEW_TOTAL_MISATTRIBUTION)
+            || semanticHit(shownAbove, SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH)));
+        const listedAbove = validate(cov, 'The transactions listed above total $5627.40.');
+        check('transactions listed above INVALID', listedAbove.status === VALIDATION_STATUS.INVALID
+          && (hasCode(listedAbove, VIOLATION_CODE.PREVIEW_TOTAL_MISATTRIBUTION)
+            || semanticHit(listedAbove, SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH)));
+        check('all items listed INVALID',
+          coverageInvalid('All the items listed total $5627.40.'));
+        check('these items add up INVALID',
+          coverageInvalid('These items add up to $5627.40.'));
+        check('listed items add up INVALID',
+          coverageInvalid('The listed items add up to $5627.40.'));
+        check('listed upcoming income INVALID',
+          coverageInvalid('The listed upcoming income items total $4100.00.')
+          || coverageInvalid('The listed upcoming income items total $4100.'));
+
+        section('3C.4 Slice 3 multi-claim and mixed coverage');
+        const multiOk = validate(cov, [
+          'Upcoming expenses total $5627.40 over the next 15 days.',
+          'The preview includes Mortgage for $2824.83.',
+        ].join(' '));
+        check('full total + preview item VALID', multiOk.status === VALIDATION_STATUS.VALID);
+
+        const mixedCov = validate(cov, [
+          'Upcoming expenses total $5627.40 over the next 15 days.',
+          'These listed items total $5627.40.',
+        ].join(' '));
+        check('mixed full-window + listed total INVALID', mixedCov.status === VALIDATION_STATUS.INVALID);
+        check('mixed has coverage mismatch',
+          semanticHit(mixedCov, SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH));
+
+        const wrongListed = validate(cov, 'These listed items total $99999.');
+        check('wrong listed amount UNSUPPORTED_AMOUNT',
+          hasCode(wrongListed, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+        check('wrong listed amount not coverage',
+          !hasCode(wrongListed, VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH));
+
+        section('3C.4 Slice 3 locality');
+        const previewElsewhere = validate(cov, [
+          'The preview is shown below.',
+          'Your upcoming expenses total $5627.40 over the next 15 days.',
+        ].join(' '));
+        check('preview word elsewhere does not contaminate',
+          previewElsewhere.status === VALIDATION_STATUS.VALID);
+
+        const listedElsewhere = validate(cov, [
+          'Upcoming expenses total $5627.40.',
+          'The listed items include Daycare for $705.',
+        ].join(' '));
+        check('listed item + full total independently VALID',
+          listedElsewhere.status === VALIDATION_STATUS.VALID);
+
+        check('same-cents upcoming total VALID',
+          validate(sameCov, 'Upcoming expenses total $100.').status === VALIDATION_STATUS.VALID);
+        check('same-cents listed total INVALID',
+          validate(sameCov, 'The listed items total $100.').status === VALIDATION_STATUS.INVALID
+          && semanticHit(validate(sameCov, 'The listed items total $100.'),
+            SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH));
+        check('same-cents Mortgage item VALID',
+          validate(sameCov, 'Mortgage is $100.').status === VALIDATION_STATUS.VALID);
+
+        section('3C.4 Slice 3 Slice 2 regressions');
+        check('correct available role',
+          validate(roles, 'Your available balance is $100.').status === VALIDATION_STATUS.VALID);
+        check('reconciled as available still INVALID',
+          validate(roles, 'Your available balance is $300.').status === VALIDATION_STATUS.INVALID
+          && semanticHit(validate(roles, 'Your available balance is $300.'),
+            SNAPSHOT_SEMANTIC_REASON.SEMANTIC_ROLE_MISMATCH));
+        check('available as current still INVALID',
+          validate(roles, 'Your current balance is $100.').status === VALIDATION_STATUS.INVALID);
+        check('15-day wording VALID',
+          validateResponseAgainstContract({
+            contract: snapC,
+            text: 'Upcoming expenses total $1134.56.',
+          }).status === VALIDATION_STATUS.VALID);
+        check('15-day as September still INVALID',
+          validateResponseAgainstContract({
+            contract: snapC,
+            text: 'September expenses will total $1134.56.',
+          }).status === VALIDATION_STATUS.INVALID);
+        check('15-day as next week still INVALID',
+          validateResponseAgainstContract({
+            contract: snapC,
+            text: 'Bills next week total $1134.56.',
+          }).status === VALIDATION_STATUS.INVALID);
+        check('upcoming income as expense still INVALID',
+          validate(roles, 'Upcoming expenses are $700.').status === VALIDATION_STATUS.INVALID);
+        check('exact negative event still VALID',
+          validate(roles, 'A forecasted negative balance of -$80 occurs on November 8, 2026.').status
+          === VALIDATION_STATUS.VALID);
+        check('wrong negative month still INVALID',
+          validate(roles, 'The lowest balance in September will be -$80.').status
+          === VALIDATION_STATUS.INVALID);
+
+        section('3C.4 Slice 3 Slice 1 / non-snapshot regressions');
+        const june = validateResponseAgainstContract({
+          contract: contractOf(comparisonJuneJuly()),
+          text: 'In June 2026, spending was $15010.46.',
+        });
+        const july = validateResponseAgainstContract({
+          contract: contractOf(comparisonJuneJuly()),
+          text: 'In July 2026, spending was $12916.99.',
+        });
+        const wrongMonth = validateResponseAgainstContract({
+          contract: contractOf(comparisonJuneJuly()),
+          text: 'In July 2026, spending was $15010.46.',
+        });
+        check('Slice 1 June still VALID', june.status === VALIDATION_STATUS.VALID);
+        check('Slice 1 July still VALID', july.status === VALIDATION_STATUS.VALID);
+        check('Slice 1 wrong-month still INVALID', wrongMonth.status === VALIDATION_STATUS.INVALID
+          && hasCode(wrongMonth, VIOLATION_CODE.UNSUPPORTED_PERIOD_ATTRIBUTION));
+        check('upcoming macro still VALID',
+          validateResponseAgainstContract({
+            contract: contractOf(buildUpcomingMacro()),
+            text: 'Bills due next week total $1297.30.',
+          }).status === VALIDATION_STATUS.VALID);
+        check('upcoming macro listed total not snapshot-rejected',
+          validateResponseAgainstContract({
+            contract: contractOf(buildUpcomingMacro()),
+            text: 'These listed items total $1297.30.',
+          }).status !== VALIDATION_STATUS.INVALID
+          || !semanticHit(validateResponseAgainstContract({
+            contract: contractOf(buildUpcomingMacro()),
+            text: 'These listed items total $1297.30.',
+          }), SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH));
+        check('Target lookup still VALID',
+          validateResponseAgainstContract({
+            contract: contractOf(buildLookup()),
+            text: 'In July 2026, you made 3 transactions at Target totaling $279.58.',
+          }).status === VALIDATION_STATUS.VALID);
+
+        section('3C.4 Slice 3 enforcement isolation');
+        const listedOnly = validate(cov, 'These listed upcoming expenses total $5627.40.');
+        const listedEnf = enforcementOf(listedOnly);
+        check('Slice 3-only INVALID', listedOnly.status === VALIDATION_STATUS.INVALID
+          && semanticHit(listedOnly, SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH));
+        check('Slice 3-only not blocked', listedEnf.block === false);
+        check('Slice 3-only not_eligible_claim_family',
+          listedEnf.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+        const derived = validateResponseAgainstContract({
+          contract: snapC,
+          text: 'Your net cash flow is $1193.93.',
+        });
+        check('existing forecast still blocks', enforcementOf(derived).block === true);
+
+        const mixedEnf = validate(roles, [
+          'These listed upcoming expenses total $600.',
+          'Your net cash flow is $1193.93.',
+        ].join(' '));
+        check('mixed coverage+derivation has coverage',
+          hasCode(mixedEnf, VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH));
+        check('mixed coverage+derivation has derivation',
+          hasCode(mixedEnf, VIOLATION_CODE.UNSUPPORTED_DERIVATION)
+          || hasCode(mixedEnf, VIOLATION_CODE.UNSUPPORTED_AMOUNT));
+        check('mixed coverage+derivation still blocks', enforcementOf(mixedEnf).block === true);
+
+        const liveC2 = applyShadowResponseValidation({
+          text: [
+            'Your projected income for next month (September 2026) is $4626.36.',
+            'Your projected expenses for next month are $3432.43.',
+            'This results in a net positive cash flow of $1193.93.',
+            'Your available balance is forecasted to be approximately $4846.97.',
+            'Your balance is expected to increase by about $1194.',
+          ].join(' '),
+          ledger: snap,
+          capability: 'financial_forecast',
+          responseSource: 'azure',
+        });
+        const blocked2 = evaluateResponseEnforcement({
+          flagEnabled: true,
+          capability: 'financial_forecast',
+          responseSource: 'azure',
+          writeResponseMode: 'none',
+          shadow: liveC2,
+        });
+        check('LIVE_C still blocked with Slice 3 ON', blocked2.block === true);
+        check('one validation pass Slice 3', liveC2.telemetry.response_validation_performed === true);
+
+        section('3C.4 Slice 3 performance');
+        const tWin = process.hrtime.bigint();
+        for (let i = 0; i < 1000; i += 1) validate(cov, 'Upcoming expenses total $5627.40.');
+        const winMs = Number(process.hrtime.bigint() - tWin) / 1e6;
+        console.log(`  1000 valid full-window totals: ${winMs.toFixed(2)}ms total, ${(winMs / 1000).toFixed(3)}ms avg`);
+
+        const tCov = process.hrtime.bigint();
+        for (let i = 0; i < 1000; i += 1) {
+          validate(cov, 'These listed upcoming expenses total $5627.40.');
+        }
+        const covMs = Number(process.hrtime.bigint() - tCov) / 1e6;
+        console.log(`  1000 coverage mismatches: ${covMs.toFixed(2)}ms total, ${(covMs / 1000).toFixed(3)}ms avg`);
+
+        const tItem = process.hrtime.bigint();
+        for (let i = 0; i < 1000; i += 1) {
+          validate(cov, 'The preview includes Mortgage for $2824.83.');
+        }
+        const itemMs = Number(process.hrtime.bigint() - tItem) / 1e6;
+        console.log(`  1000 valid preview items: ${itemMs.toFixed(2)}ms total, ${(itemMs / 1000).toFixed(3)}ms avg`);
+
+        const tEnf3 = process.hrtime.bigint();
+        for (let i = 0; i < 1000; i += 1) enforcementOf(listedOnly);
+        const enf3Ms = Number(process.hrtime.bigint() - tEnf3) / 1e6;
+        console.log(`  1000 Slice 3 shadow enforcement: ${enf3Ms.toFixed(2)}ms total, ${(enf3Ms / 1000).toFixed(3)}ms avg`);
+        check('Slice 3 performance measured',
+          Number.isFinite(winMs) && Number.isFinite(covMs)
+          && Number.isFinite(itemMs) && Number.isFinite(enf3Ms));
+      });
     });
   });
 }

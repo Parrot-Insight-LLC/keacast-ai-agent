@@ -707,6 +707,71 @@ async function run() {
         sept.shadow.telemetry.response_validation_primary_violation === VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH);
     });
   });
+
+  section('3C.4 Slice 3 coverage enforcement isolation');
+  const {
+    SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY,
+  } = require('../services/keaSnapshotSemanticValidation');
+  withFlag(SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY, 'true', () => {
+    withFlag(SNAPSHOT_COVERAGE_VALIDATION_ENV_KEY, 'true', () => {
+      withEnforcement('true', () => {
+        const onlyCoverage = evaluateResponseEnforcement({
+          flagEnabled: true,
+          capability: 'financial_forecast',
+          responseSource: 'azure',
+          writeResponseMode: 'none',
+          shadow: {
+            telemetry: {
+              response_validation_performed: true,
+              response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+              response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+            },
+            validation: {
+              status: 'invalid',
+              violations: [{
+                code: VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH,
+                severity: SEVERITY.HIGH,
+                reasonCode: SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH,
+              }],
+            },
+          },
+        });
+        check('coverage-only not blocked', onlyCoverage.block === false);
+        check('coverage-only not eligible family',
+          onlyCoverage.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+        const mixedCoverage = evaluateResponseEnforcement({
+          flagEnabled: true,
+          capability: 'financial_forecast',
+          responseSource: 'azure',
+          writeResponseMode: 'none',
+          shadow: {
+            telemetry: {
+              response_validation_performed: true,
+              response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+              response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+            },
+            validation: {
+              status: 'invalid',
+              violations: [
+                {
+                  code: VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH,
+                  severity: SEVERITY.HIGH,
+                  reasonCode: SNAPSHOT_SEMANTIC_REASON.COVERAGE_ROLE_MISMATCH,
+                },
+                {
+                  code: VIOLATION_CODE.UNSUPPORTED_DERIVATION,
+                  severity: SEVERITY.CRITICAL,
+                  reasonCode: 'unauthorized_derived_amount',
+                },
+              ],
+            },
+          },
+        });
+        check('mixed coverage+derivation still blocked', mixedCoverage.block === true);
+      });
+    });
+  });
   withFlag(SNAPSHOT_SEMANTIC_VALIDATION_ENV_KEY, 'false', () => {
     withEnforcement('true', () => {
       const liveC = enforceTurn(LIVE_C_TEXT, {

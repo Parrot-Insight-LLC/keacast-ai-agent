@@ -17,6 +17,7 @@ const {
 const { CLAIM_KIND, extractResponseClaims } = require('./keaResponseClaimExtractor');
 const {
   isSnapshotSemanticValidationEnabled,
+  isSnapshotCoverageValidationEnabled,
   isSnapshotContract,
   evaluateSnapshotSemanticIdentity,
 } = require('./keaSnapshotSemanticValidation');
@@ -835,7 +836,7 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
         }
       }
 
-      if (isSnapshotSemanticValidationEnabled()) {
+      if (isSnapshotSemanticValidationEnabled() || isSnapshotCoverageValidationEnabled()) {
         const semantic = evaluateSnapshotSemanticIdentity({
           contract,
           row,
