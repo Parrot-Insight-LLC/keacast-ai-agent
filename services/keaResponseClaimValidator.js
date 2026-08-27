@@ -29,6 +29,12 @@ const {
   isTrendCoverageValidationEnabled,
   evaluateTrendCoverageIdentity,
 } = require('./keaTrendSemanticValidation');
+const {
+  isLookupAttributionValidationEnabled,
+  isLookupContract,
+  evaluateLookupAttributionIdentity,
+  evaluateLookupAbsenceAttribution,
+} = require('./keaLookupSemanticValidation');
 
 function toCents(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -887,6 +893,29 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
         }
       }
 
+      if (isLookupAttributionValidationEnabled()) {
+        const attribution = evaluateLookupAttributionIdentity({
+          contract,
+          row,
+          text: text || '',
+        });
+        if (attribution && attribution.mismatch) {
+          const reasons = attribution.reasons || [];
+          for (let a = 0; a < reasons.length; a += 1) {
+            addViolation(
+              VIOLATION_CODE.LOOKUP_ATTRIBUTION_MISMATCH,
+              SEVERITY.HIGH,
+              row,
+              matches[0] && matches[0].claimId ? matches[0].claimId : null,
+              reasons[a]
+            );
+          }
+          amountCheck = 'invalid';
+          bindingCheck = 'invalid';
+          continue;
+        }
+      }
+
       if (matches.length > 1 && !hints.length && !compatibleAmountMatches(matches)) {
         addIndeterminate('AMBIGUOUS_PATH', row, MATCH_RESULT.AMBIGUOUS);
         bindingCheck = bindingCheck === 'invalid' ? 'invalid' : 'indeterminate';
@@ -908,6 +937,26 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
           'count_mismatch'
         );
         countCheck = 'invalid';
+      } else if (isLookupAttributionValidationEnabled()) {
+        const attribution = evaluateLookupAttributionIdentity({
+          contract,
+          row,
+          text: text || '',
+        });
+        if (attribution && attribution.mismatch) {
+          const reasons = attribution.reasons || [];
+          for (let a = 0; a < reasons.length; a += 1) {
+            addViolation(
+              VIOLATION_CODE.LOOKUP_ATTRIBUTION_MISMATCH,
+              SEVERITY.HIGH,
+              row,
+              null,
+              reasons[a]
+            );
+          }
+          countCheck = 'invalid';
+          bindingCheck = 'invalid';
+        }
       }
     } else if (row.kind === CLAIM_KIND.PERCENT) {
       const hints = row.semanticHints || [];
@@ -977,6 +1026,24 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
       if (!hasRankingClaim) {
         addIndeterminate(VIOLATION_CODE.UNSUPPORTED_RANKING, row, 'no_ranking_claim');
       }
+    }
+  }
+
+  if (isLookupAttributionValidationEnabled() && isLookupContract(contract)) {
+    const absenceHits = evaluateLookupAbsenceAttribution({
+      contract,
+      text: text || '',
+    });
+    for (let a = 0; a < absenceHits.length; a += 1) {
+      const hit = absenceHits[a];
+      addViolation(
+        VIOLATION_CODE.LOOKUP_ATTRIBUTION_MISMATCH,
+        SEVERITY.HIGH,
+        { position: hit.position || 0 },
+        null,
+        hit.reason
+      );
+      bindingCheck = 'invalid';
     }
   }
 

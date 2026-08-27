@@ -1012,6 +1012,106 @@ async function run() {
     });
   });
 
+  section('3C.4 Slice 6 lookup attribution enforcement isolation');
+  const {
+    LOOKUP_ATTRIBUTION_VALIDATION_ENV_KEY,
+    LOOKUP_ATTRIBUTION_REASON,
+  } = require('../services/keaLookupSemanticValidation');
+  const TARGET_WALMART = 'You spent $279.58 at Walmart in July 2026.';
+  const TARGET_JUNE = 'You spent $279.58 at Target in June 2026.';
+  const TARGET_MIXED_AMT = 'You spent $99999 at Walmart in July 2026.';
+  withFlag(LOOKUP_ATTRIBUTION_VALIDATION_ENV_KEY, 'true', () => {
+    withEnforcement('true', () => {
+      const onlyMerch = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'financial_lookup',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [{
+              code: VIOLATION_CODE.LOOKUP_ATTRIBUTION_MISMATCH,
+              severity: SEVERITY.HIGH,
+              reasonCode: LOOKUP_ATTRIBUTION_REASON.MERCHANT_IDENTITY_MISMATCH,
+            }],
+          },
+        },
+      });
+      check('attribution-only merchant not blocked', onlyMerch.block === false);
+      check('attribution-only not eligible family',
+        onlyMerch.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+      const liveGood = enforceTurn(TARGET_VALID, {
+        ledger: lookupLedger,
+        capability: 'financial_lookup',
+      });
+      check('live Target lookup not blocked', liveGood.enforced.decision.block === false);
+      check('live Target remains VALID',
+        liveGood.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
+
+      const walmartLive = enforceTurn(TARGET_WALMART, {
+        ledger: lookupLedger,
+        capability: 'financial_lookup',
+      });
+      check('wrong-merchant invalid in shadow',
+        walmartLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+      check('wrong-merchant not blocked', walmartLive.enforced.decision.block === false);
+      check('wrong-merchant original reaches user', walmartLive.enforced.finalText === TARGET_WALMART);
+      check('wrong-merchant primary attribution',
+        walmartLive.shadow.telemetry.response_validation_primary_violation
+          === VIOLATION_CODE.LOOKUP_ATTRIBUTION_MISMATCH);
+
+      const juneLive = enforceTurn(TARGET_JUNE, {
+        ledger: lookupLedger,
+        capability: 'financial_lookup',
+      });
+      check('wrong-period invalid in shadow',
+        juneLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+      check('wrong-period not blocked', juneLive.enforced.decision.block === false);
+
+      const mixedLive = enforceTurn(TARGET_MIXED_AMT, {
+        ledger: lookupLedger,
+        capability: 'financial_lookup',
+      });
+      check('mixed attribution+amount live blocked', mixedLive.enforced.decision.block === true);
+
+      const amtStill = enforceTurn(TARGET_INVALID, {
+        ledger: lookupLedger,
+        capability: 'financial_lookup',
+      });
+      check('wrong amount still blocked with Slice 6 ON', amtStill.enforced.decision.block === true);
+    });
+  });
+  withFlag(LOOKUP_ATTRIBUTION_VALIDATION_ENV_KEY, 'false', () => {
+    withEnforcement('true', () => {
+      const off = enforceTurn(TARGET_WALMART, {
+        ledger: lookupLedger,
+        capability: 'financial_lookup',
+      });
+      check('Slice 6 OFF Walmart not attribution-invalid',
+        off.shadow.telemetry.response_validation_status !== RESPONSE_VALIDATION_STATUS.INVALID
+        || !(off.shadow.validation.violations || []).some((v) => (
+          v.code === VIOLATION_CODE.LOOKUP_ATTRIBUTION_MISMATCH
+        )));
+      check('Slice 6 OFF does not disable 3C.3',
+        enforceTurn(LIVE_C_TEXT, {
+          ledger: snapshotLedger,
+          capability: 'financial_forecast',
+        }).enforced.decision.block === true);
+      check('Slice 6 OFF existing lookup wrong amount still blocked',
+        enforceTurn(TARGET_INVALID, {
+          ledger: lookupLedger,
+          capability: 'financial_lookup',
+        }).enforced.decision.block === true);
+    });
+  });
+
   section('3C.3 telemetry privacy');
   withEnforcement('true', () => {
     const t = createKeaTelemetry({ requestId: 'enf-1' });
