@@ -21,6 +21,10 @@ const {
   isSnapshotContract,
   evaluateSnapshotSemanticIdentity,
 } = require('./keaSnapshotSemanticValidation');
+const {
+  isComparisonRelationValidationEnabled,
+  evaluateComparisonRelationIdentity,
+} = require('./keaComparisonSemanticValidation');
 
 function toCents(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -518,7 +522,7 @@ function previewUpcoming(contract) {
   return contract.listCoverage && contract.listCoverage.upcoming === LIST_COVERAGE.PREVIEW;
 }
 
-function validateResponseClaims({ contract, extractedClaims } = {}) {
+function validateResponseClaims({ contract, extractedClaims, text } = {}) {
   if (!contract || typeof contract !== 'object') {
     return {
       version: 1,
@@ -952,6 +956,24 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
     }
   }
 
+  if (isComparisonRelationValidationEnabled() && isComparisonContract(contract)) {
+    const relationHits = evaluateComparisonRelationIdentity({
+      contract,
+      text: text || '',
+    });
+    for (let r = 0; r < relationHits.length; r += 1) {
+      const hit = relationHits[r];
+      addViolation(
+        VIOLATION_CODE.COMPARISON_RELATION_MISMATCH,
+        SEVERITY.HIGH,
+        { position: hit.position || 0 },
+        null,
+        hit.reason
+      );
+      bindingCheck = 'invalid';
+    }
+  }
+
   const sortedV = sortViolations(violations);
   const sortedI = sortViolations(indeterminate);
   let status = VALIDATION_STATUS.VALID;
@@ -984,7 +1006,7 @@ function validateResponseClaims({ contract, extractedClaims } = {}) {
 
 function validateResponseAgainstContract({ contract, text } = {}) {
   const extractedClaims = extractResponseClaims(text || '');
-  return validateResponseClaims({ contract, extractedClaims });
+  return validateResponseClaims({ contract, extractedClaims, text: text || '' });
 }
 
 function summarizeValidationResult(result) {

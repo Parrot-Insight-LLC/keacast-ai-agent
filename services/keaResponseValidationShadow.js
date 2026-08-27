@@ -351,7 +351,11 @@ function runShadowResponseValidation(input = {}, deps = {}) {
     const validateFn = deps.validateClaims || validateResponseClaims;
     let result;
     try {
-      result = validateFn({ contract: built.contract, extractedClaims: extracted });
+      result = validateFn({
+        contract: built.contract,
+        extractedClaims: extracted,
+        text: input.text || '',
+      });
     } catch (err) {
       return timed({
         response_validation_performed: true,

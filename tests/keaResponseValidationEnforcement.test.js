@@ -782,6 +782,115 @@ async function run() {
     });
   });
 
+  section('3C.4 Slice 4 relation enforcement isolation');
+  const {
+    COMPARISON_RELATION_VALIDATION_ENV_KEY,
+    COMPARISON_RELATION_REASON,
+  } = require('../services/keaComparisonSemanticValidation');
+  const CMP_REVERSED = 'Spending decreased from July to June.';
+  withFlag(COMPARISON_RELATION_VALIDATION_ENV_KEY, 'true', () => {
+    withEnforcement('true', () => {
+      const onlyRel = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'cashflow_comparison',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [{
+              code: VIOLATION_CODE.COMPARISON_RELATION_MISMATCH,
+              severity: SEVERITY.HIGH,
+              reasonCode: COMPARISON_RELATION_REASON.PERIOD_RELATION_REVERSED,
+            }],
+          },
+        },
+      });
+      check('relation-only not blocked', onlyRel.block === false);
+      check('relation-only not eligible family',
+        onlyRel.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+      const mixedRel = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'cashflow_comparison',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [
+              {
+                code: VIOLATION_CODE.COMPARISON_RELATION_MISMATCH,
+                severity: SEVERITY.HIGH,
+                reasonCode: COMPARISON_RELATION_REASON.PERIOD_RELATION_REVERSED,
+              },
+              {
+                code: VIOLATION_CODE.UNAUTHORIZED_DIRECTION,
+                severity: SEVERITY.HIGH,
+                reasonCode: 'direction_polarity_mismatch',
+              },
+            ],
+          },
+        },
+      });
+      check('mixed relation+direction still blocked', mixedRel.block === true);
+
+      const liveRel = enforceTurn(CMP_VALID, {
+        ledger: comparisonLedger,
+        capability: 'cashflow_comparison',
+      });
+      check('live July compared to June not blocked', liveRel.enforced.decision.block === false);
+      check('live comparison remains VALID',
+        liveRel.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
+
+      const reversedLive = enforceTurn(CMP_REVERSED, {
+        ledger: comparisonLedger,
+        capability: 'cashflow_comparison',
+      });
+      check('reversed relation invalid in shadow',
+        reversedLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+      check('reversed relation not blocked', reversedLive.enforced.decision.block === false);
+      check('reversed original reaches user', reversedLive.enforced.finalText === CMP_REVERSED);
+      check('reversed primary relation',
+        reversedLive.shadow.telemetry.response_validation_primary_violation
+          === VIOLATION_CODE.COMPARISON_RELATION_MISMATCH);
+
+      const dirStill = enforceTurn(CMP_WRONG_DIR, {
+        ledger: comparisonLedger,
+        capability: 'cashflow_comparison',
+      });
+      check('wrong direction still blocked with Slice 4 ON', dirStill.enforced.decision.block === true);
+    });
+  });
+  withFlag(COMPARISON_RELATION_VALIDATION_ENV_KEY, 'false', () => {
+    withEnforcement('true', () => {
+      const off = enforceTurn(CMP_REVERSED, {
+        ledger: comparisonLedger,
+        capability: 'cashflow_comparison',
+      });
+      check('Slice 4 OFF reversed not relation-invalid',
+        off.shadow.telemetry.response_validation_status !== RESPONSE_VALIDATION_STATUS.INVALID
+        || !(off.shadow.validation.violations || []).some((v) => (
+          v.code === VIOLATION_CODE.COMPARISON_RELATION_MISMATCH
+        )));
+      check('Slice 4 OFF does not disable 3C.3',
+        enforceTurn(LIVE_C_TEXT, {
+          ledger: snapshotLedger,
+          capability: 'financial_forecast',
+        }).enforced.decision.block === true);
+    });
+  });
+
   section('3C.3 telemetry privacy');
   withEnforcement('true', () => {
     const t = createKeaTelemetry({ requestId: 'enf-1' });
