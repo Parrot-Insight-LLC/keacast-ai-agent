@@ -1112,6 +1112,109 @@ async function run() {
     });
   });
 
+  section('3C.4 Slice 7 snapshot negative-minimum enforcement isolation');
+  const {
+    SNAPSHOT_NEGATIVE_MINIMUM_VALIDATION_ENV_KEY,
+    SNAPSHOT_NEGATIVE_MINIMUM_REASON,
+  } = require('../services/keaSnapshotNegativeBalanceSemanticValidation');
+  const { buildSnapshotEvidenceLedger } = require('../services/keaEvidenceLedgerBuilders');
+  const NEG_LEDGER = buildSnapshotEvidenceLedger({
+    capability: 'financial_forecast',
+    evidence: {
+      status: 'ok',
+      source: ['kea_snapshot'],
+      facts: {
+        upcomingWindowDays: 15,
+        availableBalance: 2207.75,
+        futureNegativeBalances: [
+          { amount: -125.40, date: '2026-09-14', daysUntil: 14 },
+        ],
+      },
+      period: { start: '2026-08-01', end: '2026-08-31', label: 'August 2026' },
+      limitations: ['upcoming_window_15d'],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Main Account' },
+  }).ledger;
+  const NEG_VALID = 'Your projected balance is -$125.40 on September 14, 2026.';
+  const NEG_LOWEST = 'Your lowest balance next month will be -$125.40.';
+  withFlag(SNAPSHOT_NEGATIVE_MINIMUM_VALIDATION_ENV_KEY, 'true', () => {
+    withEnforcement('true', () => {
+      const onlyMin = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'financial_forecast',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [{
+              code: VIOLATION_CODE.SNAPSHOT_NEGATIVE_MINIMUM_MISMATCH,
+              severity: SEVERITY.HIGH,
+              reasonCode: SNAPSHOT_NEGATIVE_MINIMUM_REASON.NEGATIVE_EVENT_AS_MINIMUM,
+            }],
+          },
+        },
+      });
+      check('minimum-only not blocked', onlyMin.block === false);
+      check('minimum-only not eligible family',
+        onlyMin.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+      const eventLive = enforceTurn(NEG_VALID, {
+        ledger: NEG_LEDGER,
+        capability: 'financial_forecast',
+      });
+      check('exact negative event not blocked', eventLive.enforced.decision.block === false);
+      check('exact negative event remains VALID',
+        eventLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
+
+      const lowestLive = enforceTurn(NEG_LOWEST, {
+        ledger: NEG_LEDGER,
+        capability: 'financial_forecast',
+      });
+      check('lowest invalid in shadow',
+        lowestLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+      check('lowest not blocked', lowestLive.enforced.decision.block === false);
+      check('lowest original reaches user', lowestLive.enforced.finalText === NEG_LOWEST);
+      check('lowest primary Slice 7',
+        lowestLive.shadow.telemetry.response_validation_primary_violation
+          === VIOLATION_CODE.SNAPSHOT_NEGATIVE_MINIMUM_MISMATCH);
+
+      check('LIVE_C still blocked with Slice 7 ON',
+        enforceTurn(LIVE_C_TEXT, {
+          ledger: snapshotLedger,
+          capability: 'financial_forecast',
+        }).enforced.decision.block === true);
+      const mixed = enforceTurn(NEG_LOWEST + ' ' + LIVE_C_TEXT, {
+        ledger: NEG_LEDGER,
+        capability: 'financial_forecast',
+      });
+      check('mixed Slice 7 + old critical still blocked', mixed.enforced.decision.block === true);
+    });
+  });
+  withFlag(SNAPSHOT_NEGATIVE_MINIMUM_VALIDATION_ENV_KEY, 'false', () => {
+    withEnforcement('true', () => {
+      const off = enforceTurn(NEG_LOWEST, {
+        ledger: NEG_LEDGER,
+        capability: 'financial_forecast',
+      });
+      check('Slice 7 OFF lowest not minimum-invalid',
+        off.shadow.telemetry.response_validation_status !== RESPONSE_VALIDATION_STATUS.INVALID
+        || !(off.shadow.validation.violations || []).some((v) => (
+          v.code === VIOLATION_CODE.SNAPSHOT_NEGATIVE_MINIMUM_MISMATCH
+        )));
+      check('Slice 7 OFF does not disable 3C.3',
+        enforceTurn(LIVE_C_TEXT, {
+          ledger: snapshotLedger,
+          capability: 'financial_forecast',
+        }).enforced.decision.block === true);
+    });
+  });
+
   section('3C.3 telemetry privacy');
   withEnforcement('true', () => {
     const t = createKeaTelemetry({ requestId: 'enf-1' });

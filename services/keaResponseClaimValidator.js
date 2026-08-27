@@ -35,6 +35,11 @@ const {
   evaluateLookupAttributionIdentity,
   evaluateLookupAbsenceAttribution,
 } = require('./keaLookupSemanticValidation');
+const {
+  isSnapshotNegativeMinimumValidationEnabled,
+  evaluateSnapshotNegativeMinimumIdentity,
+  evaluateSnapshotNegativeMinimumNarration,
+} = require('./keaSnapshotNegativeBalanceSemanticValidation');
 
 function toCents(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -764,6 +769,27 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
       }
 
       if (listDecision === 'indeterminate' && matches.length === 0) {
+        if (isSnapshotNegativeMinimumValidationEnabled()) {
+          const ranking = evaluateSnapshotNegativeMinimumIdentity({
+            contract,
+            row,
+            text: text || '',
+            amountCandidates,
+            boundHit,
+          });
+          if (ranking && ranking.mismatch) {
+            addViolation(
+              VIOLATION_CODE.SNAPSHOT_NEGATIVE_MINIMUM_MISMATCH,
+              SEVERITY.HIGH,
+              row,
+              null,
+              ranking.reason
+            );
+            amountCheck = 'invalid';
+            bindingCheck = 'invalid';
+            continue;
+          }
+        }
         addIndeterminate(VIOLATION_CODE.LIST_ITEM_MISMATCH, row, MATCH_RESULT.AMBIGUOUS);
         amountCheck = amountCheck === 'invalid' ? 'invalid' : 'indeterminate';
         bindingCheck = bindingCheck === 'invalid' ? 'invalid' : 'indeterminate';
@@ -866,6 +892,28 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
             row,
             semantic.evidenceClaimId || (matches[0] && matches[0].claimId) || null,
             semantic.reason
+          );
+          amountCheck = 'invalid';
+          bindingCheck = 'invalid';
+          continue;
+        }
+      }
+
+      if (isSnapshotNegativeMinimumValidationEnabled()) {
+        const ranking = evaluateSnapshotNegativeMinimumIdentity({
+          contract,
+          row,
+          text: text || '',
+          amountCandidates,
+          boundHit: listBound ? boundHit : null,
+        });
+        if (ranking && ranking.mismatch) {
+          addViolation(
+            VIOLATION_CODE.SNAPSHOT_NEGATIVE_MINIMUM_MISMATCH,
+            SEVERITY.HIGH,
+            row,
+            null,
+            ranking.reason
           );
           amountCheck = 'invalid';
           bindingCheck = 'invalid';
@@ -1026,6 +1074,24 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
       if (!hasRankingClaim) {
         addIndeterminate(VIOLATION_CODE.UNSUPPORTED_RANKING, row, 'no_ranking_claim');
       }
+    }
+  }
+
+  if (isSnapshotNegativeMinimumValidationEnabled() && isSnapshotContract(contract)) {
+    const rankingHits = evaluateSnapshotNegativeMinimumNarration({
+      contract,
+      text: text || '',
+    });
+    for (let n = 0; n < rankingHits.length; n += 1) {
+      const hit = rankingHits[n];
+      addViolation(
+        VIOLATION_CODE.SNAPSHOT_NEGATIVE_MINIMUM_MISMATCH,
+        SEVERITY.HIGH,
+        { position: hit.position || 0 },
+        null,
+        hit.reason
+      );
+      bindingCheck = 'invalid';
     }
   }
 
