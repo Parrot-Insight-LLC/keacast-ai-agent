@@ -891,6 +891,127 @@ async function run() {
     });
   });
 
+  section('3C.4 Slice 5 trend coverage enforcement isolation');
+  const {
+    TREND_COVERAGE_VALIDATION_ENV_KEY,
+    TREND_COVERAGE_REASON,
+  } = require('../services/keaTrendSemanticValidation');
+  const TREND_FULL_MONTH = "June's full-month spending was $12815.73.";
+  const TREND_MIXED_COV = "June's full-month spending was $12815.73. Spending increased.";
+  withFlag(TREND_COVERAGE_VALIDATION_ENV_KEY, 'true', () => {
+    withEnforcement('true', () => {
+      const onlyCov = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'cashflow_trend',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [{
+              code: VIOLATION_CODE.TREND_COVERAGE_MISMATCH,
+              severity: SEVERITY.HIGH,
+              reasonCode: TREND_COVERAGE_REASON.MATCHED_ELAPSED_AS_FULL_MONTH,
+            }],
+          },
+        },
+      });
+      check('coverage-only not blocked', onlyCov.block === false);
+      check('coverage-only not eligible family',
+        onlyCov.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+      const mixedCov = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'cashflow_trend',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [
+              {
+                code: VIOLATION_CODE.TREND_COVERAGE_MISMATCH,
+                severity: SEVERITY.HIGH,
+                reasonCode: TREND_COVERAGE_REASON.MATCHED_ELAPSED_AS_FULL_MONTH,
+              },
+              {
+                code: VIOLATION_CODE.UNAUTHORIZED_DIRECTION,
+                severity: SEVERITY.HIGH,
+                reasonCode: 'direction_polarity_mismatch',
+              },
+            ],
+          },
+        },
+      });
+      check('mixed coverage+direction still blocked', mixedCov.block === true);
+
+      const liveTrend = enforceTurn(TREND_VALID, {
+        ledger: trendLedger,
+        capability: 'cashflow_trend',
+      });
+      check('live matched-elapsed trend not blocked', liveTrend.enforced.decision.block === false);
+      check('live trend remains VALID',
+        liveTrend.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
+
+      const fullMonthLive = enforceTurn(TREND_FULL_MONTH, {
+        ledger: trendLedger,
+        capability: 'cashflow_trend',
+      });
+      check('full-month coverage invalid in shadow',
+        fullMonthLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+      check('full-month coverage not blocked', fullMonthLive.enforced.decision.block === false);
+      check('full-month original reaches user', fullMonthLive.enforced.finalText === TREND_FULL_MONTH);
+      check('full-month primary coverage',
+        fullMonthLive.shadow.telemetry.response_validation_primary_violation
+          === VIOLATION_CODE.TREND_COVERAGE_MISMATCH);
+
+      const mixedLive = enforceTurn(TREND_MIXED_COV, {
+        ledger: trendLedger,
+        capability: 'cashflow_trend',
+      });
+      check('mixed coverage+direction live blocked', mixedLive.enforced.decision.block === true);
+
+      const amtStill = enforceTurn(TREND_WRONG_AMT, {
+        ledger: trendLedger,
+        capability: 'cashflow_trend',
+      });
+      check('wrong amount still blocked with Slice 5 ON', amtStill.enforced.decision.block === true);
+    });
+  });
+  withFlag(TREND_COVERAGE_VALIDATION_ENV_KEY, 'false', () => {
+    withEnforcement('true', () => {
+      const off = enforceTurn(TREND_FULL_MONTH, {
+        ledger: trendLedger,
+        capability: 'cashflow_trend',
+      });
+      check('Slice 5 OFF full-month not coverage-invalid',
+        off.shadow.telemetry.response_validation_status !== RESPONSE_VALIDATION_STATUS.INVALID
+        || !(off.shadow.validation.violations || []).some((v) => (
+          v.code === VIOLATION_CODE.TREND_COVERAGE_MISMATCH
+        )));
+      check('Slice 5 OFF does not disable 3C.3',
+        enforceTurn(LIVE_C_TEXT, {
+          ledger: snapshotLedger,
+          capability: 'financial_forecast',
+        }).enforced.decision.block === true);
+      check('Slice 5 OFF existing trend wrong amount still blocked',
+        enforceTurn(TREND_WRONG_AMT, {
+          ledger: trendLedger,
+          capability: 'cashflow_trend',
+        }).enforced.decision.block === true);
+    });
+  });
+
   section('3C.3 telemetry privacy');
   withEnforcement('true', () => {
     const t = createKeaTelemetry({ requestId: 'enf-1' });

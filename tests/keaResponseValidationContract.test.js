@@ -333,7 +333,8 @@ async function run() {
     && VIOLATION_CODE.PREVIEW_TOTAL_MISATTRIBUTION === 'PREVIEW_TOTAL_MISATTRIBUTION'
     && VIOLATION_CODE.UNSUPPORTED_DERIVATION === 'UNSUPPORTED_DERIVATION'
     && VIOLATION_CODE.SNAPSHOT_SEMANTIC_MISMATCH === 'SNAPSHOT_SEMANTIC_MISMATCH'
-    && VIOLATION_CODE.COMPARISON_RELATION_MISMATCH === 'COMPARISON_RELATION_MISMATCH');
+    && VIOLATION_CODE.COMPARISON_RELATION_MISMATCH === 'COMPARISON_RELATION_MISMATCH'
+    && VIOLATION_CODE.TREND_COVERAGE_MISMATCH === 'TREND_COVERAGE_MISMATCH');
   check('missing ledger controlled', buildResponseValidationContract(null).ok === false
     && buildResponseValidationContract(null).reason === 'missing_ledger'
     && buildResponseValidationContract(null).promptable === false);

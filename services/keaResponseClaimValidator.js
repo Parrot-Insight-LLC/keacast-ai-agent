@@ -25,6 +25,10 @@ const {
   isComparisonRelationValidationEnabled,
   evaluateComparisonRelationIdentity,
 } = require('./keaComparisonSemanticValidation');
+const {
+  isTrendCoverageValidationEnabled,
+  evaluateTrendCoverageIdentity,
+} = require('./keaTrendSemanticValidation');
 
 function toCents(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -856,6 +860,26 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
             row,
             semantic.evidenceClaimId || (matches[0] && matches[0].claimId) || null,
             semantic.reason
+          );
+          amountCheck = 'invalid';
+          bindingCheck = 'invalid';
+          continue;
+        }
+      }
+
+      if (isTrendCoverageValidationEnabled()) {
+        const coverage = evaluateTrendCoverageIdentity({
+          contract,
+          row,
+          text: text || '',
+        });
+        if (coverage && coverage.mismatch) {
+          addViolation(
+            VIOLATION_CODE.TREND_COVERAGE_MISMATCH,
+            SEVERITY.HIGH,
+            row,
+            matches[0] && matches[0].claimId ? matches[0].claimId : null,
+            coverage.reason
           );
           amountCheck = 'invalid';
           bindingCheck = 'invalid';
