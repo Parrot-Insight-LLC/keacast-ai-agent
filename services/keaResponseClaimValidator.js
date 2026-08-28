@@ -40,6 +40,10 @@ const {
   evaluateSnapshotNegativeMinimumIdentity,
   evaluateSnapshotNegativeMinimumNarration,
 } = require('./keaSnapshotNegativeBalanceSemanticValidation');
+const {
+  isComparisonMetricValidationEnabled,
+  evaluateComparisonMetricIdentity,
+} = require('./keaComparisonMetricSemanticValidation');
 
 function toCents(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -676,6 +680,28 @@ function validateResponseClaims({ contract, extractedClaims, text } = {}) {
             'wrong_sign_semantics'
           );
           amountCheck = 'invalid';
+          continue;
+        }
+      }
+
+      if (isComparisonMetricValidationEnabled() && isComparisonContract(contract) && matches.length) {
+        const metric = evaluateComparisonMetricIdentity({
+          contract,
+          row,
+          text: text || '',
+          matches,
+          roleDelta,
+        });
+        if (metric && metric.mismatch) {
+          addViolation(
+            VIOLATION_CODE.COMPARISON_METRIC_MISMATCH,
+            SEVERITY.HIGH,
+            row,
+            null,
+            metric.reason
+          );
+          amountCheck = 'invalid';
+          bindingCheck = 'invalid';
           continue;
         }
       }

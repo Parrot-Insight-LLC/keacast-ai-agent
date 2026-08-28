@@ -1215,6 +1215,114 @@ async function run() {
     });
   });
 
+  section('3C.4 Slice 8 comparison metric enforcement isolation');
+  const {
+    COMPARISON_METRIC_VALIDATION_ENV_KEY,
+    COMPARISON_METRIC_REASON,
+  } = require('../services/keaComparisonMetricSemanticValidation');
+  const METRIC_LEDGER = buildComparisonEvidenceLedger({
+    evidence: {
+      status: 'ok',
+      source: ['cashflow_period_comparison'],
+      facts: {
+        accountScope: 'selected_account',
+        windowKind: 'full_months',
+        periodA: {
+          label: 'June 2026', start: '2026-06-01', end: '2026-06-30',
+          spending: 100, income: 200, net: 50,
+        },
+        periodB: {
+          label: 'July 2026', start: '2026-07-01', end: '2026-07-31',
+          spending: 80, income: 250, net: 170,
+        },
+        changes: {
+          spending: { absolute: -20, percent: -20, direction: 'decreased' },
+        },
+      },
+      limitations: [],
+    },
+    accountContext: { accountId: '10', accountLabel: 'Checking' },
+  }).ledger;
+  const METRIC_VALID = 'June spending was $100.';
+  const METRIC_SWAP = 'June spending was $200.';
+  withFlag(COMPARISON_METRIC_VALIDATION_ENV_KEY, 'true', () => {
+    withEnforcement('true', () => {
+      const onlyMetric = evaluateResponseEnforcement({
+        flagEnabled: true,
+        capability: 'cashflow_comparison',
+        responseSource: 'azure',
+        writeResponseMode: 'none',
+        shadow: {
+          telemetry: {
+            response_validation_performed: true,
+            response_validation_status: RESPONSE_VALIDATION_STATUS.INVALID,
+            response_validation_contract_status: RESPONSE_VALIDATION_CONTRACT_STATUS.OK,
+          },
+          validation: {
+            status: 'invalid',
+            violations: [{
+              code: VIOLATION_CODE.COMPARISON_METRIC_MISMATCH,
+              severity: SEVERITY.HIGH,
+              reasonCode: COMPARISON_METRIC_REASON.METRIC_IDENTITY_MISMATCH,
+            }],
+          },
+        },
+      });
+      check('metric-only not blocked', onlyMetric.block === false);
+      check('metric-only not eligible family',
+        onlyMetric.reason === ENFORCEMENT_REASON.NOT_ELIGIBLE_CLAIM_FAMILY);
+
+      const validLive = enforceTurn(METRIC_VALID, {
+        ledger: METRIC_LEDGER,
+        capability: 'cashflow_comparison',
+      });
+      check('correct metric not blocked', validLive.enforced.decision.block === false);
+      check('correct metric remains VALID',
+        validLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.VALID);
+
+      const swapLive = enforceTurn(METRIC_SWAP, {
+        ledger: METRIC_LEDGER,
+        capability: 'cashflow_comparison',
+      });
+      check('swap invalid in shadow',
+        swapLive.shadow.telemetry.response_validation_status === RESPONSE_VALIDATION_STATUS.INVALID);
+      check('swap not blocked', swapLive.enforced.decision.block === false);
+      check('swap original reaches user', swapLive.enforced.finalText === METRIC_SWAP);
+      check('swap primary Slice 8',
+        swapLive.shadow.telemetry.response_validation_primary_violation
+          === VIOLATION_CODE.COMPARISON_METRIC_MISMATCH);
+
+      check('LIVE_C still blocked with Slice 8 ON',
+        enforceTurn(LIVE_C_TEXT, {
+          ledger: snapshotLedger,
+          capability: 'financial_forecast',
+        }).enforced.decision.block === true);
+      const mixed = enforceTurn('June spending was $200. Spending decreased by 14%.', {
+        ledger: METRIC_LEDGER,
+        capability: 'cashflow_comparison',
+      });
+      check('mixed Slice 8 + old percent still blocked', mixed.enforced.decision.block === true);
+    });
+  });
+  withFlag(COMPARISON_METRIC_VALIDATION_ENV_KEY, 'false', () => {
+    withEnforcement('true', () => {
+      const off = enforceTurn(METRIC_SWAP, {
+        ledger: METRIC_LEDGER,
+        capability: 'cashflow_comparison',
+      });
+      check('Slice 8 OFF swap not metric-invalid',
+        off.shadow.telemetry.response_validation_status !== RESPONSE_VALIDATION_STATUS.INVALID
+        || !(off.shadow.validation.violations || []).some((v) => (
+          v.code === VIOLATION_CODE.COMPARISON_METRIC_MISMATCH
+        )));
+      check('Slice 8 OFF does not disable 3C.3',
+        enforceTurn(LIVE_C_TEXT, {
+          ledger: snapshotLedger,
+          capability: 'financial_forecast',
+        }).enforced.decision.block === true);
+    });
+  });
+
   section('3C.3 telemetry privacy');
   withEnforcement('true', () => {
     const t = createKeaTelemetry({ requestId: 'enf-1' });
