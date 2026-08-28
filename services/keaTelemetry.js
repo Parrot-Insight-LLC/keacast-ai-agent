@@ -10,6 +10,10 @@ const {
   emptyEnforcementTelemetry,
   sanitizeResponseEnforcementTelemetry,
 } = require('./keaResponseValidationEnforcement');
+const {
+  TREND_DIAG_FIELD_KEYS,
+  sanitizeTrendDiagnosticTelemetry,
+} = require('./keaTrendBlockedDiagnosticTelemetry');
 
 /**
  * Per-turn Kea chat telemetry. One JSON line, no PII / amounts / JWT / message text.
@@ -160,6 +164,7 @@ function createKeaTelemetry({ requestId } = {}) {
   };
   const responseValidation = emptyShadowTelemetry();
   const responseEnforcement = emptyEnforcementTelemetry();
+  let trendDiag = null;
 
   let lastStage = null;
   let clientAborted = false;
@@ -409,6 +414,14 @@ function createKeaTelemetry({ requestId } = {}) {
     }
   }
 
+  function recordTrendBlockedDiagnostic(flags) {
+    try {
+      trendDiag = sanitizeTrendDiagnosticTelemetry(flags);
+    } catch (err) {
+      trendDiag = null;
+    }
+  }
+
   function setResponseCharacterCount(n) {
     response_character_count = Number(n) || 0;
   }
@@ -641,6 +654,14 @@ function createKeaTelemetry({ requestId } = {}) {
       macro_failure_reason: macroFailureReason,
       estimated_block_chars: blocks,
     };
+    if (trendDiag && trendDiag.trend_diag_performed === true) {
+      for (let i = 0; i < TREND_DIAG_FIELD_KEYS.length; i += 1) {
+        const key = TREND_DIAG_FIELD_KEYS[i];
+        if (Object.prototype.hasOwnProperty.call(trendDiag, key)) {
+          payload[key] = trendDiag[key];
+        }
+      }
+    }
     for (const r of azureRounds) {
       payload[`azure_round_${r.round}_ms`] = r.ms;
     }
@@ -701,6 +722,7 @@ function createKeaTelemetry({ requestId } = {}) {
     recordEvidence,
     recordResponseValidation,
     recordResponseEnforcement,
+    recordTrendBlockedDiagnostic,
     setResponseCharacterCount,
     setIdentity,
     setSelectedAccountMeta,

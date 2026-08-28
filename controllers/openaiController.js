@@ -52,6 +52,7 @@ const {
 const { telemetryForNonCutoverTurn, emptyEvidenceTelemetry } = require('../services/keaEvidenceTelemetry');
 const { applyShadowResponseValidation } = require('../services/keaResponseValidationShadow');
 const { applyResponseValidationEnforcement } = require('../services/keaResponseValidationEnforcement');
+const { buildTrendBlockedDiagnosticTelemetry } = require('../services/keaTrendBlockedDiagnosticTelemetry');
 const { allowedToolsFor } = require('../services/keaToolBundles');
 const {
   azureChatTimeoutMs,
@@ -4565,6 +4566,17 @@ exports.chat = async (req, res) => {
         finalText = enforced.finalText;
       }
       try { telemetry.recordResponseEnforcement(enforced && enforced.telemetry); } catch (e) { /* telemetry must not own control flow */ }
+      try {
+        telemetry.recordTrendBlockedDiagnostic(buildTrendBlockedDiagnosticTelemetry({
+          contract: shadow.contract,
+          extractedClaims: shadow.extractedClaims,
+          validationResult: shadow.validation,
+          enforcementDecision: enforced && enforced.decision,
+          capability: effectiveCap,
+          sourceKind: requestLedger && requestLedger.source && requestLedger.source.kind,
+          validationTelemetry: shadow.telemetry,
+        }));
+      } catch (ignored) { /* diagnostics must not own control flow */ }
     } catch (e) {
       try {
         telemetry.recordResponseEnforcement({

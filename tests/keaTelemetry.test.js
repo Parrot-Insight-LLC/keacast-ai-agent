@@ -413,6 +413,29 @@ async function run() {
   enfThrew.recordResponseEnforcement(undefined);
   check('recordResponseEnforcement null is safe', enfThrew.toPayload().response_enforcement_blocked === false);
 
+  section('keaTelemetry trend blocked diagnostic defaults');
+  check('trend_diag_performed omitted by default', pDefault.trend_diag_performed === undefined);
+  check('no trend_diag keys by default',
+    Object.keys(pDefault).filter((k) => k.indexOf('trend_diag_') === 0).length === 0);
+  const tDiag = createKeaTelemetry({ requestId: 'req-diag' });
+  tDiag.recordTrendBlockedDiagnostic({
+    trend_diag_performed: true,
+    trend_diag_reason: 'captured',
+    trend_diag_authorized_direction: 'decreasing',
+    trend_diag_primary_failure: 'unsupported_comparison',
+    trend_diag_has_percent_failure: true,
+    trend_diag_has_direction_failure: false,
+    amount: 13.71,
+    text: 'a 13.71% decrease',
+    path: 'facts.trend.spending.firstToLast.percent',
+  });
+  const pDiag = tDiag.toPayload();
+  check('trend diag recorded when performed', pDiag.trend_diag_performed === true);
+  check('trend diag amount rejected', pDiag.amount === undefined);
+  check('trend diag text rejected', pDiag.text === undefined);
+  check('trend diag path rejected', pDiag.path === undefined);
+  check('trend diag json has no 13.71', JSON.stringify(pDiag).indexOf('13.71') === -1);
+
   if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
   else process.env.CASHFLOW_JWT_SECRET = prevSecret;
 }
