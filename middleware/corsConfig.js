@@ -2,6 +2,13 @@
 
 const LOCAL_ANGULAR_ORIGIN = 'http://localhost:4200';
 
+/** Capacitor WebView origins for com.parrotinsight.keacast (not the PWA). */
+const CAPACITOR_WEBVIEW_ORIGINS = Object.freeze([
+  'https://localhost',
+  'capacitor://localhost',
+  'ionic://localhost',
+]);
+
 const CORS_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
 const CORS_ALLOWED_HEADERS = [
   'Content-Type',
@@ -30,6 +37,9 @@ function resolveCorsOrigins({
   if (!origins.includes(LOCAL_ANGULAR_ORIGIN)) {
     origins.push(LOCAL_ANGULAR_ORIGIN);
   }
+  CAPACITOR_WEBVIEW_ORIGINS.forEach((origin) => {
+    if (!origins.includes(origin)) origins.push(origin);
+  });
   return origins;
 }
 
@@ -45,6 +55,7 @@ function buildCorsOptions(env = {}) {
 
 module.exports = {
   LOCAL_ANGULAR_ORIGIN,
+  CAPACITOR_WEBVIEW_ORIGINS,
   CORS_METHODS,
   CORS_ALLOWED_HEADERS,
   parseAllowedOrigins,

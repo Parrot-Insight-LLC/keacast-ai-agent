@@ -7,7 +7,7 @@ const jwt = require('jsonwebtoken');
 const { check, section } = require('./harness');
 const requestId = require('../middleware/requestId');
 const { cashflowAuth } = require('../middleware/cashflowAuth');
-const { buildCorsOptions, LOCAL_ANGULAR_ORIGIN } = require('../middleware/corsConfig');
+const { buildCorsOptions, LOCAL_ANGULAR_ORIGIN, CAPACITOR_WEBVIEW_ORIGINS } = require('../middleware/corsConfig');
 
 const SECRET = 'phase0-cors-preflight-secret';
 const DISALLOWED_ORIGIN = 'https://evil.example';
@@ -183,6 +183,24 @@ async function run() {
       denied.headers['access-control-allow-origin'] !== DISALLOWED_ORIGIN
       && !denied.headers['access-control-allow-origin']
     );
+
+    for (const origin of CAPACITOR_WEBVIEW_ORIGINS) {
+      const preflightNative = await request(server, {
+        method: 'OPTIONS',
+        path: '/api/agent/chat',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'authorization, content-type, x-request-id',
+        },
+      });
+      check(
+        'Capacitor origin preflight succeeds: ' + origin,
+        (preflightNative.status === 204 || preflightNative.status === 200)
+        && preflightNative.headers['access-control-allow-origin'] === origin
+        && getChatHits() === 1
+      );
+    }
   } finally {
     await close(server);
     if (prevSecret === undefined) delete process.env.CASHFLOW_JWT_SECRET;
