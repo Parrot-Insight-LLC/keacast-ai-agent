@@ -102,7 +102,7 @@ async function run() {
       headers: {
         Origin: LOCAL_ANGULAR_ORIGIN,
         'Access-Control-Request-Method': 'POST',
-        'Access-Control-Request-Headers': 'authorization, content-type, x-request-id',
+        'Access-Control-Request-Headers': 'authorization, content-type, x-request-id, x-keacast-client',
       },
     });
 
@@ -129,6 +129,10 @@ async function run() {
     check(
       'preflight permits X-Request-Id',
       hasHeader(preflight.headers['access-control-allow-headers'], 'X-Request-Id')
+    );
+    check(
+      'preflight permits X-Keacast-Client',
+      hasHeader(preflight.headers['access-control-allow-headers'], 'X-Keacast-Client')
     );
 
     const unauth = await request(server, {
@@ -175,7 +179,7 @@ async function run() {
       headers: {
         Origin: DISALLOWED_ORIGIN,
         'Access-Control-Request-Method': 'POST',
-        'Access-Control-Request-Headers': 'authorization, content-type, x-request-id',
+        'Access-Control-Request-Headers': 'authorization, content-type, x-request-id, x-keacast-client',
       },
     });
     check(
@@ -191,7 +195,7 @@ async function run() {
         headers: {
           Origin: origin,
           'Access-Control-Request-Method': 'POST',
-          'Access-Control-Request-Headers': 'authorization, content-type, x-request-id',
+          'Access-Control-Request-Headers': 'authorization, content-type, x-request-id, x-keacast-client',
         },
       });
       check(

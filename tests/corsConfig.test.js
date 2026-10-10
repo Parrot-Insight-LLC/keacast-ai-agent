@@ -4,6 +4,7 @@ const { check, section } = require('./harness');
 const {
   LOCAL_ANGULAR_ORIGIN,
   CAPACITOR_WEBVIEW_ORIGINS,
+  CORS_ALLOWED_HEADERS,
   resolveCorsOrigins,
 } = require('../middleware/corsConfig');
 
@@ -36,6 +37,10 @@ async function run() {
     && CAPACITOR_WEBVIEW_ORIGINS.indexOf('https://evil.example') === -1
   );
   check('production does not allow arbitrary origins', prod.indexOf('https://evil.example') === -1);
+  check(
+    'allowed headers include the native X-Keacast-Client interceptor',
+    CORS_ALLOWED_HEADERS.map((h) => h.toLowerCase()).indexOf('x-keacast-client') !== -1
+  );
 }
 
 module.exports = { run };

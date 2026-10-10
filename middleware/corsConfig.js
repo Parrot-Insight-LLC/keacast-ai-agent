@@ -16,6 +16,7 @@ const CORS_ALLOWED_HEADERS = [
   'X-Requested-With',
   'X-Request-Id',
   'X-Auth-Token',
+  'X-Keacast-Client',
 ];
 
 function parseAllowedOrigins(envValue = process.env.ALLOWED_ORIGINS) {
