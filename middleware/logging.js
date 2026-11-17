@@ -1,4 +1,5 @@
 const pinoHttp = require('pino-http');
+const { safeLogPath } = require('./logSafeUrl');
 
 // Identity belongs on kea_chat_turn after cashflowAuth (authenticated + hashed
 // userKey). Do not bind userId/sessionId here: this runs before body parse and
@@ -24,7 +25,7 @@ const logger = pinoHttp({
   customProps: (req) => buildPinoCustomProps(req),
   serializers: {
     // log only minimal request/response for signal
-    req(req) { return { id: req.id, method: req.method, url: req.url }; },
+    req(req) { return { id: req.id, method: req.method, url: safeLogPath(req.url) }; },
     res(res) { return { statusCode: res.statusCode }; }
   }
 });

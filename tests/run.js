@@ -12,6 +12,7 @@ const suites = [
   './legacyReadAuthorization.test.js',
   './legacyRouteAuthorization.test.js',
   './legacyHistoryController.test.js',
+  './requestUrlLogging.test.js',
   './schemasIdentity.test.js',
   './keaTelemetry.test.js',
   './keaAccountSnapshot.test.js',

@@ -1,4 +1,5 @@
 const pinoHttp = require('pino-http');
+const { safeLogPath } = require('./logSafeUrl');
 
 const logger = pinoHttp({
   // redact secrets in logs
@@ -19,7 +20,7 @@ const logger = pinoHttp({
   }),
   serializers: {
     // log only minimal request/response for signal
-    req(req) { return { id: req.id, method: req.method, url: req.url }; },
+    req(req) { return { id: req.id, method: req.method, url: safeLogPath(req.url) }; },
     res(res) { return { statusCode: res.statusCode }; }
   }
 });
