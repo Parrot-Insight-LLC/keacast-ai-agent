@@ -6,6 +6,7 @@ const { totals } = require('./harness');
 
 const suites = [
   './cashflowAuth.test.js',
+  './userCacheOwnership.test.js',
   './sessionAuthorization.test.js',
   './keaAccountAccess.test.js',
   './keaIdentity.test.js',
