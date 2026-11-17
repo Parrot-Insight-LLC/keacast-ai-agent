@@ -1,5 +1,6 @@
 // services/contextCache.service.js
 const redis = require('./redisService');
+const userCache = require('./userCacheOwnership');
 const { functionMap } = require('../tools/functionMap');
 const moment = require('moment');
 const momentTimezone = require('moment-timezone');
@@ -231,18 +232,9 @@ class ContextCacheService {
    */
   async invalidateUserCache(userId) {
     try {
-      const pattern = `*${userId}*`;
-      const keys = await redis.keys(pattern);
-      
-      if (keys.length > 0) {
-        await redis.del(...keys);
-        console.log('ContextCache: Invalidated', keys.length, 'cache entries for user', userId);
-      }
-      
-      return keys.length;
-    } catch (error) {
-      console.error('ContextCache: Error invalidating user cache:', error);
-      return 0;
+      return await userCache.invalidateUserCache(redis, userId);
+    } catch (_) {
+      throw new Error('Cache invalidation unavailable');
     }
   }
   
@@ -285,8 +277,7 @@ class ContextCacheService {
    */
   async getCacheStats(userId) {
     try {
-      const pattern = `*${userId}*`;
-      const keys = await redis.keys(pattern);
+      const keys = await userCache.userCacheKeys(redis, userId);
       
       const stats = {
         totalKeys: keys.length,
@@ -314,8 +305,7 @@ class ContextCacheService {
       
       return stats;
     } catch (error) {
-      console.error('ContextCache: Error getting cache stats:', error);
-      return { error: error.message };
+      throw new Error('Cache statistics unavailable');
     }
   }
   

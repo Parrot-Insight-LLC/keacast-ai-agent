@@ -6,8 +6,14 @@ const { totals } = require('./harness');
 
 const suites = [
   './cashflowAuth.test.js',
+  './userCacheOwnership.test.js',
+  './sessionAuthorization.test.js',
   './keaAccountAccess.test.js',
   './keaIdentity.test.js',
+  './legacyReadAuthorization.test.js',
+  './legacyRouteAuthorization.test.js',
+  './legacyHistoryController.test.js',
+  './requestUrlLogging.test.js',
   './schemasIdentity.test.js',
   './keaTelemetry.test.js',
   './keaAccountSnapshot.test.js',

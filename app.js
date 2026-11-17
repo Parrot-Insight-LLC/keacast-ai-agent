@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const morgan = require('morgan');
+const { createAccessLogger } = require('./middleware/accessLogging');
 const requestId = require('./middleware/requestId');
 const logging = require('./middleware/logging');
 const securityHeaders = require('./middleware/securityHeaders');
@@ -34,7 +34,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Logging
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(createAccessLogger());
 
 // Health check endpoint for load balancers
 app.get('/health', (req, res) => {

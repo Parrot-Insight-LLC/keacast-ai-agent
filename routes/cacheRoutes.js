@@ -5,10 +5,11 @@ const cacheController = require('../controllers/cacheController');
 const { cashflowAuth } = require('../middleware/cashflowAuth');
 
 const requireCashflowUser = cashflowAuth();
+const requireActiveCacheSession = cashflowAuth({ requireActiveSession: true });
 
 // Cache invalidation routes (per-user / per-account)
-router.delete('/user/:userId', requireCashflowUser, cacheController.invalidateUserCache);
-router.delete('/user/:userId/account/:accountId', requireCashflowUser, cacheController.invalidateAccountCache);
+router.delete('/user/:userId', requireActiveCacheSession, cacheController.invalidateUserCache);
+router.delete('/user/:userId/account/:accountId', requireActiveCacheSession, cacheController.invalidateAccountCache);
 
 // Admin-gated global flush routes — wipe LLM caches across EVERY user.
 // Require `x-admin-key: <ADMIN_CACHE_FLUSH_KEY>` header in production.
