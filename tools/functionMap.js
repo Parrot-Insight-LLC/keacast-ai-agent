@@ -19,6 +19,7 @@ const {
 const { getUserData, getSelectedKeacastAccounts, getSelectedAccount, getKeaAccountContext, getBalances, createTransaction, deleteTransaction, deleteGroupTransactions, getTransactionById, updateTransaction, getGoals, getGoal, previewGoalCadence, createGoal, updateGoal, deleteGoal, rememberFact, recallFacts } = require('./keacast_tool_layer');
 const moment = require('moment');
 const { frequencyLabel } = require('../utils/frequencyLabel');
+const { assertActiveCashflowSession } = require('../services/cashflowSessionAuthorization');
 
 // Smart data loading strategy to prevent memory issues
 const SMART_LIMITS = {
@@ -526,6 +527,7 @@ const functionMap = {
   },
 
   async createTransaction(args, ctx) {
+    await assertActiveCashflowSession(ctx?.token, ctx?.userId);
     const { userId, token, accountId } = ctx;
     const body = normalizeCreateTransactionInput(args, ctx);
     const result = await createTransaction({ userId, accountId, token, body });
@@ -550,6 +552,7 @@ const functionMap = {
   },
 
   async deleteTransaction(args, ctx) {
+    await assertActiveCashflowSession(ctx?.token, ctx?.userId);
     // Identity comes from ctx; the schema sends `transactionid` (older model
     // outputs may use transaction_id). scope='group' deletes EVERY occurrence
     // of a recurring series via its groupid; default deletes one occurrence.
@@ -585,6 +588,7 @@ const functionMap = {
   // from ctx; the payload is merged over the existing row so partial edits are
   // safe. The confirm-before-write gate is enforced upstream in executeToolCalls.
   async updateTransaction(args, ctx) {
+    await assertActiveCashflowSession(ctx?.token, ctx?.userId);
     const { userId, token } = ctx;
     const body = await buildUpdateTransactionInput(args, ctx);
     const result = await updateTransaction({ userId, transactionId: body.transactionid, token, body });
@@ -654,6 +658,7 @@ const functionMap = {
   },
 
   async createGoal(args, ctx) {
+    await assertActiveCashflowSession(ctx?.token, ctx?.userId);
     const { userId, token, accountId } = ctx;
     if (!accountId) throw new Error('No account selected — a goal must belong to an account.');
     const body = normalizeCreateGoalInput(args, ctx);
@@ -675,6 +680,7 @@ const functionMap = {
   },
 
   async updateGoal(args, ctx) {
+    await assertActiveCashflowSession(ctx?.token, ctx?.userId);
     const { userId, token } = ctx;
     const goalId = args.goalid || args.goal_id;
     if (!goalId) throw new Error('goalid is required to update a goal — find it via getGoals first.');
@@ -700,6 +706,7 @@ const functionMap = {
   },
 
   async deleteGoal(args, ctx) {
+    await assertActiveCashflowSession(ctx?.token, ctx?.userId);
     const { userId, token } = ctx;
     const goalId = args.goalid || args.goal_id;
     if (!goalId) throw new Error('goalid is required to delete a goal — find it via getGoals first.');
@@ -816,6 +823,7 @@ const functionMap = {
   // Persist a durable fact about the user. accountScoped=true ties it to the
   // currently selected account; otherwise it's a user-level fact.
   async rememberFact(args, ctx) {
+    await assertActiveCashflowSession(ctx?.token, ctx?.userId);
     const { userId, token, accountId } = ctx;
     const accountid = args.accountScoped ? accountId : null;
     const result = await rememberFact({

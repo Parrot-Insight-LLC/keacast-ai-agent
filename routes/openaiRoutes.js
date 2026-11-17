@@ -3,26 +3,29 @@ const router = express.Router();
 const { analyzeTransactions, chat, clearHistory, checkHistorySize, clearSessionById, repairSession, getChatHistory, autoCategorizeTransaction, invalidateAutoCategorizationKey, summarization } = require('../controllers/openaiController');
 const {redisTest} = require('../controllers/openaiController');
 const { cashflowAuth } = require('../middleware/cashflowAuth');
+const { requireSelfUser, requireLegacyAccount, requireSelfHistory } = require('../middleware/legacyReadAccess');
+const { sanitizeAccounts } = require('../services/legacyReadAuthorization');
 
 const requireCashflowUser = cashflowAuth();
+const requireActiveCashflowSession = cashflowAuth({ requireActiveSession: true });
 
 // Chat and analysis endpoints
 router.post('/chat', requireCashflowUser, chat);
-router.post('/summarize', analyzeTransactions);
+router.post('/summarize', requireCashflowUser, requireSelfHistory, analyzeTransactions);
 router.post('/auto-categorize', autoCategorizeTransaction);
 // Evicts the Redis cache for a single transaction — call when a user overrides
 // the suggested category so the next call for that merchant gets a fresh answer.
 router.post('/auto-categorize/invalidate', invalidateAutoCategorizationKey);
 
 // History management endpoints
-router.post('/chat-history', getChatHistory);
-router.delete('/clear-history', clearHistory);
-router.get('/check-history-size', checkHistorySize);
-router.delete('/clear-session/:sessionId', clearSessionById);
-router.post('/repair-session', repairSession);
+router.post('/chat-history', requireCashflowUser, requireSelfHistory, getChatHistory);
+router.delete('/clear-history', requireActiveCashflowSession, requireSelfHistory, clearHistory);
+router.get('/check-history-size', requireCashflowUser, requireSelfHistory, checkHistorySize);
+router.delete('/clear-session/:sessionId', requireActiveCashflowSession, requireSelfHistory, clearSessionById);
+router.post('/repair-session', requireActiveCashflowSession, requireSelfHistory, repairSession);
 
 // New paginated data endpoints for memory-efficient queries
-router.get('/accounts/:userId', async (req, res) => {
+router.get('/accounts/:userId', requireCashflowUser, requireSelfUser, async (req, res) => {
   try {
     const { userId } = req.params;
     const { page = 1, limit = 20 } = req.query;
@@ -32,7 +35,7 @@ router.get('/accounts/:userId', async (req, res) => {
     
     res.json({
       success: true,
-      data: result
+      data: sanitizeAccounts(result)
     });
   } catch (error) {
     console.error('Error fetching paginated accounts:', error);
@@ -44,7 +47,7 @@ router.get('/accounts/:userId', async (req, res) => {
   }
 });
 
-router.get('/transactions/:userId/:accountId', async (req, res) => {
+router.get('/transactions/:userId/:accountId', requireCashflowUser, requireLegacyAccount('TRANSACTION_READ'), async (req, res) => {
   try {
     const { userId, accountId } = req.params;
     const { page = 1, limit = 50, startDate, endDate } = req.query;
@@ -75,7 +78,7 @@ router.get('/transactions/:userId/:accountId', async (req, res) => {
   }
 });
 
-router.get('/forecasts/:accountId', async (req, res) => {
+router.get('/forecasts/:accountId', requireCashflowUser, requireLegacyAccount('FORECAST_READ'), async (req, res) => {
   try {
     const { accountId } = req.params;
     const { page = 1, limit = 25 } = req.query;
@@ -97,7 +100,7 @@ router.get('/forecasts/:accountId', async (req, res) => {
   }
 });
 
-router.get('/summary/:userId/:accountId', async (req, res) => {
+router.get('/summary/:userId/:accountId', requireCashflowUser, requireLegacyAccount('TRANSACTION_READ'), async (req, res) => {
   try {
     const { userId, accountId } = req.params;
     const { startDate, endDate } = req.query;
@@ -119,7 +122,7 @@ router.get('/summary/:userId/:accountId', async (req, res) => {
   }
 });
 
-router.post('/summarization', summarization);
+router.post('/summarization', requireCashflowUser, requireSelfHistory, summarization);
 
 // Smart Price Assist — direct (non-chat) entry point used by the cashflow
 // backend's shopping-list suggestions proxy. Propose-only: returns options,

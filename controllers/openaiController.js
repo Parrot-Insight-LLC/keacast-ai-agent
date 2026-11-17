@@ -1197,6 +1197,12 @@ function extractAuthFromRequest(req) {
   return { token, userId, authHeader: req.headers.authorization };
 }
 
+// Only used by the authenticated history/summary entry points. Leave unrelated
+// legacy identity contracts unchanged; the route guard rejects spoofed selectors.
+function extractHistoryAuth(req) {
+  return { ...extractAuthFromRequest(req), userId: req.cashflowUser?.id };
+}
+
 function extractContextFromBody(req) {
   const accounts = Array.isArray(req.body?.accounts) ? req.body.accounts : undefined;
   const categories = Array.isArray(req.body?.categories) ? req.body.categories : undefined;
@@ -4761,7 +4767,7 @@ exports.analyzeTransactions = async (req, res) => {
       history = [];
     }
 
-    const { token, userId, authHeader } = extractAuthFromRequest(req);
+    const { token, userId, authHeader } = extractHistoryAuth(req);
     let userContext = extractContextFromBody(req) || {};
 
     // (Optional) Preload via functionMap if missing
@@ -4928,7 +4934,7 @@ exports.summarization = async (req, res) => {
     };
     
     const sessionKey = buildSessionKey(req);
-    const { token, userId, authHeader } = extractAuthFromRequest(req);
+    const { token, userId, authHeader } = extractHistoryAuth(req);
 
     // ── Phase 2: Resolve compact Kea financial context ────────────────────
     // Resolution order (fastest → slowest):
@@ -6310,9 +6316,6 @@ exports.redisTest = async (req, res) => {
 exports.clearHistory = async (req, res) => {
   try {
     console.log('Clear history endpoint called');
-    console.log('Clear history: Request body:', req.body);
-    console.log('Clear history: Request query:', req.query);
-    console.log('Clear history: Request headers:', req.headers);
     
     const sessionKey = buildSessionKey(req);
     console.log('Clear history: Session key:', sessionKey);
@@ -6325,7 +6328,7 @@ exports.clearHistory = async (req, res) => {
     // rolling summary) for this user. Durable long-term facts are intentionally
     // PRESERVED — they're only removed via DELETE /assistant-memory. Fail-soft.
     try {
-      const { userId: clearUserId } = extractAuthFromRequest(req);
+      const clearUserId = req.cashflowUser?.id;
       if (clearUserId) {
         await redis.del(buildDialogueKey(clearUserId));
         await redis.del(buildSummaryKey(clearUserId));
@@ -6400,7 +6403,7 @@ exports.clearSessionById = async (req, res) => {
       return res.status(400).json({ error: 'Session ID is required' });
     }
     
-    const sessionKey = `session:${sessionId}`;
+    const sessionKey = buildSessionKey(req);
     console.log('Clear session by ID: Clearing session key:', sessionKey);
     
     try {

@@ -64,7 +64,7 @@ async function isCashflowSessionActive(jti, userId, queryFn, timeoutMs) {
     boundMs,
     'cashflowAuth user_sessions'
   );
-  return !!(rows && rows.length);
+  return Array.isArray(rows) && rows.some(row => row && String(row.id) === String(jti));
 }
 
 function cashflowAuth(options = {}) {
@@ -92,7 +92,9 @@ function cashflowAuth(options = {}) {
 
     let payload;
     try {
-      payload = jwt.verify(token, secret);
+      payload = options.requireActiveSession
+        ? jwt.verify(token, secret, { algorithms: ['HS256'] })
+        : jwt.verify(token, secret);
     } catch (err) {
       return res.status(401).json({
         error: 'Invalid or expired token',
@@ -102,7 +104,7 @@ function cashflowAuth(options = {}) {
     }
 
     // Reject non-session tokens (password-setup temp JWT, satellite share links).
-    if (payload.setup === true || payload.share) {
+    if (payload.setup === true || payload.share || (options.requireActiveSession && payload.sat)) {
       return res.status(401).json({
         error: 'Token is not a user session token',
         code: 'TOKEN_WRONG_KIND',
@@ -117,6 +119,18 @@ function cashflowAuth(options = {}) {
         code: 'TOKEN_NO_ID',
         requestId: req.id,
       });
+    }
+
+    if (options.requireActiveSession) {
+      const actorValid = (typeof userId === 'number' || typeof userId === 'string')
+        && /^\d+$/.test(String(userId)) && Number.isSafeInteger(Number(userId)) && Number(userId) > 0;
+      if (!actorValid || typeof payload.jti !== 'string' || !payload.jti.trim()) {
+        return res.status(401).json({
+          error: 'An active user session is required. Please log in again.',
+          code: 'SESSION_REQUIRED',
+          requestId: req.id,
+        });
+      }
     }
 
     if (payload.jti) {
@@ -136,6 +150,13 @@ function cashflowAuth(options = {}) {
           });
         }
       } catch (e) {
+        if (options.requireActiveSession) {
+          return res.status(503).json({
+            error: 'Session verification temporarily unavailable.',
+            code: 'SESSION_CHECK_UNAVAILABLE',
+            requestId: req.id,
+          });
+        }
         // Fail-soft: agent DB may not expose user_sessions. Documented as deferred
         // hard-fail in KEA_ARCHITECTURE.md. Signature check still applies.
         console.warn('cashflowAuth jti check failed (fail-soft):', e.message);
